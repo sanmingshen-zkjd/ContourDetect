@@ -248,7 +248,7 @@ MainWindow::MainWindow(const std::vector<InputSource>& sources,
     settings_("YourCompany", "Multi6DTracker")
 {
     setWindowFlags(Qt::FramelessWindowHint | Qt::Window);
-    setWindowTitle("Multi6DTracker");
+    setWindowTitle("MonoMeasure");
     if (QScreen* screen = QGuiApplication::primaryScreen()) {
       setGeometry(screen->availableGeometry());
     } else {
@@ -269,19 +269,12 @@ MainWindow::MainWindow(const std::vector<InputSource>& sources,
     connect(&captureThread_, &QThread::started, captureWorker_, &CaptureWorker::start);
     connect(this, &MainWindow::destroyed, captureWorker_, &CaptureWorker::stop);
 
-    solveWorker_ = new SolveWorker();
-    solveWorker_->setStaticData(&cams_, &tag_corner_map_);
-    solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true);
-    solveWorker_->setInitPose(R_wr_, t_wr_);
-    solveWorker_->moveToThread(&solveThread_);
+    // 单目测量版本：移除测量求解线程，仅保留采集与预处理。
 
     // Wire signals
     connect(captureWorker_, &CaptureWorker::framesReady, this, &MainWindow::onFramesFromWorker, Qt::QueuedConnection);
-    connect(captureWorker_, &CaptureWorker::framesReady, solveWorker_, &SolveWorker::onFrames, Qt::QueuedConnection);
-    connect(solveWorker_, &SolveWorker::poseReady, this, &MainWindow::onPoseFromWorker, Qt::QueuedConnection);
 
     captureThread_.start();
-    solveThread_.start();
 }
 
 MainWindow::~MainWindow() 
@@ -315,7 +308,7 @@ void MainWindow::buildUI() {
     titleLayout->setContentsMargins(10, 0, 0, 0);
     titleLayout->setSpacing(6);
 
-    QLabel* titleText = new QLabel("Multi6DTracker", titleBar);
+    QLabel* titleText = new QLabel("MonoMeasure", titleBar);
     titleText->setStyleSheet("color:#c7d2df;font-weight:600;");
     titleLayout->addWidget(titleText);
     titleLayout->addStretch(1);
@@ -366,7 +359,7 @@ void MainWindow::buildUI() {
     sv->setContentsMargins(6, 8, 6, 8);
     sv->setSpacing(10);
 
-    QLabel* appTitle = new QLabel("Multi6DTracker", sideBar);
+    QLabel* appTitle = new QLabel("MonoMeasure", sideBar);
     appTitle->setObjectName("sidebarTitle");
     appTitle->setWordWrap(true);
     appTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -379,7 +372,7 @@ void MainWindow::buildUI() {
 
     sideModeTabs_ = new QTabBar(sideBar);
     sideModeTabs_->addTab("Capture");
-    sideModeTabs_->addTab("Calibration");
+    sideModeTabs_->addTab("Preprocess");
     sideModeTabs_->addTab("Tracking");
     sideModeTabs_->setExpanding(true);
     sideModeTabs_->setShape(QTabBar::RoundedWest);
@@ -429,7 +422,7 @@ void MainWindow::buildUI() {
     // Top mode tabs
     modeTabs_ = new QTabWidget(central);
     modeTabs_->addTab(new QWidget(modeTabs_), "Capture");
-    modeTabs_->addTab(new QWidget(modeTabs_), "Calibration");
+    modeTabs_->addTab(new QWidget(modeTabs_), "Preprocess");
     modeTabs_->addTab(new QWidget(modeTabs_), "Tracking");
     modeTabs_->setCurrentIndex(0);
     modeTabs_->setVisible(false);
@@ -535,7 +528,7 @@ void MainWindow::buildUI() {
     btnFileMenu_->setMenu(fileMenu);
     connect(actAbout, &QAction::triggered, this, [this](){
       QMessageBox::information(this, "Software Info",
-                               "Multi6DTracker\n\nCapture / Calibration / Tracking workflow.");
+                               "MonoMeasure\n\nCapture / Preprocess / Tracking workflow.");
     });
     connect(actSaveProject_, &QAction::triggered, this, &MainWindow::onSaveProject);
     connect(actLoadProject_, &QAction::triggered, this, &MainWindow::onLoadProject);
@@ -789,7 +782,7 @@ void MainWindow::buildUI() {
     connect(angSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); });
 
     actionTabs_->addTab(tabCap, "Capture");
-    actionTabs_->addTab(tabCal, "Calibration");
+    actionTabs_->addTab(tabCal, "Preprocess");
     actionTabs_->addTab(tabTrk, "Tracking");
     // Right-side parameters must follow left mode; hide tab labels completely.
     if (actionTabs_->tabBar()) actionTabs_->tabBar()->hide();
@@ -1067,6 +1060,10 @@ void MainWindow::onAddCamera() {
     QMessageBox::information(this, "Add Camera", "Please switch to Capture tab to add camera sources.");
     return;
   }
+  if (!sources_.empty()) {
+    QMessageBox::information(this, "Add Camera", "Monocular mode supports only 1 source.");
+    return;
+  }
 
   InputSource s;
   s.is_cam = true;
@@ -1113,8 +1110,8 @@ void MainWindow::onAddVideo()
     QString path = QFileDialog::getOpenFileName(this, "Add Video", last,"Video (*.mp4 *.avi *.mov *.mkv);;All (*.*)");
     if (path.isEmpty()) return;
 
-    if ((int)activeSourceIndices().size() >= 2) {
-      QMessageBox::information(this, "Add Video", "Current tab already has 2 sources.");
+    if (!sources_.empty()) {
+      QMessageBox::information(this, "Add Video", "Monocular mode supports only 1 source.");
       return;
     }
 
@@ -1176,8 +1173,8 @@ void MainWindow::onAddImageSequence()
       return;
     }
 
-    if ((int)activeSourceIndices().size() >= 2) {
-      QMessageBox::information(this, "Add Image Sequence", "Current tab already has 2 sources.");
+    if (!sources_.empty()) {
+      QMessageBox::information(this, "Add Image Sequence", "Monocular mode supports only 1 source.");
       return;
     }
 
@@ -1255,7 +1252,7 @@ void MainWindow::onModeCalibration() {
   if (actionTabs_) actionTabs_->setCurrentIndex(1);
   rebuildSourceViews();
   updateSourceViews(last_frames_);
-  logLine("Switched to Calibration mode.");
+  logLine("Switched to Preprocess mode.");
 }
 
 void MainWindow::onModeTracking() {
@@ -1323,7 +1320,7 @@ void MainWindow::onModeTabChanged(int idx) {
     if (btnAddVideo_) btnAddVideo_->setVisible(true);
     if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
     if (actionTabs_) actionTabs_->setCurrentIndex(1);
-    logLine("Switched to Calibration mode.");
+    logLine("Switched to Preprocess mode.");
   } else {
     mode_ = TRACK;
     if (btnAddCam_) btnAddCam_->setVisible(false);
@@ -1433,8 +1430,8 @@ void MainWindow::updateStatus() {
   lblCaptured_->setText(QString("Captured: %1").arg(calibrator_->captured()));
   lblInliers_->setText(QString("Inliers: %1").arg(last_inliers_));
 
-  QString m = (mode_==CAPTURE) ? "Capture" : ((mode_==CALIB) ? "Calibration" : "Tracking");
-  statusBar()->showMessage(QString("Mode: %1 | Sources: %2 | Captured: %3 | Inliers: %4 | FPS: %5")
+  QString m = (mode_==CAPTURE) ? "Capture" : ((mode_==CALIB) ? "Preprocess" : "Tracking");
+  statusBar()->showMessage(QString("Mode: %1 | Source: %2 | Captured: %3 | Inliers: %4 | FPS: %5")
     .arg(m)
     .arg((int)sources_.size())
     .arg(calibrator_->captured())
@@ -1665,131 +1662,8 @@ void MainWindow::onResetFrames() {
 }
 
 void MainWindow::onComputeCalibration() {
-  if (cbCalibMethod_ && cbCalibMethod_->currentIndex() != 0) {
-    QMessageBox::information(this, "Calibration", "This calibration method is reserved and not implemented yet.");
-    return;
-  }
-  // Use all frames from the two Calibration-tab sources (no Grab required).
-  std::vector<int> idx;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    for (int i=0;i<(int)sources_.size();++i) {
-      if (sources_[i].mode_owner == (int)CALIB && !sources_[i].is_cam) idx.push_back(i);
-    }
-  }
-  if (idx.size() != 2) {
-    QMessageBox::warning(this, "Calibration", "Calibration tab must have exactly 2 video/image-sequence sources.");
-    return;
-  }
-
-  has_computed_calib_ = false;
-  if (btnSaveCalib_) btnSaveCalib_->setEnabled(false);
-  calib_pairs_.clear();
-  calib_pair_rmse_.clear();
-  if (calibErrorTable_) calibErrorTable_->setRowCount(0);
-  if (calibProgressBar_) {
-    calibProgressBar_->setRange(0, 100);
-    calibProgressBar_->setValue(0);
-  }
-  if (lblCalibProgress_) lblCalibProgress_->setText("Progress: preparing...");
-
-  stopCaptureBlocking();
-  detect_overlay_cache_.clear();
-
-  int totalFrames = 0;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    for (int k : idx) {
-      if (k < 0 || k >= (int)sources_.size()) continue;
-      if (sources_[k].is_image_seq) sources_[k].seq_idx = 0;
-      else if (sources_[k].cap.isOpened()) {
-        sources_[k].cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-      }
-    }
-    auto frameCount = [&](const InputSource& s)->int {
-      if (s.is_image_seq) return s.seq_files.size();
-      if (!s.cap.isOpened()) return 0;
-      return std::max(0, (int)s.cap.get(cv::CAP_PROP_FRAME_COUNT));
-    };
-    int c0 = frameCount(sources_[idx[0]]);
-    int c1 = frameCount(sources_[idx[1]]);
-    totalFrames = (c0 > 0 && c1 > 0) ? std::min(c0, c1) : 0;
-  }
-  if (calibProgressBar_ && totalFrames > 0) calibProgressBar_->setRange(0, totalFrames);
-
-  auto readNext = [](InputSource& s, cv::Mat& out)->bool {
-    if (s.is_image_seq) {
-      if (s.seq_files.isEmpty() || s.seq_idx >= s.seq_files.size()) return false;
-      out = cv::imread(s.seq_files[s.seq_idx].toStdString(), cv::IMREAD_COLOR);
-      s.seq_idx++;
-      return !out.empty();
-    }
-    if (!s.cap.isOpened()) return false;
-    return s.cap.read(out) && !out.empty();
-  };
-
-  int frameId = 0;
-  MultiCamCalibrator previewCalib(2, cv::Size(board_w_, board_h_), square_);
-  while (true) {
-    cv::Mat a, b;
-    {
-      QMutexLocker lock(&sources_mutex_);
-      if (!readNext(sources_[idx[0]], a) || !readNext(sources_[idx[1]], b)) break;
-    }
-    CalibrationPair p;
-    p.frame_id = frameId;
-    p.left = a;
-    p.right = b;
-    calib_pairs_.push_back(std::move(p));
-
-    // Preview current frame and chessboard detection on the left viewer while scanning.
-    std::vector<cv::Mat> pair = {a, b};
-    std::vector<std::vector<cv::Point2f>> corners;
-    std::vector<bool> ok;
-    previewCalib.detectAndMaybeStore(pair, false, &corners, &ok);
-    cv::Mat visA = a.clone();
-    cv::Mat visB = b.clone();
-    if (!corners.empty() && corners.size() >= 2) {
-      cv::drawChessboardCorners(visA, cv::Size(board_w_, board_h_), corners[0], !ok.empty() && ok[0]);
-      cv::drawChessboardCorners(visB, cv::Size(board_w_, board_h_), corners[1], ok.size() > 1 && ok[1]);
-    }
-    {
-      QMutexLocker frameLock(&frames_mutex_);
-      if (idx[0] >= 0 && idx[0] < (int)last_frames_.size()) last_frames_[idx[0]] = visA;
-      if (idx[1] >= 0 && idx[1] < (int)last_frames_.size()) last_frames_[idx[1]] = visB;
-      updateSourceViews(last_frames_);
-    }
-
-    frameId++;
-
-    if (calibProgressBar_ && totalFrames > 0) calibProgressBar_->setValue(std::min(frameId, totalFrames));
-    play_frame_ = std::max<int64_t>(0, frameId - 1);
-    updateProgressUI(play_frame_, std::max<int64_t>(1, totalFrames));
-    if (lblCalibProgress_) lblCalibProgress_->setText(QString("Progress: scanning %1 / %2").arg(frameId).arg(std::max(totalFrames, frameId)));
-    QApplication::processEvents();
-  }
-
-  if (calib_pairs_.empty()) {
-    QMessageBox::warning(this, "Calibration", "No frame pairs found from the selected sources.");
-    return;
-  }
-
-  if (calibErrorTable_) {
-    calibErrorTable_->setRowCount((int)calib_pairs_.size());
-    for (int i = 0; i < (int)calib_pairs_.size(); ++i) {
-      QTableWidgetItem* useItem = new QTableWidgetItem();
-      useItem->setCheckState(Qt::Checked);
-      useItem->setFlags(useItem->flags() | Qt::ItemIsUserCheckable);
-      calibErrorTable_->setItem(i, 0, useItem);
-      calibErrorTable_->setItem(i, 1, new QTableWidgetItem(QString::number(calib_pairs_[i].frame_id)));
-      calibErrorTable_->setItem(i, 2, new QTableWidgetItem("-"));
-    }
-  }
-
-  std::vector<int> selected;
-  selected.reserve(calib_pairs_.size());
-  for (int i = 0; i < (int)calib_pairs_.size(); ++i) selected.push_back(i);
-  if (!runCalibrationOnPairs(selected, true)) return;
+  QMessageBox::information(this, "Preprocess", "Calibration solving is removed. Use this tab for preprocessing only.");
+  logLine("Calibration solver removed in monocular preprocess mode.");
 }
 
 bool MainWindow::runCalibrationOnPairs(const std::vector<int>& pairIndices, bool updateTable) {
@@ -1950,143 +1824,8 @@ void MainWindow::onLoadCalibYaml() {
 //}
 
 void MainWindow::onDetectAllTrackingFrames() {
-  if (mode_ != TRACK) {
-    QMessageBox::information(this, "Tracking", "Switch to Tracking mode first.");
-    return;
-  }
-  if (!tagmap_loaded_) {
-    QMessageBox::warning(this, "Tracking", "Load Tag Map first.");
-    return;
-  }
-
-  std::vector<int> idx;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    for (int i = 0; i < (int)sources_.size(); ++i) {
-      if (sources_[i].mode_owner == (int)TRACK && !sources_[i].is_cam) idx.push_back(i);
-    }
-  }
-  if (idx.empty()) {
-    QMessageBox::warning(this, "Tracking", "No video/image-sequence sources found in Tracking mode.");
-    return;
-  }
-
-  stopCaptureBlocking();
-  detect_overlay_cache_.clear();
-
-  int totalFrames = 0;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    auto frameCount = [&](const InputSource& s)->int {
-      if (s.is_image_seq) return s.seq_files.size();
-      if (!s.cap.isOpened()) return 0;
-      return std::max(0, (int)s.cap.get(cv::CAP_PROP_FRAME_COUNT));
-    };
-    totalFrames = INT_MAX;
-    for (int k : idx) {
-      if (sources_[k].is_image_seq) sources_[k].seq_idx = 0;
-      else if (sources_[k].cap.isOpened()) sources_[k].cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-      int c = frameCount(sources_[k]);
-      if (c > 0) totalFrames = std::min(totalFrames, c);
-    }
-    if (totalFrames == INT_MAX) totalFrames = 0;
-  }
-
-  if (calibProgressBar_) {
-    calibProgressBar_->setRange(0, totalFrames > 0 ? totalFrames : 0);
-    calibProgressBar_->setValue(0);
-  }
-  if (lblCalibProgress_) lblCalibProgress_->setText("Progress: tracking detect...");
-
-  auto readNext = [](InputSource& s, cv::Mat& out)->bool {
-    if (s.is_image_seq) {
-      if (s.seq_files.isEmpty() || s.seq_idx >= s.seq_files.size()) return false;
-      out = cv::imread(s.seq_files[s.seq_idx].toStdString(), cv::IMREAD_COLOR);
-      s.seq_idx++;
-      return !out.empty();
-    }
-    if (!s.cap.isOpened()) return false;
-    return s.cap.read(out) && !out.empty();
-  };
-
-  int processed = 0;
-  int framesWithDetections = 0;
-  int poseOkCount = 0;
-
-  while (true) {
-    std::vector<cv::Mat> frames(idx.size());
-    {
-      QMutexLocker lock(&sources_mutex_);
-      bool ok = true;
-      for (int i = 0; i < (int)idx.size(); ++i) {
-        if (!readNext(sources_[idx[i]], frames[i])) { ok = false; break; }
-      }
-      if (!ok) break;
-    }
-
-    std::vector<cv::Mat> vis = frames;
-    AprilTagDetections det;
-    std::vector<Observation> obs;
-    buildObservationsFromFrames(frames, tag_corner_map_, obs, &det, tag_dict_id_);
-
-    bool hasDet = false;
-    for (int i = 0; i < (int)vis.size(); ++i) {
-      if (i < (int)det.ids_per_cam.size() && !det.ids_per_cam[i].empty()) hasDet = true;
-      if (i < (int)det.ids_per_cam.size()) {
-        cv::aruco::drawDetectedMarkers(vis[i], det.corners_per_cam[i], det.ids_per_cam[i]);
-      }
-      cv::putText(vis[i], "cam" + std::to_string(i), cv::Point(15,30),
-                  cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0,255,0), 2, cv::LINE_AA);
-    }
-    if (hasDet) framesWithDetections++;
-
-    if ((int)cams_.size() == (int)frames.size() && obs.size() >= 3) {
-      auto res = estimatePoseRansac(cams_, obs, R_wr_, t_wr_, ransac_iters_, inlier_thresh_px_);
-      if (res.ok) {
-        R_wr_ = res.R_wr;
-        t_wr_ = res.t_wr;
-        Eigen::AngleAxisd aa(res.R_wr);
-        Eigen::Vector3d aavec = aa.axis() * aa.angle();
-        last_inliers_ = (int)res.inliers.size();
-        traj_.push_back(TrajRow{QDateTime::currentMSecsSinceEpoch(), t_wr_, aavec, last_inliers_});
-        poseOkCount++;
-        if (lblPose_) {
-          lblPose_->setText(QString("Pose t=[%1, %2, %3], aa=[%4, %5, %6], inliers=%7")
-                            .arg(t_wr_.x(),0,'f',4).arg(t_wr_.y(),0,'f',4).arg(t_wr_.z(),0,'f',4)
-                            .arg(aavec.x(),0,'f',4).arg(aavec.y(),0,'f',4).arg(aavec.z(),0,'f',4)
-                            .arg(last_inliers_));
-        }
-      }
-    }
-
-    for (int i = 0; i < (int)idx.size(); ++i) {
-      detect_overlay_cache_[idx[i]][processed] = vis[i];
-    }
-
-    std::vector<cv::Mat> uiFrames;
-    {
-      QMutexLocker frameLock(&frames_mutex_);
-      if ((int)last_frames_.size() < (int)sources_.size()) last_frames_.resize(sources_.size());
-      for (int i = 0; i < (int)idx.size(); ++i) last_frames_[idx[i]] = vis[i];
-      uiFrames = last_frames_;
-    }
-    updateSourceViews(uiFrames);
-    refreshTrajectoryPlot();
-
-    processed++;
-    if (calibProgressBar_) calibProgressBar_->setValue(processed);
-    if (lblCalibProgress_) {
-      lblCalibProgress_->setText(QString("Progress: tracking detect %1 / %2 | det=%3 | pose=%4")
-                                 .arg(processed)
-                                 .arg(std::max(processed, totalFrames))
-                                 .arg(framesWithDetections)
-                                 .arg(poseOkCount));
-    }
-    QApplication::processEvents();
-  }
-
-  logLine(QString("Detect All finished. processed=%1 detFrames=%2 poseOK=%3")
-          .arg(processed).arg(framesWithDetections).arg(poseOkCount));
+  QMessageBox::information(this, "Tracking", "Measurement algorithm is removed in this monocular version.");
+  logLine("Detect/Pose algorithm removed in monocular version.");
 }
 
 // ----------------- Sources: pause/resume -----------------
@@ -2106,31 +1845,9 @@ void MainWindow::onPauseResumeSelected() {
 
 // ----------------- Tracking: export trajectory -----------------
 void MainWindow::onExportTrajectory() {
-  if (traj_.empty()) {
-    QMessageBox::information(this, "Export", "No trajectory collected yet. Turn Pose ON and ensure tags are detected.");
-    return;
-  }
-  QString path = QFileDialog::getSaveFileName(this, "Export Trajectory CSV", "trajectory.csv", "CSV (*.csv)");
-  if (path.isEmpty()) return;
-
-  QFile f(path);
-  if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-    QMessageBox::warning(this, "Export", "Failed to open file for writing.");
-    return;
-  }
-  QByteArray header = "t_ms,tx,ty,tz,aax,aay,aaz,inliers\n";
-  f.write(header);
-  for (const auto& r : traj_) {
-    QString line = QString("%1,%2,%3,%4,%5,%6,%7,%8\n")
-      .arg(r.t_ms)
-      .arg(r.t.x(),0,'f',9).arg(r.t.y(),0,'f',9).arg(r.t.z(),0,'f',9)
-      .arg(r.aa.x(),0,'f',9).arg(r.aa.y(),0,'f',9).arg(r.aa.z(),0,'f',9)
-      .arg(r.inliers);
-    f.write(line.toUtf8());
-  }
-  f.close();
-  logLine(QString("Trajectory exported: %1 (rows=%2)").arg(path).arg(traj_.size()));
+  QMessageBox::information(this, "Export", "Trajectory export is unavailable because measurement algorithm is removed.");
 }
+
 
 // ----------------- Project config: save/load -----------------
 void MainWindow::onSaveProject() {
