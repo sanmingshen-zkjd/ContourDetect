@@ -1,31 +1,33 @@
-# ContourDetect（单目版架构）
+# ContourDetect（Qt/C++ 单目版）
 
-本仓库按照 **Multi-Cam6DPoseTracker 的播放器设计思路**重构为单目流程，核心链路为：
+按你的要求，项目保持 **Qt + C++** 开发框架，并参考 Multi-Cam6DPoseTracker 的播放器架构改为单目处理：
 
-1. **Player**（完整保留播放器能力）
-2. **PreProcess**（替代原始标定 Calibration）
-3. **Measurement**（测量部分保持不变接口）
+- Player（保留播放器核心能力）
+- PreProcess（替代原 Calibration）
+- Measurement（测量逻辑接口保持不变）
 
-## 架构映射
+## 架构
 
-- Multi-Cam 的多路相机播放 -> 单路 `PlayerController`
-- Calibration -> `PreProcessPipeline`
-- Measurement -> `MeasurementEngine`
-
-## 目录
-
-- `src/contour_detect/player.py`：播放器控制（播放/暂停/跳转/逐帧/循环/变速）
-- `src/contour_detect/preprocess.py`：单目预处理配置与流程
-- `src/contour_detect/measurement.py`：测量引擎（接口保持稳定）
-- `src/contour_detect/app.py`：应用编排（Player -> PreProcess -> Measurement）
-
-## 快速使用
-
-```python
-from contour_detect import MonocularContourApp
-
-app = MonocularContourApp()
-app.load_frames(["f0", "f1", "f2"])
-result = app.process_current()
-print(result)
+```text
+MainWindow (Qt Widgets)
+   -> MonocularContourApp
+      -> PlayerController
+      -> PreProcessPipeline
+      -> MeasurementEngine
 ```
+
+## 功能对应
+
+- 播放器：播放/暂停、逐帧、seek、循环模式、变速。
+- 单目预处理：`PreProcessPipeline` 统一处理入口。
+- 测量：继续以预处理结果为输入，输出 `MeasurementResult`。
+
+## 构建
+
+```bash
+cmake -S . -B build
+cmake --build build
+./build/ContourDetectQt
+```
+
+> 依赖：Qt6 Widgets、CMake 3.21+、C++17。
