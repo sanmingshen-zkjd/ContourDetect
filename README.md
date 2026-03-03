@@ -30,4 +30,4 @@ cmake --build build
 ./build/ContourDetectQt
 ```
 
-> 依赖：Qt6 Widgets、CMake 3.21+、C++17。
+> 依赖：Qt5.15 Widgets、CMake 3.21+、C++17。

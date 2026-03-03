@@ -7,7 +7,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets)
 
 add_executable(ContourDetectQt
     src/main.cpp
@@ -20,4 +20,4 @@ add_executable(ContourDetectQt
 
 target_include_directories(ContourDetectQt PRIVATE src)
 
-target_link_libraries(ContourDetectQt PRIVATE Qt6::Widgets)
+target_link_libraries(ContourDetectQt PRIVATE Qt5::Widgets)
