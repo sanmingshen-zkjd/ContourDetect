@@ -757,57 +757,66 @@ void MainWindow::buildUI() {
     visScrollArea->setWidget(visContainer);
     trkVisRoot->addWidget(visScrollArea);
 
-    btnLoadTag_ = new QPushButton("Load Tag Map (TXT)", tabObj);
-    btnLoadYaml_ = new QPushButton("Load Calibration (YAML)", tabObj);
-  //  chkPose_ = new QCheckBox("Pose Estimation ON", tabObj);
-  //  chkPose_->setChecked(false);
+    trkMainLayout->addWidget(new QLabel("Step 1: 阈值分割设置", tabObj));
+    QGroupBox* gbThresh = new QGroupBox("Threshold", tabObj);
+    QGridLayout* tg = new QGridLayout(gbThresh);
 
-    QGroupBox* gbParams = new QGroupBox("Object Define Parameters", tabObj);
-    QGridLayout* tg = new QGridLayout(gbParams);
-    spRansacIters_ = new QSpinBox(gbParams);
-    spRansacIters_->setRange(10, 5000);
-    spRansacIters_->setValue(ransac_iters_);
-    spInlierThresh_ = new QDoubleSpinBox(gbParams);
-    spInlierThresh_->setRange(0.1, 50.0);
-    spInlierThresh_->setDecimals(2);
-    spInlierThresh_->setValue(inlier_thresh_px_);
-    cbTagDict_ = new QComboBox(gbParams);
-    cbTagDict_->addItem("APRILTAG_36h11", (int)cv::aruco::DICT_APRILTAG_36h11);
-    cbTagDict_->addItem("APRILTAG_25h9",  (int)cv::aruco::DICT_APRILTAG_25h9);
-    cbTagDict_->addItem("APRILTAG_16h5",  (int)cv::aruco::DICT_APRILTAG_16h5);
-    cbTagDict_->setCurrentIndex(0);
+    cbThreshType_ = new QComboBox(gbThresh);
+    cbThreshType_->addItem("Auto Threshold (Global)");
+    cbThreshType_->addItem("Auto Local Threshold");
 
-    tg->addWidget(new QLabel("RANSAC iters:"), 0, 0);
-    tg->addWidget(spRansacIters_, 0, 1);
-    tg->addWidget(new QLabel("Inlier thresh (px):"), 1, 0);
-    tg->addWidget(spInlierThresh_, 1, 1);
-    tg->addWidget(new QLabel("Tag dictionary:"), 2, 0);
-    tg->addWidget(cbTagDict_, 2, 1);
-    gbParams->setLayout(tg);
+    cbGlobalMethod_ = new QComboBox(gbThresh);
+    cbGlobalMethod_->addItem("Otsu");
+    cbGlobalMethod_->addItem("Triangle");
 
-    lblFps_ = new QLabel("FPS: 0", tabObj);
-    btnDetectAll_ = new QPushButton("Detect", tabObj);
-    lblInliers_ = new QLabel("Points: 0", tabObj);
-    lblPose_ = new QLabel("Object status: -", tabObj);
-    lblPose_->setWordWrap(true);
+    cbLocalMethod_ = new QComboBox(gbThresh);
+    cbLocalMethod_->addItem("Mean");
+    cbLocalMethod_->addItem("Gaussian");
 
-    trkMainLayout->addWidget(btnLoadTag_);
-    lblTagPath_ = new QLabel("TagMap: (none)", tabObj);
-    trkMainLayout->addWidget(lblTagPath_);
-    trkMainLayout->addWidget(btnLoadYaml_);
-    lblYamlPath_ = new QLabel("Calib: (none)", tabObj);
-    trkMainLayout->addWidget(lblYamlPath_);
-    trkMainLayout->addWidget(gbParams);
-   // trkMainLayout->addWidget(chkPose_);
-    trkMainLayout->addWidget(btnDetectAll_);
-    btnExportTraj_ = new QPushButton("Export Result CSV", tabObj);
-    trkMainLayout->addWidget(btnExportTraj_);
-    trkMainLayout->addWidget(lblInliers_);
-    trkMainLayout->addWidget(lblPose_);
-    trkMainLayout->addWidget(lblFps_);
-    lblLatency_ = new QLabel("Latency: 0 ms", tabObj);
-    trkMainLayout->addWidget(lblLatency_);
+    slObjectThresh_ = new QSlider(Qt::Horizontal, gbThresh);
+    spObjectThresh_ = new QSpinBox(gbThresh);
+    slObjectThresh_->setRange(0, 255);
+    spObjectThresh_->setRange(0, 255);
+    slObjectThresh_->setValue(128);
+    spObjectThresh_->setValue(128);
+
+    chkInvertBinary_ = new QCheckBox("反色 (Invert)", gbThresh);
+    spLocalBlockSize_ = new QSpinBox(gbThresh);
+    spLocalBlockSize_->setRange(3, 99);
+    spLocalBlockSize_->setSingleStep(2);
+    spLocalBlockSize_->setValue(31);
+    spLocalK_ = new QDoubleSpinBox(gbThresh);
+    spLocalK_->setRange(-50.0, 50.0);
+    spLocalK_->setDecimals(2);
+    spLocalK_->setValue(5.0);
+
+    tg->addWidget(new QLabel("Type", gbThresh), 0, 0);
+    tg->addWidget(cbThreshType_, 0, 1, 1, 3);
+    tg->addWidget(new QLabel("Global method", gbThresh), 1, 0);
+    tg->addWidget(cbGlobalMethod_, 1, 1);
+    tg->addWidget(new QLabel("Local method", gbThresh), 1, 2);
+    tg->addWidget(cbLocalMethod_, 1, 3);
+    tg->addWidget(new QLabel("Threshold [0,255]", gbThresh), 2, 0);
+    tg->addWidget(slObjectThresh_, 2, 1, 1, 2);
+    tg->addWidget(spObjectThresh_, 2, 3);
+    tg->addWidget(new QLabel("Local block size", gbThresh), 3, 0);
+    tg->addWidget(spLocalBlockSize_, 3, 1);
+    tg->addWidget(new QLabel("Local k/C", gbThresh), 3, 2);
+    tg->addWidget(spLocalK_, 3, 3);
+    tg->addWidget(chkInvertBinary_, 4, 0, 1, 2);
+    gbThresh->setLayout(tg);
+
+    trkMainLayout->addWidget(gbThresh);
+
+    trkMainLayout->addWidget(new QLabel("Binary Preview", tabObj));
+    lblBinaryPreview_ = new QLabel(tabObj);
+    lblBinaryPreview_->setMinimumSize(280, 180);
+    lblBinaryPreview_->setAlignment(Qt::AlignCenter);
+    lblBinaryPreview_->setStyleSheet("background:#111;border:1px solid #3a4250;color:#9aa7b8;");
+    lblBinaryPreview_->setText("No binary preview");
+    trkMainLayout->addWidget(lblBinaryPreview_);
     trkMainLayout->addStretch(1);
+
 
     btnAddVisChart_ = new QPushButton("add gragh", tabVis);
     visChartsLayout_->addWidget(btnAddVisChart_);
@@ -856,15 +865,16 @@ void MainWindow::buildUI() {
     visChartsLayout_->addWidget(lblTrajAngPlot_);
     visChartsLayout_->addStretch(1);
 
-    connect(btnLoadTag_, &QPushButton::clicked, this, &MainWindow::onLoadTagMap);
-    connect(btnLoadYaml_, &QPushButton::clicked, this, &MainWindow::onLoadCalibYaml);
-  //  connect(chkPose_, &QCheckBox::toggled, this, &MainWindow::onTogglePose);
-    connect(btnDetectAll_, &QPushButton::clicked, this, &MainWindow::onDetectAllTrackingFrames);
-    connect(btnExportTraj_, &QPushButton::clicked, this, &MainWindow::onExportTrajectory);
     connect(btnAddVisChart_, &QPushButton::clicked, this, &MainWindow::onAddVisualizationChart);
-    connect(spRansacIters_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ ransac_iters_=v; if(solveWorker_) solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true); });
-    connect(spInlierThresh_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v){ inlier_thresh_px_=v; if(solveWorker_) solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true); });
-    connect(cbTagDict_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ tag_dict_id_=cbTagDict_->currentData().toInt(); if(solveWorker_) solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true); });
+
+    connect(cbThreshType_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onObjectThresholdParamsChanged);
+    connect(cbGlobalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onObjectThresholdParamsChanged);
+    connect(cbLocalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onObjectThresholdParamsChanged);
+    connect(chkInvertBinary_, &QCheckBox::toggled, this, &MainWindow::onObjectThresholdParamsChanged);
+    connect(slObjectThresh_, &QSlider::valueChanged, this, [this](int v){ if (spObjectThresh_ && spObjectThresh_->value()!=v) spObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
+    connect(spObjectThresh_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ if (slObjectThresh_ && slObjectThresh_->value()!=v) slObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
+    connect(spLocalBlockSize_, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
+    connect(spLocalK_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
 
     lblTrajPosPlot_->setContextMenuPolicy(Qt::CustomContextMenu);
     lblTrajAngPlot_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -1440,6 +1450,55 @@ void MainWindow::onPreprocessParamsChanged() {
   updateSourceViews(frames);
 }
 
+void MainWindow::onObjectThresholdParamsChanged() {
+  std::vector<cv::Mat> frames;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    frames = last_frames_;
+  }
+  if (frames.empty()) return;
+  for (const auto& f : frames) {
+    if (f.empty()) continue;
+    cv::Mat bin = makeObjectBinaryPreview(applyPreprocess(f));
+    if (!bin.empty() && lblBinaryPreview_) {
+      QImage qi = matToQImage(bin);
+      lblBinaryPreview_->setPixmap(QPixmap::fromImage(qi).scaled(lblBinaryPreview_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+    break;
+  }
+}
+
+cv::Mat MainWindow::makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalThreshold) const {
+  if (src.empty()) return cv::Mat();
+  cv::Mat gray;
+  if (src.channels()==3) cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
+  else if (src.channels()==4) cv::cvtColor(src, gray, cv::COLOR_BGRA2GRAY);
+  else gray = src.clone();
+
+  cv::Mat bin;
+  const bool local = cbThreshType_ && cbThreshType_->currentIndex() == 1;
+  if (!local) {
+    if (cbGlobalMethod_ && cbGlobalMethod_->currentIndex() == 1) {
+      double t = cv::threshold(gray, bin, 0, 255, cv::THRESH_BINARY | cv::THRESH_TRIANGLE);
+      if (outGlobalThreshold) *outGlobalThreshold = (int)std::round(t);
+    } else {
+      double t = cv::threshold(gray, bin, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+      if (outGlobalThreshold) *outGlobalThreshold = (int)std::round(t);
+    }
+  } else {
+    int block = spLocalBlockSize_ ? spLocalBlockSize_->value() : 31;
+    if (block % 2 == 0) block += 1;
+    double c = spLocalK_ ? spLocalK_->value() : 5.0;
+    int method = (cbLocalMethod_ && cbLocalMethod_->currentIndex()==1) ? cv::ADAPTIVE_THRESH_GAUSSIAN_C : cv::ADAPTIVE_THRESH_MEAN_C;
+    cv::adaptiveThreshold(gray, bin, 255, method, cv::THRESH_BINARY, block, c);
+    if (outGlobalThreshold) *outGlobalThreshold = spObjectThresh_ ? spObjectThresh_->value() : 128;
+  }
+
+  if (chkInvertBinary_ && chkInvertBinary_->isChecked()) cv::bitwise_not(bin, bin);
+  cv::cvtColor(bin, bin, cv::COLOR_GRAY2BGR);
+  return bin;
+}
+
 void MainWindow::onApplyLineProps() {
   QColor c = QColor(80,220,255);
   if (cbLineColor_) c = cbLineColor_->currentData().value<QColor>();
@@ -1636,8 +1695,8 @@ cv::Mat MainWindow::applyPreprocess(const cv::Mat& src) const {
 }
 
 void MainWindow::updateStatus() {
-  lblCaptured_->setText(QString("Captured: %1").arg(calibrator_->captured()));
-  lblInliers_->setText(QString("Inliers: %1").arg(last_inliers_));
+  if (lblCaptured_) lblCaptured_->setText(QString("Captured: %1").arg(calibrator_->captured()));
+  if (lblInliers_) lblInliers_->setText(QString("Inliers: %1").arg(last_inliers_));
 
   QString m = "Source";
   if (stepTabs_) {
@@ -1688,6 +1747,24 @@ void MainWindow::onTick() {
   // repeatedly accumulating visual detections on static frames.
 
   updateSourceViews(vis);
+
+  // ObjectDefine small binary preview
+  if (lblBinaryPreview_) {
+    for (const auto& f : vis) {
+      if (f.empty()) continue;
+      int autoT = spObjectThresh_ ? spObjectThresh_->value() : 128;
+      cv::Mat bin = makeObjectBinaryPreview(f, &autoT);
+      if (!bin.empty()) {
+        if (slObjectThresh_ && cbThreshType_ && cbThreshType_->currentIndex()==0) {
+          if (slObjectThresh_->value() != autoT) slObjectThresh_->setValue(autoT);
+          if (spObjectThresh_ && spObjectThresh_->value() != autoT) spObjectThresh_->setValue(autoT);
+        }
+        QImage qi = matToQImage(bin);
+        lblBinaryPreview_->setPixmap(QPixmap::fromImage(qi).scaled(lblBinaryPreview_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+      }
+      break;
+    }
+  }
 
   if (show_docks_) updateSourceDocks(frames);
   updateStatus();
@@ -1747,14 +1824,13 @@ QJsonObject MainWindow::toProjectJson() const {
 }
 
 bool MainWindow::fromProjectJson(const QJsonObject& o) {
-  if (o.contains("board_w")) spBoardW_->setValue(o["board_w"].toInt(board_w_));
-  if (o.contains("board_h")) spBoardH_->setValue(o["board_h"].toInt(board_h_));
-  if (o.contains("square")) spSquare_->setValue(o["square"].toDouble(square_));
-  if (o.contains("ransac_iters")) spRansacIters_->setValue(o["ransac_iters"].toInt(ransac_iters_));
-  if (o.contains("inlier_thresh_px")) spInlierThresh_->setValue(o["inlier_thresh_px"].toDouble(inlier_thresh_px_));
-  if (o.contains("tag_dict_id")) {
+  if (o.contains("board_w") && spBoardW_) spBoardW_->setValue(o["board_w"].toInt(board_w_));
+  if (o.contains("board_h") && spBoardH_) spBoardH_->setValue(o["board_h"].toInt(board_h_));
+  if (o.contains("square") && spSquare_) spSquare_->setValue(o["square"].toDouble(square_));
+  if (o.contains("ransac_iters") && spRansacIters_) spRansacIters_->setValue(o["ransac_iters"].toInt(ransac_iters_));
+  if (o.contains("inlier_thresh_px") && spInlierThresh_) spInlierThresh_->setValue(o["inlier_thresh_px"].toDouble(inlier_thresh_px_));
+  if (o.contains("tag_dict_id") && cbTagDict_) {
     int did = o["tag_dict_id"].toInt(tag_dict_id_);
-    // set combo if present
     for (int i=0;i<cbTagDict_->count();++i) {
       if (cbTagDict_->itemData(i).toInt() == did) { cbTagDict_->setCurrentIndex(i); break; }
     }

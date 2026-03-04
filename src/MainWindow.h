@@ -162,6 +162,7 @@ private slots:
   void onPreprocessParamsChanged();
   void onPreprocessAuto();
   void onApplyLineProps();
+  void onObjectThresholdParamsChanged();
 
 private:
   void buildUI();
@@ -195,6 +196,7 @@ private:
   void updateStatus();
   cv::Mat applyPreprocess(const cv::Mat& src) const;
   void updateScaleStatus(double pxLen);
+  cv::Mat makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalThreshold=nullptr) const;
   bool runCalibrationOnPairs(const std::vector<int>& pairIndices, bool updateTable);
   void refreshTrajectoryPlot();
   void onAddVisualizationChart();
@@ -318,6 +320,17 @@ private:
   QLabel* lblPreprocessHint_=nullptr;
   QPushButton* btnPreAuto_=nullptr;
   QLabel* lblScaleInfo_=nullptr;
+
+  // ObjectDefine tab
+  QComboBox* cbThreshType_=nullptr;
+  QComboBox* cbGlobalMethod_=nullptr;
+  QComboBox* cbLocalMethod_=nullptr;
+  QSlider* slObjectThresh_=nullptr;
+  QSpinBox* spObjectThresh_=nullptr;
+  QCheckBox* chkInvertBinary_=nullptr;
+  QSpinBox* spLocalBlockSize_=nullptr;
+  QDoubleSpinBox* spLocalK_=nullptr;
+  QLabel* lblBinaryPreview_=nullptr;
 
   // Tracking tab
   QPushButton* btnLoadTag_=nullptr;
