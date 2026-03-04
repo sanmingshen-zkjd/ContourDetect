@@ -38,6 +38,7 @@
 #include <QLineEdit>
 #include <QStringList>
 #include <QVector>
+#include <QColor>
 #include <functional>
 
 #include <opencv2/opencv.hpp>
@@ -74,6 +75,8 @@ public:
   void clearAnnotations();
   void setLineCreatedCallback(const std::function<void(double)>& cb);
   void setLineDoubleClickCallback(const std::function<void(double)>& cb);
+  void setLineValueEditedCallback(const std::function<void(double,double)>& cb);
+  void applySelectedLineStyle(const QString& name, const QColor& color, int width);
 
 protected:
   void wheelEvent(QWheelEvent* e) override;
@@ -94,6 +97,7 @@ private:
   QGraphicsLineItem* previewLine_ = nullptr;
   std::function<void(double)> onLineCreated_;
   std::function<void(double)> onLineDoubleClick_;
+  std::function<void(double,double)> onLineValueEdited_;
 };
 
 class MainWindow : public QMainWindow {
@@ -157,6 +161,7 @@ private slots:
   void onModeTabChanged(int idx);
   void onPreprocessParamsChanged();
   void onPreprocessAuto();
+  void onApplyLineProps();
 
 private:
   void buildUI();
@@ -306,6 +311,10 @@ private:
   QSlider* slContrast_=nullptr;
   QSpinBox* spBrightness_=nullptr;
   QSpinBox* spContrast_=nullptr;
+  QLineEdit* editLineName_=nullptr;
+  QComboBox* cbLineColor_=nullptr;
+  QSpinBox* spLineWidth_=nullptr;
+  QPushButton* btnApplyLineProps_=nullptr;
   QLabel* lblPreprocessHint_=nullptr;
   QPushButton* btnPreAuto_=nullptr;
   QLabel* lblScaleInfo_=nullptr;

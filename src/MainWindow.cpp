@@ -30,6 +30,8 @@
 #include <QCheckBox>
 #include <QFormLayout>
 #include <QMenu>
+#include <QTextDocument>
+#include <QRegularExpression>
 #include <functional>
 #include <climits>
 
@@ -114,6 +116,69 @@ private:
 };
 
 
+
+class NamedLineItem : public QGraphicsLineItem {
+public:
+  NamedLineItem(const QLineF& line, const QString& name, const QColor& color, int width, QGraphicsItem* parent=nullptr)
+      : QGraphicsLineItem(line, parent), name_(name), color_(color), width_(std::max(1, width)) {
+    setFlags(QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemIsFocusable);
+    applyStyle();
+    label_ = new QGraphicsTextItem(this);
+    label_->setDefaultTextColor(color_);
+    label_->setPlainText(name_);
+    label_->setTextInteractionFlags(Qt::NoTextInteraction);
+    updateLabelPos();
+    QObject::connect(label_->document(), &QTextDocument::contentsChanged, [this]() {
+      QString t = label_->toPlainText().trimmed();
+      if (!t.isEmpty()) name_ = t;
+      QRegularExpression re("([-+]?[0-9]*\.?[0-9]+)");
+      auto m = re.match(t);
+      if (m.hasMatch() && onValueEdited_) {
+        bool ok=false;
+        double v=m.captured(1).toDouble(&ok);
+        if (ok) onValueEdited_(line().length(), v);
+      }
+    });
+  }
+
+  void setMeta(const QString& name, const QColor& color, int width) {
+    if (!name.isEmpty()) { name_ = name; label_->setPlainText(name_); }
+    color_ = color;
+    width_ = std::max(1, width);
+    applyStyle();
+    label_->setDefaultTextColor(color_);
+    updateLabelPos();
+  }
+  void enableInlineEdit() {
+    updateLabelPos();
+    label_->setTextInteractionFlags(Qt::TextEditorInteraction);
+    label_->setFocus(Qt::MouseFocusReason);
+  }
+  void finishInlineEdit() { label_->setTextInteractionFlags(Qt::NoTextInteraction); }
+  void setValueEditedCallback(const std::function<void(double,double)>& cb) { onValueEdited_ = cb; }
+  void updateLabelPos() {
+    QPointF mid = (line().p1() + line().p2()) * 0.5;
+    label_->setPos(mid + QPointF(4, -18));
+  }
+
+private:
+  void applyStyle() {
+    QPen p(color_, width_);
+    if (isSelected()) p.setStyle(Qt::DashLine);
+    setPen(p);
+  }
+  QVariant itemChange(GraphicsItemChange change, const QVariant &value) override {
+    if (change == QGraphicsItem::ItemSelectedHasChanged) applyStyle();
+    return QGraphicsLineItem::itemChange(change, value);
+  }
+
+  QString name_;
+  QColor color_;
+  int width_ = 2;
+  QGraphicsTextItem* label_ = nullptr;
+  std::function<void(double,double)> onValueEdited_;
+};
+
 ImageViewer::ImageViewer(QWidget* parent) : QGraphicsView(parent) {
   setScene(&scene_);
   setRenderHint(QPainter::Antialiasing, true);
@@ -177,6 +242,16 @@ void ImageViewer::clearAnnotations() {
 
 void ImageViewer::setLineCreatedCallback(const std::function<void(double)>& cb) { onLineCreated_ = cb; }
 void ImageViewer::setLineDoubleClickCallback(const std::function<void(double)>& cb) { onLineDoubleClick_ = cb; }
+void ImageViewer::setLineValueEditedCallback(const std::function<void(double,double)>& cb) { onLineValueEdited_ = cb; }
+
+void ImageViewer::applySelectedLineStyle(const QString& name, const QColor& color, int width) {
+  const auto items = scene_.selectedItems();
+  for (auto* it : items) {
+    if (auto* li = dynamic_cast<NamedLineItem*>(it)) {
+      li->setMeta(name, color, width);
+    }
+  }
+}
 
 void ImageViewer::applyZoom(double factor) {
   zoomFactor_ *= factor;
@@ -211,7 +286,9 @@ void ImageViewer::mousePressEvent(QMouseEvent* e) {
       lineStart_ = p;
       previewLine_ = scene_.addLine(QLineF(lineStart_, lineStart_), QPen(QColor(80,220,255), 2));
     } else {
-      auto* finalLine = scene_.addLine(QLineF(lineStart_, p), QPen(QColor(80,220,255), 2));
+      auto* finalLine = new NamedLineItem(QLineF(lineStart_, p), "Line", QColor(80,220,255), 2);
+      finalLine->setValueEditedCallback(onLineValueEdited_);
+      scene_.addItem(finalLine);
       if (onLineCreated_) onLineCreated_(finalLine->line().length());
       if (previewLine_) {
         scene_.removeItem(previewLine_);
@@ -241,11 +318,22 @@ void ImageViewer::mouseDoubleClickEvent(QMouseEvent* e) {
   }
   QPointF p = mapToScene(e->pos());
   if (QGraphicsItem* it = scene_.itemAt(p, transform())) {
-    if (it != pixmapItem_ && dynamic_cast<QGraphicsLineItem*>(it)) {
-      auto* li = static_cast<QGraphicsLineItem*>(it);
-      if (onLineDoubleClick_) onLineDoubleClick_(li->line().length());
-      e->accept();
-      return;
+    if (it != pixmapItem_) {
+      if (auto* li = dynamic_cast<NamedLineItem*>(it)) {
+        li->setSelected(true);
+        li->enableInlineEdit();
+        if (onLineDoubleClick_) onLineDoubleClick_(li->line().length());
+        e->accept();
+        return;
+      }
+      if (auto* txt = dynamic_cast<QGraphicsTextItem*>(it)) {
+        if (auto* parentLine = dynamic_cast<NamedLineItem*>(txt->parentItem())) {
+          parentLine->setSelected(true);
+          parentLine->enableInlineEdit();
+          e->accept();
+          return;
+        }
+      }
     }
   }
   QGraphicsView::mouseDoubleClickEvent(e);
@@ -569,6 +657,7 @@ void MainWindow::buildUI() {
     QWidget* tabCal = new QWidget(actionTabs_);
     QVBoxLayout* calv = new QVBoxLayout(tabCal);
 
+    calv->addWidget(new QLabel("Step 1: 色彩", tabCal));
     QGroupBox* gbColor = new QGroupBox("Color", tabCal);
     QVBoxLayout* colorLayout = new QVBoxLayout(gbColor);
     cbPreColor_ = new QComboBox(gbColor);
@@ -578,6 +667,7 @@ void MainWindow::buildUI() {
     colorLayout->addWidget(cbPreColor_);
     gbColor->setLayout(colorLayout);
 
+    calv->addWidget(new QLabel("Step 2: 亮度对比度调节", tabCal));
     QGroupBox* gbBC = new QGroupBox("Brightness / Contrast", tabCal);
     QGridLayout* bcLayout = new QGridLayout(gbBC);
     QLabel* lblB = new QLabel("Brightness (0~255)", gbBC);
@@ -616,6 +706,30 @@ void MainWindow::buildUI() {
     calv->addWidget(gbBC);
     calv->addWidget(btnPreAuto_);
     calv->addWidget(lblPreprocessHint_);
+
+    calv->addWidget(new QLabel("Step 3: 尺度标定", tabCal));
+    QGroupBox* gbLine = new QGroupBox("Line Properties", tabCal);
+    QGridLayout* lp = new QGridLayout(gbLine);
+    editLineName_ = new QLineEdit("Line", gbLine);
+    cbLineColor_ = new QComboBox(gbLine);
+    cbLineColor_->addItem("Cyan", QColor(80,220,255));
+    cbLineColor_->addItem("Red", QColor(255,80,80));
+    cbLineColor_->addItem("Green", QColor(80,255,120));
+    cbLineColor_->addItem("Yellow", QColor(255,220,80));
+    spLineWidth_ = new QSpinBox(gbLine);
+    spLineWidth_->setRange(1, 12);
+    spLineWidth_->setValue(2);
+    btnApplyLineProps_ = new QPushButton("Apply To Selected Line", gbLine);
+    lp->addWidget(new QLabel("Name", gbLine), 0, 0);
+    lp->addWidget(editLineName_, 0, 1);
+    lp->addWidget(new QLabel("Color", gbLine), 1, 0);
+    lp->addWidget(cbLineColor_, 1, 1);
+    lp->addWidget(new QLabel("Width", gbLine), 2, 0);
+    lp->addWidget(spLineWidth_, 2, 1);
+    lp->addWidget(btnApplyLineProps_, 3, 0, 1, 2);
+    gbLine->setLayout(lp);
+
+    calv->addWidget(gbLine);
     calv->addWidget(lblScaleInfo_);
     calv->addWidget(lblCaptured_);
     calv->addStretch(1);
@@ -628,6 +742,7 @@ void MainWindow::buildUI() {
     connect(spBrightness_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ if (slBrightness_ && slBrightness_->value()!=v) slBrightness_->setValue(v); onPreprocessParamsChanged(); });
     connect(spContrast_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ if (slContrast_ && slContrast_->value()!=v) slContrast_->setValue(v); onPreprocessParamsChanged(); });
     connect(btnPreAuto_, &QPushButton::clicked, this, &MainWindow::onPreprocessAuto);
+    connect(btnApplyLineProps_, &QPushButton::clicked, this, &MainWindow::onApplyLineProps);
 
     // ObjectDefine + Visual pages
     QWidget* tabObj = new QWidget(actionTabs_);
@@ -955,13 +1070,12 @@ void MainWindow::rebuildSourceViews() {
     v->setMinimumSize(480, 270);
     v->setToolMode(ImageViewer::PanTool);
     v->setLineCreatedCallback([this](double pxLen){ updateScaleStatus(pxLen); });
-    v->setLineDoubleClickCallback([this](double pxLen){
-      bool ok = false;
-      double mm = QInputDialog::getDouble(this, "Scale Calibration", "Actual length (mm):", 100.0, 1e-6, 1e9, 6, &ok);
-      if (!ok || pxLen <= 1e-9) return;
+    v->setLineDoubleClickCallback([this](double pxLen){ updateScaleStatus(pxLen); });
+    v->setLineValueEditedCallback([this](double pxLen, double mm){
+      if (pxLen <= 1e-9 || mm <= 0.0) return;
       mm_per_pixel_ = mm / pxLen;
       updateScaleStatus(pxLen);
-      logLine(QString("Scale calibrated: %1 mm / %2 px = %3 mm/px")
+      logLine(QString("Scale calibrated(inline): %1 mm / %2 px = %3 mm/px")
               .arg(mm,0,'f',6).arg(pxLen,0,'f',3).arg(mm_per_pixel_,0,'f',9));
     });
     //connect(panBtn, &QToolButton::clicked, this, [v, panBtn, pointBtn, lineBtn]() {
@@ -1324,6 +1438,18 @@ void MainWindow::onPreprocessParamsChanged() {
     if (!f.empty()) f = applyPreprocess(f);
   }
   updateSourceViews(frames);
+}
+
+void MainWindow::onApplyLineProps() {
+  QColor c = QColor(80,220,255);
+  if (cbLineColor_) c = cbLineColor_->currentData().value<QColor>();
+  QString name = editLineName_ ? editLineName_->text().trimmed() : QString("Line");
+  int width = spLineWidth_ ? spLineWidth_->value() : 2;
+  for (auto* v : sourceViews_) {
+    if (v) v->applySelectedLineStyle(name, c, width);
+  }
+  logLine(QString("Apply line properties: name=%1 color=%2 width=%3")
+          .arg(name).arg(c.name()).arg(width));
 }
 
 void MainWindow::onPreprocessAuto() {
