@@ -370,20 +370,7 @@ void MainWindow::buildUI() {
     titleSep->setFrameShadow(QFrame::Plain);
     sv->addWidget(titleSep);
 
-    sideModeTabs_ = new QTabBar(sideBar);
-    sideModeTabs_->addTab("Capture");
-    sideModeTabs_->addTab("Preprocess");
-    sideModeTabs_->addTab("Tracking");
-    sideModeTabs_->setExpanding(true);
-    sideModeTabs_->setShape(QTabBar::RoundedWest);
-    sideModeTabs_->setDrawBase(false);
-    sideModeTabs_->setCurrentIndex(0);
-    sideModeTabs_->setMovable(false);
-    sideModeTabs_->setUsesScrollButtons(false);
-    sideModeTabs_->setElideMode(Qt::ElideRight);
-    sideModeTabs_->setDocumentMode(true);
-    sv->addWidget(sideModeTabs_);
-
+    // 左侧步骤TAB已删除，改为顶部步骤引导。
     sv->addStretch(1);
 
     QFrame* bottomSep = new QFrame(sideBar);
@@ -405,9 +392,6 @@ void MainWindow::buildUI() {
     sideBar->setStyleSheet(
       "#leftSidebar{background:#1f232b;border-right:1px solid #4a5568;}"
       "#sidebarTitle{font-size:11px;font-weight:600;color:#b8c4d6;padding:4px 4px;line-height:1.1;}"
-      "QTabBar::tab{background:transparent;color:#c8d0da;padding:4px 4px;text-align:left;border-radius:6px;margin:2px 0;min-width:44px;}"
-      "QTabBar::tab:selected{background:#3b82f6;color:white;font-weight:600;}"
-      "QTabBar::tab:hover:!selected{background:#2a3140;color:#f0f4f8;}"
       "QToolButton{background:#2b3340;border:1px solid #4b586d;border-radius:6px;padding:6px 6px;color:#eef2f8;text-align:left;}"
       "QToolButton::menu-indicator{subcontrol-position:right center;right:8px;}"
       "QFrame{color:#394150;background:#394150;}");
@@ -419,14 +403,20 @@ void MainWindow::buildUI() {
     QWidget* mainPane = new QWidget(central);
     QVBoxLayout* v = new QVBoxLayout(mainPane);
 
-    // Top mode tabs
-    modeTabs_ = new QTabWidget(central);
-    modeTabs_->addTab(new QWidget(modeTabs_), "Capture");
-    modeTabs_->addTab(new QWidget(modeTabs_), "Preprocess");
-    modeTabs_->addTab(new QWidget(modeTabs_), "Tracking");
-    modeTabs_->setCurrentIndex(0);
-    modeTabs_->setVisible(false);
-    connect(modeTabs_, &QTabWidget::currentChanged, this, &MainWindow::onModeTabChanged);
+    // Top step guide
+    stepTabs_ = new QTabBar(central);
+    stepTabs_->addTab("1 Source");
+    stepTabs_->addTab("2 PreProcess");
+    stepTabs_->addTab("3 ObjectDefine");
+    stepTabs_->addTab("4 Visual");
+    stepTabs_->setExpanding(true);
+    stepTabs_->setDocumentMode(true);
+    stepTabs_->setCurrentIndex(0);
+    stepTabs_->setStyleSheet(
+      "QTabBar::tab{padding:8px 12px;background:#2d333b;color:#dbe5f1;border:1px solid #485468;}"
+      "QTabBar::tab:selected{background:#3b82f6;color:#ffffff;font-weight:700;}"
+      "QTabBar::tab:hover:!selected{background:#374151;}");
+    v->addWidget(stepTabs_);
 
     QHBoxLayout* topSourceBar = new QHBoxLayout();
     btnAddCam_ = new QToolButton(central);
@@ -445,6 +435,7 @@ void MainWindow::buildUI() {
     btnAddVideo_->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
     btnAddImgSeq_->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
     btnRemoveSource_->setIcon(style()->standardIcon(QStyle::SP_TrashIcon));
+    topSourceBar->addWidget(btnAddCam_);
     topSourceBar->addWidget(btnAddVideo_);
     topSourceBar->addWidget(btnAddImgSeq_);
     topSourceBar->addWidget(btnRemoveSource_);
@@ -532,7 +523,6 @@ void MainWindow::buildUI() {
     });
     connect(actSaveProject_, &QAction::triggered, this, &MainWindow::onSaveProject);
     connect(actLoadProject_, &QAction::triggered, this, &MainWindow::onLoadProject);
-    connect(sideModeTabs_, &QTabBar::currentChanged, this, &MainWindow::onModeTabChanged);
 
     // Right actions panel (embedded in central layout to keep top bar full-width)
     QWidget* dock = new QWidget(central);
@@ -555,100 +545,56 @@ void MainWindow::buildUI() {
     capv->addStretch(1);
     connect(btnCaptureNow_, &QPushButton::clicked, this, &MainWindow::onCaptureNow);
 
-    // Calibration tab
+    // Preprocess tab
     QWidget* tabCal = new QWidget(actionTabs_);
     QVBoxLayout* calv = new QVBoxLayout(tabCal);
 
-    QGroupBox* gbMethod = new QGroupBox("Calibration Method", tabCal);
-    QVBoxLayout* ml = new QVBoxLayout(gbMethod);
-    cbCalibMethod_ = new QComboBox(gbMethod);
-    cbCalibMethod_->addItem("Chessboard Calibration (available)");
-    cbCalibMethod_->addItem("Total Station Calibration (reserved)");
-    cbCalibMethod_->addItem("UAV Calibration (reserved)");
-    cbCalibMethod_->setCurrentIndex(0);
-    ml->addWidget(cbCalibMethod_);
-    ml->addWidget(new QLabel("Reserved methods are placeholders for future implementation.", gbMethod));
-    gbMethod->setLayout(ml);
+    QGroupBox* gbColor = new QGroupBox("Color", tabCal);
+    QVBoxLayout* colorLayout = new QVBoxLayout(gbColor);
+    cbPreColor_ = new QComboBox(gbColor);
+    cbPreColor_->addItem("Black & White");
+    cbPreColor_->addItem("Color");
+    cbPreColor_->setCurrentIndex(1);
+    colorLayout->addWidget(cbPreColor_);
+    gbColor->setLayout(colorLayout);
 
-    QGroupBox* gbBoard = new QGroupBox("Chessboard Parameters", tabCal);
-    QGridLayout* gl = new QGridLayout(gbBoard);
+    QGroupBox* gbBC = new QGroupBox("Brightness / Contrast (ImageJ-like)", tabCal);
+    QGridLayout* bcLayout = new QGridLayout(gbBC);
+    QLabel* lblB = new QLabel("Brightness", gbBC);
+    QLabel* lblC = new QLabel("Contrast", gbBC);
+    slBrightness_ = new QSlider(Qt::Horizontal, gbBC);
+    slContrast_ = new QSlider(Qt::Horizontal, gbBC);
+    slBrightness_->setRange(-255, 255);
+    slBrightness_->setValue(0);
+    slContrast_->setRange(-100, 100);
+    slContrast_->setValue(0);
+    bcLayout->addWidget(lblB, 0, 0);
+    bcLayout->addWidget(slBrightness_, 0, 1);
+    bcLayout->addWidget(lblC, 1, 0);
+    bcLayout->addWidget(slContrast_, 1, 1);
+    gbBC->setLayout(bcLayout);
 
-    spBoardW_ = new QSpinBox(gbBoard);
-    spBoardH_ = new QSpinBox(gbBoard);
-    spSquare_ = new QDoubleSpinBox(gbBoard);
-    spBoardW_->setRange(2, 50);
-    spBoardH_->setRange(2, 50);
-    spSquare_->setRange(1e-6, 10.0);
-    spSquare_->setDecimals(6);
-    spSquare_->setSingleStep(0.001);
-
-    spBoardW_->setValue(board_w_);
-    spBoardH_->setValue(board_h_);
-    spSquare_->setValue(square_);
-
-    gl->addWidget(new QLabel("Inner corners W:", gbBoard), 0, 0);
-    gl->addWidget(spBoardW_, 0, 1);
-    gl->addWidget(new QLabel("Inner corners H:", gbBoard), 1, 0);
-    gl->addWidget(spBoardH_, 1, 1);
-    gl->addWidget(new QLabel("Square size (m):", gbBoard), 2, 0);
-    gl->addWidget(spSquare_, 2, 1);
-    gbBoard->setLayout(gl);
-
-    btnGrab_ = new QPushButton("Grab Frame (Chessboard)", tabCal);
-    btnReset_ = new QPushButton("Reset Captures", tabCal);
-    btnGrab_->setVisible(false);
-    btnReset_->setVisible(false);
-    btnComputeCalib_ = new QPushButton("Compute Calibration", tabCal);
-    btnRecomputeCalib_ = new QPushButton("Recompute (Selected Frames)", tabCal);
-    btnSaveCalib_ = new QPushButton("Save rig_calib.yaml", tabCal);
-    btnSaveCalib_->setEnabled(false);
-    calibProgressBar_ = new QProgressBar(tabCal);
-    calibProgressBar_->setRange(0, 100);
-    calibProgressBar_->setValue(0);
-    lblCalibProgress_ = new QLabel("Progress: idle", tabCal);
-    calibErrorTable_ = new QTableWidget(tabCal);
-    calibErrorTable_->setColumnCount(3);
-    calibErrorTable_->setHorizontalHeaderLabels(QStringList() << "Use" << "Frame" << "RMSE(px)");
-    calibErrorTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    calibErrorTable_->verticalHeader()->setVisible(false);
-    calibErrorTable_->setAlternatingRowColors(true);
-    calibErrorTable_->setStyleSheet(
-      "QTableWidget{alternate-background-color:#2b313a;background:#252b33;color:#e8edf2;gridline-color:#3a4350;}"
-      "QHeaderView::section{background:#303744;color:#e8edf2;border:1px solid #3d4654;padding:4px;}"
-      "QTableWidget::item{padding:4px;}");
+    lblPreprocessHint_ = new QLabel("Apply color mode + brightness/contrast to the live view.", tabCal);
     lblCaptured_ = new QLabel("Captured: 0", tabCal);
 
-    calv->addWidget(gbMethod);
-    calv->addWidget(gbBoard);
-    calv->addWidget(btnComputeCalib_);
-    calv->addWidget(btnRecomputeCalib_);
-    calv->addWidget(btnSaveCalib_);
-    calv->addWidget(calibProgressBar_);
-    calv->addWidget(lblCalibProgress_);
-    calv->addWidget(calibErrorTable_);
+    calv->addWidget(gbColor);
+    calv->addWidget(gbBC);
+    calv->addWidget(lblPreprocessHint_);
     calv->addWidget(lblCaptured_);
     calv->addStretch(1);
 
-    connect(btnGrab_, &QPushButton::clicked, this, &MainWindow::onGrabFrame);
-    connect(btnReset_, &QPushButton::clicked, this, &MainWindow::onResetFrames);
-    connect(btnComputeCalib_, &QPushButton::clicked, this, &MainWindow::onComputeCalibration);
-    connect(btnRecomputeCalib_, &QPushButton::clicked, this, &MainWindow::onRecomputeCalibrationSelected);
-    connect(btnSaveCalib_, &QPushButton::clicked, this, &MainWindow::onSaveCalibrationYaml);
-
     // If board params change, rebuild calibrator and reset captures
-    connect(spBoardW_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int){ rebuildCalibratorFromUI(true); });
-    connect(spBoardH_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int){ rebuildCalibratorFromUI(true); });
-    connect(spSquare_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ rebuildCalibratorFromUI(true); });
 
-    // Tracking tab
-    QWidget* tabTrk = new QWidget(actionTabs_);
-    QVBoxLayout* trkv = new QVBoxLayout(tabTrk);
-    QTabWidget* trkTabs = new QTabWidget(tabTrk);
-    QWidget* trkMainPage = new QWidget(trkTabs);
-    QWidget* trkVisPage = new QWidget(trkTabs);
-    QVBoxLayout* trkMainLayout = new QVBoxLayout(trkMainPage);
-    QVBoxLayout* trkVisRoot = new QVBoxLayout(trkVisPage);
-    QScrollArea* visScrollArea = new QScrollArea(trkVisPage);
+    connect(cbPreColor_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onPreprocessParamsChanged);
+    connect(slBrightness_, &QSlider::valueChanged, this, &MainWindow::onPreprocessParamsChanged);
+    connect(slContrast_, &QSlider::valueChanged, this, &MainWindow::onPreprocessParamsChanged);
+
+    // ObjectDefine + Visual pages
+    QWidget* tabObj = new QWidget(actionTabs_);
+    QVBoxLayout* trkMainLayout = new QVBoxLayout(tabObj);
+    QWidget* tabVis = new QWidget(actionTabs_);
+    QVBoxLayout* trkVisRoot = new QVBoxLayout(tabVis);
+    QScrollArea* visScrollArea = new QScrollArea(tabVis);
     visScrollArea->setWidgetResizable(true);
     visScrollArea->setFrameShape(QFrame::NoFrame);
     QWidget* visContainer = new QWidget(visScrollArea);
@@ -656,12 +602,12 @@ void MainWindow::buildUI() {
     visScrollArea->setWidget(visContainer);
     trkVisRoot->addWidget(visScrollArea);
 
-    btnLoadTag_ = new QPushButton("Load Tag Map (TXT)", tabTrk);
-    btnLoadYaml_ = new QPushButton("Load Calibration (YAML)", tabTrk);
-  //  chkPose_ = new QCheckBox("Pose Estimation ON", tabTrk);
+    btnLoadTag_ = new QPushButton("Load Tag Map (TXT)", tabObj);
+    btnLoadYaml_ = new QPushButton("Load Calibration (YAML)", tabObj);
+  //  chkPose_ = new QCheckBox("Pose Estimation ON", tabObj);
   //  chkPose_->setChecked(false);
 
-    QGroupBox* gbParams = new QGroupBox("Tracking Parameters", tabTrk);
+    QGroupBox* gbParams = new QGroupBox("Object Define Parameters", tabObj);
     QGridLayout* tg = new QGridLayout(gbParams);
     spRansacIters_ = new QSpinBox(gbParams);
     spRansacIters_->setRange(10, 5000);
@@ -684,41 +630,41 @@ void MainWindow::buildUI() {
     tg->addWidget(cbTagDict_, 2, 1);
     gbParams->setLayout(tg);
 
-    lblFps_ = new QLabel("FPS: 0", tabTrk);
-    btnDetectAll_ = new QPushButton("Detect All Frames", tabTrk);
-    lblInliers_ = new QLabel("Inliers: 0", tabTrk);
-    lblPose_ = new QLabel("Pose: -", tabTrk);
+    lblFps_ = new QLabel("FPS: 0", tabObj);
+    btnDetectAll_ = new QPushButton("Detect", tabObj);
+    lblInliers_ = new QLabel("Points: 0", tabObj);
+    lblPose_ = new QLabel("Object status: -", tabObj);
     lblPose_->setWordWrap(true);
 
     trkMainLayout->addWidget(btnLoadTag_);
-    lblTagPath_ = new QLabel("TagMap: (none)", tabTrk);
+    lblTagPath_ = new QLabel("TagMap: (none)", tabObj);
     trkMainLayout->addWidget(lblTagPath_);
     trkMainLayout->addWidget(btnLoadYaml_);
-    lblYamlPath_ = new QLabel("Calib: (none)", tabTrk);
+    lblYamlPath_ = new QLabel("Calib: (none)", tabObj);
     trkMainLayout->addWidget(lblYamlPath_);
     trkMainLayout->addWidget(gbParams);
    // trkMainLayout->addWidget(chkPose_);
     trkMainLayout->addWidget(btnDetectAll_);
-    btnExportTraj_ = new QPushButton("Export Trajectory CSV", tabTrk);
+    btnExportTraj_ = new QPushButton("Export Result CSV", tabObj);
     trkMainLayout->addWidget(btnExportTraj_);
     trkMainLayout->addWidget(lblInliers_);
     trkMainLayout->addWidget(lblPose_);
     trkMainLayout->addWidget(lblFps_);
-    lblLatency_ = new QLabel("Latency: 0 ms", tabTrk);
+    lblLatency_ = new QLabel("Latency: 0 ms", tabObj);
     trkMainLayout->addWidget(lblLatency_);
     trkMainLayout->addStretch(1);
 
-    btnAddVisChart_ = new QPushButton("add gragh", trkVisPage);
+    btnAddVisChart_ = new QPushButton("add gragh", tabVis);
     visChartsLayout_->addWidget(btnAddVisChart_);
 
-    auto makeSeriesSelector = [trkVisPage]() {
-      QComboBox* cb = new QComboBox(trkVisPage);
+    auto makeSeriesSelector = [tabVis]() {
+      QComboBox* cb = new QComboBox(tabVis);
       cb->setToolTip(QString::fromUtf8("choose curve to show"));
       cb->addItem(QString::fromUtf8("all"));
       return cb;
     };
 
-    lblTrajPosPlot_ = new QCustomPlot(trkVisPage);
+    lblTrajPosPlot_ = new QCustomPlot(tabVis);
     lblTrajPosPlot_->setMinimumHeight(160);
     lblTrajPosPlot_->setStyleSheet("background:#1d232b;border:1px solid #3a4250;color:#9fb0c4;");
     lblTrajPosPlot_->xAxis->setLabel("t");
@@ -736,7 +682,7 @@ void MainWindow::buildUI() {
     visChartsLayout_->addWidget(posSelector);
     visChartsLayout_->addWidget(lblTrajPosPlot_);
 
-    lblTrajAngPlot_ = new QCustomPlot(trkVisPage);
+    lblTrajAngPlot_ = new QCustomPlot(tabVis);
     lblTrajAngPlot_->setMinimumHeight(160);
     lblTrajAngPlot_->setStyleSheet("background:#1d232b;border:1px solid #3a4250;color:#9fb0c4;");
     lblTrajAngPlot_->xAxis->setLabel("t");
@@ -754,10 +700,6 @@ void MainWindow::buildUI() {
     visChartsLayout_->addWidget(angSelector);
     visChartsLayout_->addWidget(lblTrajAngPlot_);
     visChartsLayout_->addStretch(1);
-
-    trkTabs->addTab(trkMainPage, "Tracking");
-    trkTabs->addTab(trkVisPage, QString::fromUtf8("Visual"));
-    trkv->addWidget(trkTabs);
 
     connect(btnLoadTag_, &QPushButton::clicked, this, &MainWindow::onLoadTagMap);
     connect(btnLoadYaml_, &QPushButton::clicked, this, &MainWindow::onLoadCalibYaml);
@@ -781,11 +723,18 @@ void MainWindow::buildUI() {
     connect(posSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); });
     connect(angSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); });
 
-    actionTabs_->addTab(tabCap, "Capture");
-    actionTabs_->addTab(tabCal, "Preprocess");
-    actionTabs_->addTab(tabTrk, "Tracking");
-    // Right-side parameters must follow left mode; hide tab labels completely.
+    actionTabs_->addTab(tabCap, "Source");
+    actionTabs_->addTab(tabCal, "PreProcess");
+    actionTabs_->addTab(tabObj, "ObjectDefine");
+    actionTabs_->addTab(tabVis, "Visual");
     if (actionTabs_->tabBar()) actionTabs_->tabBar()->hide();
+
+    connect(stepTabs_, &QTabBar::currentChanged, this, [this](int idx){
+      if (actionTabs_) actionTabs_->setCurrentIndex(std::max(0, std::min(idx, actionTabs_->count()-1)));
+      if (idx == 0) onModeCapture();
+      else if (idx == 1) onModeCalibration();
+      else onModeTracking();
+    });
 
     dv->addWidget(actionTabs_);
 
@@ -1244,12 +1193,11 @@ void MainWindow::onRemoveSource() {
 
 void MainWindow::onModeCalibration() {
   mode_ = CALIB;
-  if (sideModeTabs_ && sideModeTabs_->currentIndex()!=1) sideModeTabs_->setCurrentIndex(1);
   if (btnAddCam_) btnAddCam_->setVisible(false);
   if (btnAddVideo_) btnAddVideo_->setVisible(true);
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-  if (modeTabs_ && modeTabs_->currentIndex()!=1) modeTabs_->setCurrentIndex(1);
-  if (actionTabs_) actionTabs_->setCurrentIndex(1);
+  if (actionTabs_ && actionTabs_->currentIndex()!=1) actionTabs_->setCurrentIndex(1);
+  if (stepTabs_ && stepTabs_->currentIndex()!=1) stepTabs_->setCurrentIndex(1);
   rebuildSourceViews();
   updateSourceViews(last_frames_);
   logLine("Switched to Preprocess mode.");
@@ -1257,28 +1205,26 @@ void MainWindow::onModeCalibration() {
 
 void MainWindow::onModeTracking() {
   mode_ = TRACK;
-  if (sideModeTabs_ && sideModeTabs_->currentIndex()!=2) sideModeTabs_->setCurrentIndex(2);
   if (btnAddCam_) btnAddCam_->setVisible(false);
   if (btnAddVideo_) btnAddVideo_->setVisible(true);
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-  if (modeTabs_ && modeTabs_->currentIndex()!=2) modeTabs_->setCurrentIndex(2);
-  if (actionTabs_) actionTabs_->setCurrentIndex(2);
+  if (actionTabs_ && actionTabs_->currentIndex()<2) actionTabs_->setCurrentIndex(2);
+  if (stepTabs_ && stepTabs_->currentIndex()<2) stepTabs_->setCurrentIndex(2);
   rebuildSourceViews();
   updateSourceViews(last_frames_);
-  logLine("Switched to Tracking mode.");
+  logLine("Switched to ObjectDefine/Visual mode.");
 }
 
 void MainWindow::onModeCapture() {
   mode_ = CAPTURE;
-  if (sideModeTabs_ && sideModeTabs_->currentIndex()!=0) sideModeTabs_->setCurrentIndex(0);
   if (btnAddCam_) btnAddCam_->setVisible(true);
   if (btnAddVideo_) btnAddVideo_->setVisible(false);
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(false);
-  if (modeTabs_ && modeTabs_->currentIndex()!=0) modeTabs_->setCurrentIndex(0);
-  if (actionTabs_) actionTabs_->setCurrentIndex(0);
+  if (actionTabs_ && actionTabs_->currentIndex()!=0) actionTabs_->setCurrentIndex(0);
+  if (stepTabs_ && stepTabs_->currentIndex()!=0) stepTabs_->setCurrentIndex(0);
   rebuildSourceViews();
   updateSourceViews(last_frames_);
-  logLine("Switched to Capture mode.");
+  logLine("Switched to Source mode.");
 }
 
 void MainWindow::onCaptureNow() {
@@ -1306,31 +1252,17 @@ void MainWindow::onCaptureNow() {
 }
 
 void MainWindow::onModeTabChanged(int idx) {
-  if (modeTabs_ && modeTabs_->currentIndex() != idx) modeTabs_->setCurrentIndex(idx);
-  if (idx == 0) {
-    mode_ = CAPTURE;
-    if (btnAddCam_) btnAddCam_->setVisible(true);
-    if (btnAddVideo_) btnAddVideo_->setVisible(false);
-    if (btnAddImgSeq_) btnAddImgSeq_->setVisible(false);
-    if (actionTabs_) actionTabs_->setCurrentIndex(0);
-    logLine("Switched to Capture mode.");
-  } else if (idx == 1) {
-    mode_ = CALIB;
-    if (btnAddCam_) btnAddCam_->setVisible(false);
-    if (btnAddVideo_) btnAddVideo_->setVisible(true);
-    if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-    if (actionTabs_) actionTabs_->setCurrentIndex(1);
-    logLine("Switched to Preprocess mode.");
-  } else {
-    mode_ = TRACK;
-    if (btnAddCam_) btnAddCam_->setVisible(false);
-    if (btnAddVideo_) btnAddVideo_->setVisible(true);
-    if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-    if (actionTabs_) actionTabs_->setCurrentIndex(2);
-    logLine("Switched to Tracking mode.");
+  if (!stepTabs_) return;
+  if (idx >= 0 && idx < stepTabs_->count() && stepTabs_->currentIndex()!=idx) {
+    stepTabs_->setCurrentIndex(idx);
   }
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
+}
+
+void MainWindow::onPreprocessParamsChanged() {
+  logLine(QString("Preprocess changed: color=%1, brightness=%2, contrast=%3")
+          .arg(cbPreColor_ && cbPreColor_->currentIndex()==0 ? "B/W" : "Color")
+          .arg(slBrightness_ ? slBrightness_->value() : 0)
+          .arg(slContrast_ ? slContrast_->value() : 0));
 }
 
 bool MainWindow::readFrames(std::vector<cv::Mat>& frames) {
@@ -1426,6 +1358,26 @@ void MainWindow::overlayTracking(std::vector<cv::Mat>& vis, const std::vector<cv
   }
 }
 
+cv::Mat MainWindow::applyPreprocess(const cv::Mat& src) const {
+  if (src.empty()) return src;
+  cv::Mat out = src.clone();
+
+  if (cbPreColor_ && cbPreColor_->currentIndex() == 0) {
+    cv::Mat gray;
+    cv::cvtColor(out, gray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(gray, out, cv::COLOR_GRAY2BGR);
+  }
+
+  const int brightness = slBrightness_ ? slBrightness_->value() : 0;
+  const int contrastSlider = slContrast_ ? slContrast_->value() : 0;
+  const double alpha = (contrastSlider >= 0)
+      ? 1.0 + (static_cast<double>(contrastSlider) / 100.0) * 2.0
+      : 1.0 + (static_cast<double>(contrastSlider) / 100.0);
+  const double beta = static_cast<double>(brightness);
+  out.convertTo(out, -1, alpha, beta);
+  return out;
+}
+
 void MainWindow::updateStatus() {
   lblCaptured_->setText(QString("Captured: %1").arg(calibrator_->captured()));
   lblInliers_->setText(QString("Inliers: %1").arg(last_inliers_));
@@ -1456,6 +1408,9 @@ void MainWindow::onTick() {
   // Note: some sources may not have frames yet; mosaic will show placeholders.
 
   std::vector<cv::Mat> vis = frames;
+  for (auto& f : vis) {
+    if (!f.empty()) f = applyPreprocess(f);
+  }
   // If sources count changed, rebuild calibrator to match to avoid crash
   if (mode_==CALIB) {
     int n = (int)frames.size();

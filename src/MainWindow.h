@@ -149,6 +149,7 @@ private slots:
   void onModeTracking();
   void onModeCapture();
   void onModeTabChanged(int idx);
+  void onPreprocessParamsChanged();
 
 private:
   void buildUI();
@@ -180,6 +181,7 @@ private:
   void overlayTracking(std::vector<cv::Mat>& vis, const std::vector<cv::Mat>& frames);
 
   void updateStatus();
+  cv::Mat applyPreprocess(const cv::Mat& src) const;
   bool runCalibrationOnPairs(const std::vector<int>& pairIndices, bool updateTable);
   void refreshTrajectoryPlot();
   void onAddVisualizationChart();
@@ -271,6 +273,7 @@ private:
   //QCheckBox* chkSyncPlay_=nullptr;
   //QLabel* lblPlayState_=nullptr;
   QTabBar* sideModeTabs_=nullptr;
+  QTabBar* stepTabs_=nullptr;
   QToolButton* btnFileMenu_=nullptr;
   QTabWidget* actionTabs_=nullptr;
 
@@ -288,6 +291,12 @@ private:
   QLabel* lblCalibProgress_=nullptr;
   QTableWidget* calibErrorTable_=nullptr;
   QLabel* lblCaptured_=nullptr;
+
+  // Preprocess tab
+  QComboBox* cbPreColor_=nullptr;
+  QSlider* slBrightness_=nullptr;
+  QSlider* slContrast_=nullptr;
+  QLabel* lblPreprocessHint_=nullptr;
 
   // Tracking tab
   QPushButton* btnLoadTag_=nullptr;
