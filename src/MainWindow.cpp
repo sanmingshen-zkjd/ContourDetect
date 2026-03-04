@@ -760,7 +760,7 @@ void MainWindow::buildUI() {
       else if (idx == 1) onModeCalibration();
       else if (idx == 2) onModeTracking();
       else {
-        mode_ = TRACK;
+        mode_ = CAPTURE;
         logLine("Switched to Visual mode.");
       }
     });
@@ -1231,7 +1231,8 @@ void MainWindow::onRemoveSource() {
 }
 
 void MainWindow::onModeCalibration() {
-  mode_ = CALIB;
+  // Keep image/render pipeline on capture source set; only switch right-side params.
+  mode_ = CAPTURE;
   if (btnAddCam_) btnAddCam_->setVisible(false);
   if (btnAddVideo_) btnAddVideo_->setVisible(true);
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
@@ -1241,7 +1242,8 @@ void MainWindow::onModeCalibration() {
 }
 
 void MainWindow::onModeTracking() {
-  mode_ = TRACK;
+  // Keep image/render pipeline stable across Source/PreProcess/ObjectDefine.
+  mode_ = CAPTURE;
   if (btnAddCam_) btnAddCam_->setVisible(false);
   if (btnAddVideo_) btnAddVideo_->setVisible(true);
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
@@ -1475,7 +1477,13 @@ void MainWindow::updateStatus() {
   lblCaptured_->setText(QString("Captured: %1").arg(calibrator_->captured()));
   lblInliers_->setText(QString("Inliers: %1").arg(last_inliers_));
 
-  QString m = (mode_==CAPTURE) ? "Capture" : ((mode_==CALIB) ? "Preprocess" : "Tracking");
+  QString m = "Source";
+  if (stepTabs_) {
+    const int si = stepTabs_->currentIndex();
+    if (si == 1) m = "PreProcess";
+    else if (si == 2) m = "ObjectDefine";
+    else if (si == 3) m = "Visual";
+  }
   statusBar()->showMessage(QString("Mode: %1 | Source: %2 | Captured: %3 | Inliers: %4 | FPS: %5")
     .arg(m)
     .arg((int)sources_.size())
