@@ -1322,30 +1322,41 @@ void MainWindow::onPreprocessAuto() {
   const float* histRange = {range};
   cv::Mat hist;
   cv::calcHist(&gray, 1, 0, cv::Mat(), hist, 1, &histSize, &histRange, true, false);
+
   const double total = static_cast<double>(gray.total());
-  const double clip = total * 0.0035; // ImageJ-like auto clip ratio
+  const double clip = total * 0.0035; // small clipping, similar to ImageJ Auto
 
   int lo = 0, hi = 255;
   double acc = 0.0;
-  for (int i=0;i<256;++i) { acc += hist.at<float>(i); if (acc >= clip) { lo = i; break; } }
+  for (int i = 0; i < 256; ++i) {
+    acc += hist.at<float>(i);
+    if (acc >= clip) { lo = i; break; }
+  }
   acc = 0.0;
-  for (int i=255;i>=0;--i) { acc += hist.at<float>(i); if (acc >= clip) { hi = i; break; } }
+  for (int i = 255; i >= 0; --i) {
+    acc += hist.at<float>(i);
+    if (acc >= clip) { hi = i; break; }
+  }
   if (hi <= lo) { lo = 0; hi = 255; }
 
+  // Basic brightness/contrast model: dst = alpha * src + beta
   const double alpha = 255.0 / std::max(1, hi - lo);
   const double beta = -alpha * lo;
 
-  int c = 0;
-  if (alpha >= 1.0) c = (int)std::round((alpha - 1.0) * 50.0);
-  else c = (int)std::round((alpha - 1.0) * 100.0);
-  c = std::max(-100, std::min(100, c));
-  int b = (int)std::round(beta);
-  b = std::max(-255, std::min(255, b));
+  int contrast = (int)std::round((alpha - 1.0) * 100.0); // inverse of alpha = 1 + contrast/100
+  int brightness = (int)std::round(beta);
+  contrast = std::max(-100, std::min(100, contrast));
+  brightness = std::max(-255, std::min(255, brightness));
 
-  if (slBrightness_) slBrightness_->setValue(b);
-  if (slContrast_) slContrast_->setValue(c);
-  logLine(QString("Auto brightness/contrast: lo=%1 hi=%2 => brightness=%3 contrast=%4")
-          .arg(lo).arg(hi).arg(b).arg(c));
+  if (slContrast_) slContrast_->setValue(contrast);
+  if (slBrightness_) slBrightness_->setValue(brightness);
+
+  logLine(QString("Auto brightness/contrast: lo=%1 hi=%2 => alpha=%3 beta=%4, contrast=%5 brightness=%6")
+          .arg(lo).arg(hi)
+          .arg(alpha, 0, 'f', 4)
+          .arg(beta, 0, 'f', 4)
+          .arg(contrast)
+          .arg(brightness));
 }
 
 void MainWindow::updateScaleStatus(double pxLen) {
@@ -1465,9 +1476,8 @@ cv::Mat MainWindow::applyPreprocess(const cv::Mat& src) const {
 
   const int brightness = slBrightness_ ? slBrightness_->value() : 0;
   const int contrastSlider = slContrast_ ? slContrast_->value() : 0;
-  const double alpha = (contrastSlider >= 0)
-      ? 1.0 + (static_cast<double>(contrastSlider) / 100.0) * 2.0
-      : 1.0 + (static_cast<double>(contrastSlider) / 100.0);
+  // Basic formula: dst = alpha * src + beta
+  const double alpha = 1.0 + static_cast<double>(contrastSlider) / 100.0;
   const double beta = static_cast<double>(brightness);
   out.convertTo(out, -1, alpha, beta);
   return out;
