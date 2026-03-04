@@ -259,10 +259,21 @@ void ImageViewer::setLineDoubleClickCallback(const std::function<void(double)>& 
 void ImageViewer::setLineValueEditedCallback(const std::function<void(double,double)>& cb) { onLineValueEdited_ = cb; }
 
 void ImageViewer::applySelectedLineStyle(const QString& name, const QColor& color, int width) {
-  const auto items = scene_.selectedItems();
+  bool applied = false;
+  const auto selected = scene_.selectedItems();
+  for (auto* it : selected) {
+    if (auto* li = dynamic_cast<NamedLineItem*>(it)) {
+      li->setMeta(name, color, width);
+      applied = true;
+    }
+  }
+  if (applied) return;
+  // Single-line workflow fallback: apply to the first line if none is explicitly selected.
+  const auto items = scene_.items();
   for (auto* it : items) {
     if (auto* li = dynamic_cast<NamedLineItem*>(it)) {
       li->setMeta(name, color, width);
+      break;
     }
   }
 }
@@ -763,7 +774,6 @@ void MainWindow::buildUI() {
 
     gbLineProps_ = new QGroupBox("Line Properties", tabCal);
     QGridLayout* lp = new QGridLayout(gbLineProps_);
-    editLineName_ = new QLineEdit("Line", gbLineProps_);
     cbLineColor_ = new QComboBox(gbLineProps_);
     cbLineColor_->addItem("Cyan", QColor(80,220,255));
     cbLineColor_->addItem("Red", QColor(255,80,80));
@@ -772,22 +782,15 @@ void MainWindow::buildUI() {
     spLineWidth_ = new QSpinBox(gbLineProps_);
     spLineWidth_->setRange(1, 12);
     spLineWidth_->setValue(2);
-    btnApplyLineProps_ = new QPushButton("Apply To Selected Line", gbLineProps_);
-    lp->addWidget(new QLabel("Name", gbLineProps_), 0, 0);
-    lp->addWidget(editLineName_, 0, 1);
-    lp->addWidget(new QLabel("Color", gbLineProps_), 1, 0);
-    lp->addWidget(cbLineColor_, 1, 1);
-    lp->addWidget(new QLabel("Width", gbLineProps_), 2, 0);
-    lp->addWidget(spLineWidth_, 2, 1);
-    lp->addWidget(btnApplyLineProps_, 3, 0, 1, 2);
-    spPhysicalMm_ = new QDoubleSpinBox(gbLineProps_);
-    spPhysicalMm_->setRange(0.000001, 1000000.0);
-    spPhysicalMm_->setDecimals(6);
-    spPhysicalMm_->setValue(100.0);
-    btnApplyScale_ = new QPushButton("Apply Physical Distance (mm)", gbLineProps_);
-    lp->addWidget(new QLabel("Physical distance (mm)", gbLineProps_), 4, 0);
-    lp->addWidget(spPhysicalMm_, 4, 1);
-    lp->addWidget(btnApplyScale_, 5, 0, 1, 2);
+    editPhysicalMm_ = new QLineEdit("100.0", gbLineProps_);
+    btnCalcScale_ = new QPushButton("Calculate", gbLineProps_);
+    lp->addWidget(new QLabel("Color", gbLineProps_), 0, 0);
+    lp->addWidget(cbLineColor_, 0, 1);
+    lp->addWidget(new QLabel("Width", gbLineProps_), 1, 0);
+    lp->addWidget(spLineWidth_, 1, 1);
+    lp->addWidget(new QLabel("Physical distance (mm)", gbLineProps_), 2, 0);
+    lp->addWidget(editPhysicalMm_, 2, 1);
+    lp->addWidget(btnCalcScale_, 3, 0, 1, 2);
     gbLineProps_->setLayout(lp);
     gbLineProps_->setVisible(false);
 
@@ -804,10 +807,11 @@ void MainWindow::buildUI() {
     connect(spBrightness_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ if (slBrightness_ && slBrightness_->value()!=v) slBrightness_->setValue(v); onPreprocessParamsChanged(); });
     connect(spContrast_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ if (slContrast_ && slContrast_->value()!=v) slContrast_->setValue(v); onPreprocessParamsChanged(); });
     connect(btnPreAuto_, &QPushButton::clicked, this, &MainWindow::onPreprocessAuto);
-    connect(btnApplyLineProps_, &QPushButton::clicked, this, &MainWindow::onApplyLineProps);
     connect(btnStartScaleLine_, &QPushButton::clicked, this, &MainWindow::onStartScaleLine);
     connect(btnDeleteScaleLine_, &QPushButton::clicked, this, &MainWindow::onDeleteScaleLine);
-    connect(btnApplyScale_, &QPushButton::clicked, this, &MainWindow::onApplyScaleFromInput);
+    connect(btnCalcScale_, &QPushButton::clicked, this, &MainWindow::onApplyScaleFromInput);
+    connect(cbLineColor_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ QColor c = cbLineColor_->currentData().value<QColor>(); int w = spLineWidth_?spLineWidth_->value():2; for (auto* v: sourceViews_) if(v) v->applySelectedLineStyle("Line", c, w); });
+    connect(spLineWidth_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int){ QColor c = cbLineColor_?cbLineColor_->currentData().value<QColor>():QColor(80,220,255); int w = spLineWidth_?spLineWidth_->value():2; for (auto* v: sourceViews_) if(v) v->applySelectedLineStyle("Line", c, w); });
     connect(chkShowLines_, &QCheckBox::toggled, this, [this](bool on){ for (auto* v: sourceViews_) if (v) v->setAnnotationsVisible(on); });
 
     // ObjectDefine + Visual pages
@@ -865,11 +869,15 @@ void MainWindow::buildUI() {
     QLabel* lblLocalBlock = new QLabel("Local block size", gbThresh);
     QLabel* lblLocalK = new QLabel("Local k/C", gbThresh);
     tg->addWidget(lblGlobalMethod, 1, 0);
+    cbGlobalMethod_->setMinimumWidth(260);
+    cbLocalMethod_->setMinimumWidth(260);
     tg->addWidget(cbGlobalMethod_, 1, 1);
     btnTryAllGlobal_ = new QPushButton("Try All", gbThresh);
     tg->addWidget(btnTryAllGlobal_, 1, 2);
     tg->addWidget(lblLocalMethod, 2, 0);
     tg->addWidget(cbLocalMethod_, 2, 1);
+    btnTryAllLocal_ = new QPushButton("Try All", gbThresh);
+    tg->addWidget(btnTryAllLocal_, 2, 2);
     tg->addWidget(lblLocalBlock, 3, 0);
     tg->addWidget(spLocalBlockSize_, 3, 1);
     tg->addWidget(lblLocalK, 3, 2);
@@ -886,6 +894,7 @@ void MainWindow::buildUI() {
       if (btnTryAllGlobal_) btnTryAllGlobal_->setVisible(!local);
       if (lblLocalMethod) lblLocalMethod->setVisible(local);
       if (cbLocalMethod_) cbLocalMethod_->setVisible(local);
+      if (btnTryAllLocal_) btnTryAllLocal_->setVisible(local);
       if (lblLocalBlock) lblLocalBlock->setVisible(local);
       if (spLocalBlockSize_) spLocalBlockSize_->setVisible(local);
       if (lblLocalK) lblLocalK->setVisible(local);
@@ -961,6 +970,7 @@ void MainWindow::buildUI() {
     connect(cbThreshType_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, updateMethodUi](int){ object_thresh_manual_ = false; updateMethodUi(); onObjectThresholdParamsChanged(); });
     connect(cbGlobalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ object_thresh_manual_ = false; onObjectThresholdParamsChanged(); });
     connect(btnTryAllGlobal_, &QPushButton::clicked, this, &MainWindow::onTryAllGlobalMethods);
+    connect(btnTryAllLocal_, &QPushButton::clicked, this, &MainWindow::onTryAllLocalMethods);
     connect(cbLocalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ object_thresh_manual_ = false; onObjectThresholdParamsChanged(); });
     connect(chkInvertBinary_, &QCheckBox::toggled, this, &MainWindow::onObjectThresholdParamsChanged);
     connect(slObjectThresh_, &QSlider::valueChanged, this, [this](int v){ object_thresh_manual_ = true; if (spObjectThresh_ && spObjectThresh_->value()!=v) spObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
@@ -1552,7 +1562,12 @@ void MainWindow::onObjectThresholdParamsChanged() {
   if (frames.empty()) return;
   for (const auto& f : frames) {
     if (f.empty()) continue;
-    cv::Mat bin = makeObjectBinaryPreview(applyPreprocess(f));
+    int autoT = spObjectThresh_ ? spObjectThresh_->value() : 128;
+    cv::Mat bin = makeObjectBinaryPreview(applyPreprocess(f), &autoT);
+    if (!object_thresh_manual_ && slObjectThresh_ && cbThreshType_ && cbThreshType_->currentIndex()==0) {
+      if (slObjectThresh_->value()!=autoT) slObjectThresh_->setValue(autoT);
+      if (spObjectThresh_ && spObjectThresh_->value()!=autoT) spObjectThresh_->setValue(autoT);
+    }
     if (!bin.empty() && lblBinaryPreview_) {
       QImage qi = matToQImage(bin);
       lblBinaryPreview_->setPixmap(QPixmap::fromImage(qi).scaled(lblBinaryPreview_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
@@ -1729,7 +1744,8 @@ void MainWindow::onApplyScaleFromInput() {
     QMessageBox::information(this, "Scale", "Please select the scale line first.");
     return;
   }
-  const double mm = spPhysicalMm_ ? spPhysicalMm_->value() : 0.0;
+  double mm = 0.0;
+  if (editPhysicalMm_) mm = editPhysicalMm_->text().toDouble();
   if (mm <= 0.0) {
     QMessageBox::information(this, "Scale", "Please input physical distance (mm) > 0.");
     return;
@@ -1768,6 +1784,7 @@ void MainWindow::onTryAllGlobalMethods() {
     if (idx >= 0) cbGlobalMethod_->setCurrentIndex(idx);
   }
   if (imgs.empty()) return;
+  for (auto& im : imgs) cv::resize(im, im, cv::Size(220, 140));
   cv::Mat mo = makeMosaic(imgs, 4);
   QImage qi = matToQImage(mo);
 
@@ -1776,24 +1793,54 @@ void MainWindow::onTryAllGlobalMethods() {
   QVBoxLayout* l = new QVBoxLayout(dlg);
   QLabel* lab = new QLabel(dlg);
   lab->setPixmap(QPixmap::fromImage(qi));
-  QScrollArea* sa = new QScrollArea(dlg);
-  sa->setWidget(lab);
-  sa->setWidgetResizable(true);
-  l->addWidget(sa);
-  dlg->resize(900, 650);
+  l->addWidget(lab);
+  dlg->resize(qi.width()+20, qi.height()+20);
   dlg->exec();
 }
 
-void MainWindow::onApplyLineProps() {
-  QColor c = QColor(80,220,255);
-  if (cbLineColor_) c = cbLineColor_->currentData().value<QColor>();
-  QString name = editLineName_ ? editLineName_->text().trimmed() : QString("Line");
-  int width = spLineWidth_ ? spLineWidth_->value() : 2;
-  for (auto* v : sourceViews_) {
-    if (v) v->applySelectedLineStyle(name, c, width);
+void MainWindow::onTryAllLocalMethods() {
+  std::vector<cv::Mat> frames;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    frames = last_frames_;
   }
-  logLine(QString("Apply line properties: name=%1 color=%2 width=%3")
-          .arg(name).arg(c.name()).arg(width));
+  cv::Mat src;
+  for (auto& f: frames) { if (!f.empty()) { src = applyPreprocess(f); break; } }
+  if (src.empty()) {
+    QMessageBox::information(this, "Try All", "No image available.");
+    return;
+  }
+
+  QString oldMethod = cbLocalMethod_ ? cbLocalMethod_->currentText() : QString();
+  int oldType = cbThreshType_ ? cbThreshType_->currentIndex() : 1;
+  if (cbThreshType_) cbThreshType_->setCurrentIndex(1);
+  const int n = cbLocalMethod_ ? cbLocalMethod_->count() : 0;
+  std::vector<cv::Mat> imgs;
+  for (int i=0;i<n;++i) {
+    if (cbLocalMethod_) cbLocalMethod_->setCurrentIndex(i);
+    cv::Mat b = makeObjectBinaryPreview(src);
+    if (b.empty()) continue;
+    cv::putText(b, cbLocalMethod_->itemText(i).toStdString(), cv::Point(10,22), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 1, cv::LINE_AA);
+    cv::resize(b, b, cv::Size(220, 140));
+    imgs.push_back(b);
+  }
+  if (cbLocalMethod_) {
+    int idx = cbLocalMethod_->findText(oldMethod);
+    if (idx >= 0) cbLocalMethod_->setCurrentIndex(idx);
+  }
+  if (cbThreshType_) cbThreshType_->setCurrentIndex(oldType);
+  if (imgs.empty()) return;
+  cv::Mat mo = makeMosaic(imgs, 4);
+  QImage qi = matToQImage(mo);
+
+  QDialog* dlg = new QDialog(this);
+  dlg->setWindowTitle("Try All Local Methods");
+  QVBoxLayout* l = new QVBoxLayout(dlg);
+  QLabel* lab = new QLabel(dlg);
+  lab->setPixmap(QPixmap::fromImage(qi));
+  l->addWidget(lab);
+  dlg->resize(qi.width()+20, qi.height()+20);
+  dlg->exec();
 }
 
 void MainWindow::onPreprocessAuto() {
@@ -2040,7 +2087,7 @@ void MainWindow::onTick() {
       int autoT = spObjectThresh_ ? spObjectThresh_->value() : 128;
       cv::Mat bin = makeObjectBinaryPreview(f, &autoT);
       if (!bin.empty()) {
-        if (slObjectThresh_ && cbThreshType_ && cbThreshType_->currentIndex()==0) {
+        if (!object_thresh_manual_ && slObjectThresh_ && cbThreshType_ && cbThreshType_->currentIndex()==0) {
           if (slObjectThresh_->value() != autoT) slObjectThresh_->setValue(autoT);
           if (spObjectThresh_ && spObjectThresh_->value() != autoT) spObjectThresh_->setValue(autoT);
         }

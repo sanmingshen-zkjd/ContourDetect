@@ -164,12 +164,12 @@ private slots:
   void onModeTabChanged(int idx);
   void onPreprocessParamsChanged();
   void onPreprocessAuto();
-  void onApplyLineProps();
   void onObjectThresholdParamsChanged();
   void onStartScaleLine();
   void onDeleteScaleLine();
   void onApplyScaleFromInput();
   void onTryAllGlobalMethods();
+  void onTryAllLocalMethods();
 
 private:
   void buildUI();
@@ -320,15 +320,13 @@ private:
   QSlider* slContrast_=nullptr;
   QSpinBox* spBrightness_=nullptr;
   QSpinBox* spContrast_=nullptr;
-  QLineEdit* editLineName_=nullptr;
   QComboBox* cbLineColor_=nullptr;
   QSpinBox* spLineWidth_=nullptr;
-  QPushButton* btnApplyLineProps_=nullptr;
   QPushButton* btnStartScaleLine_=nullptr;
   QCheckBox* chkShowLines_=nullptr;
   QPushButton* btnDeleteScaleLine_=nullptr;
-  QDoubleSpinBox* spPhysicalMm_=nullptr;
-  QPushButton* btnApplyScale_=nullptr;
+  QLineEdit* editPhysicalMm_=nullptr;
+  QPushButton* btnCalcScale_=nullptr;
   QGroupBox* gbLineProps_=nullptr;
   QLabel* lblPreprocessHint_=nullptr;
   QPushButton* btnPreAuto_=nullptr;
@@ -345,6 +343,7 @@ private:
   QDoubleSpinBox* spLocalK_=nullptr;
   QLabel* lblBinaryPreview_=nullptr;
   QPushButton* btnTryAllGlobal_=nullptr;
+  QPushButton* btnTryAllLocal_=nullptr;
 
   // Tracking tab
   QPushButton* btnLoadTag_=nullptr;
