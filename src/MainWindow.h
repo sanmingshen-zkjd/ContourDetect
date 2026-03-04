@@ -80,6 +80,7 @@ public:
   void setAnnotationsVisible(bool visible);
   void clearAllLines();
   double selectedLineLength() const;
+  double anyLineLength() const;
 
 protected:
   void wheelEvent(QWheelEvent* e) override;

@@ -117,6 +117,27 @@ private:
 
 
 
+class ThumbnailLabel : public QLabel {
+public:
+  explicit ThumbnailLabel(int idx, QWidget* parent=nullptr) : QLabel(parent), index_(idx) {
+    setCursor(Qt::PointingHandCursor);
+    setFrameStyle(QFrame::Box);
+    setLineWidth(1);
+  }
+  std::function<void(int)> onDoubleClick;
+protected:
+  void mouseDoubleClickEvent(QMouseEvent* e) override {
+    if (e->button() == Qt::LeftButton && onDoubleClick) {
+      onDoubleClick(index_);
+      e->accept();
+      return;
+    }
+    QLabel::mouseDoubleClickEvent(e);
+  }
+private:
+  int index_ = -1;
+};
+
 class NamedLineItem : public QGraphicsLineItem {
 public:
   NamedLineItem(const QLineF& line, const QString& name, const QColor& color, int width, QGraphicsItem* parent=nullptr)
@@ -299,6 +320,14 @@ void ImageViewer::clearAllLines() {
 
 double ImageViewer::selectedLineLength() const {
   const auto items = scene_.selectedItems();
+  for (auto* it : items) {
+    if (auto* li = dynamic_cast<QGraphicsLineItem*>(it)) return li->line().length();
+  }
+  return 0.0;
+}
+
+double ImageViewer::anyLineLength() const {
+  const auto items = scene_.items();
   for (auto* it : items) {
     if (auto* li = dynamic_cast<QGraphicsLineItem*>(it)) return li->line().length();
   }
@@ -852,7 +881,7 @@ void MainWindow::buildUI() {
     slObjectThresh_->setValue(128);
     spObjectThresh_->setValue(128);
 
-    chkInvertBinary_ = new QCheckBox("反色 (Invert)", gbThresh);
+    chkInvertBinary_ = new QCheckBox("Invert", gbThresh);
     spLocalBlockSize_ = new QSpinBox(gbThresh);
     spLocalBlockSize_->setRange(3, 99);
     spLocalBlockSize_->setSingleStep(2);
@@ -869,8 +898,8 @@ void MainWindow::buildUI() {
     QLabel* lblLocalBlock = new QLabel("Local block size", gbThresh);
     QLabel* lblLocalK = new QLabel("Local k/C", gbThresh);
     tg->addWidget(lblGlobalMethod, 1, 0);
-    cbGlobalMethod_->setMinimumWidth(260);
-    cbLocalMethod_->setMinimumWidth(260);
+    cbGlobalMethod_->setMinimumWidth(170);
+    cbLocalMethod_->setMinimumWidth(170);
     tg->addWidget(cbGlobalMethod_, 1, 1);
     btnTryAllGlobal_ = new QPushButton("Try All", gbThresh);
     tg->addWidget(btnTryAllGlobal_, 1, 2);
@@ -1738,10 +1767,10 @@ void MainWindow::onApplyScaleFromInput() {
   double px = 0.0;
   for (auto* v : sourceViews_) {
     if (!v) continue;
-    px = std::max(px, v->selectedLineLength());
+    px = std::max(px, v->anyLineLength());
   }
   if (px <= 1e-9) {
-    QMessageBox::information(this, "Scale", "Please select the scale line first.");
+    QMessageBox::information(this, "Scale", "Please draw one scale line first.");
     return;
   }
   double mm = 0.0;
@@ -1771,30 +1800,39 @@ void MainWindow::onTryAllGlobalMethods() {
 
   QString oldMethod = cbGlobalMethod_ ? cbGlobalMethod_->currentText() : QString();
   const int n = cbGlobalMethod_ ? cbGlobalMethod_->count() : 0;
-  std::vector<cv::Mat> imgs;
-  for (int i=0;i<n;++i) {
+
+  QDialog* dlg = new QDialog(this);
+  dlg->setWindowTitle("Try All Global Methods");
+  QVBoxLayout* outer = new QVBoxLayout(dlg);
+  QGridLayout* grid = new QGridLayout();
+  const int thumbW = 220, thumbH = 140, cols = 4;
+
+  for (int i = 0; i < n; ++i) {
     if (cbGlobalMethod_) cbGlobalMethod_->setCurrentIndex(i);
     cv::Mat b = makeObjectBinaryPreview(src);
     if (b.empty()) continue;
-    cv::putText(b, cbGlobalMethod_->itemText(i).toStdString(), cv::Point(10,22), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 1, cv::LINE_AA);
-    imgs.push_back(b);
+    cv::resize(b, b, cv::Size(thumbW, thumbH));
+    const QString methodName = cbGlobalMethod_->itemText(i);
+    cv::putText(b, methodName.toStdString(), cv::Point(8, 20), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,0,255), 2, cv::LINE_AA);
+
+    auto* tile = new ThumbnailLabel(i, dlg);
+    tile->setFixedSize(thumbW, thumbH);
+    tile->setPixmap(QPixmap::fromImage(matToQImage(b)));
+    tile->setScaledContents(true);
+    tile->setToolTip(methodName + "\nDouble-click to use this method");
+    tile->onDoubleClick = [this, dlg](int idx) {
+      if (cbGlobalMethod_ && idx >= 0 && idx < cbGlobalMethod_->count()) cbGlobalMethod_->setCurrentIndex(idx);
+      dlg->accept();
+    };
+    grid->addWidget(tile, i / cols, i % cols);
   }
+
   if (cbGlobalMethod_) {
     int idx = cbGlobalMethod_->findText(oldMethod);
     if (idx >= 0) cbGlobalMethod_->setCurrentIndex(idx);
   }
-  if (imgs.empty()) return;
-  for (auto& im : imgs) cv::resize(im, im, cv::Size(220, 140));
-  cv::Mat mo = makeMosaic(imgs, 4);
-  QImage qi = matToQImage(mo);
 
-  QDialog* dlg = new QDialog(this);
-  dlg->setWindowTitle("Try All Global Methods");
-  QVBoxLayout* l = new QVBoxLayout(dlg);
-  QLabel* lab = new QLabel(dlg);
-  lab->setPixmap(QPixmap::fromImage(qi));
-  l->addWidget(lab);
-  dlg->resize(qi.width()+20, qi.height()+20);
+  outer->addLayout(grid);
   dlg->exec();
 }
 
@@ -1815,31 +1853,40 @@ void MainWindow::onTryAllLocalMethods() {
   int oldType = cbThreshType_ ? cbThreshType_->currentIndex() : 1;
   if (cbThreshType_) cbThreshType_->setCurrentIndex(1);
   const int n = cbLocalMethod_ ? cbLocalMethod_->count() : 0;
-  std::vector<cv::Mat> imgs;
-  for (int i=0;i<n;++i) {
+
+  QDialog* dlg = new QDialog(this);
+  dlg->setWindowTitle("Try All Local Methods");
+  QVBoxLayout* outer = new QVBoxLayout(dlg);
+  QGridLayout* grid = new QGridLayout();
+  const int thumbW = 220, thumbH = 140, cols = 4;
+
+  for (int i = 0; i < n; ++i) {
     if (cbLocalMethod_) cbLocalMethod_->setCurrentIndex(i);
     cv::Mat b = makeObjectBinaryPreview(src);
     if (b.empty()) continue;
-    cv::putText(b, cbLocalMethod_->itemText(i).toStdString(), cv::Point(10,22), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 1, cv::LINE_AA);
-    cv::resize(b, b, cv::Size(220, 140));
-    imgs.push_back(b);
+    cv::resize(b, b, cv::Size(thumbW, thumbH));
+    const QString methodName = cbLocalMethod_->itemText(i);
+    cv::putText(b, methodName.toStdString(), cv::Point(8, 20), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,0,255), 2, cv::LINE_AA);
+
+    auto* tile = new ThumbnailLabel(i, dlg);
+    tile->setFixedSize(thumbW, thumbH);
+    tile->setPixmap(QPixmap::fromImage(matToQImage(b)));
+    tile->setScaledContents(true);
+    tile->setToolTip(methodName + "\nDouble-click to use this method");
+    tile->onDoubleClick = [this, dlg](int idx) {
+      if (cbLocalMethod_ && idx >= 0 && idx < cbLocalMethod_->count()) cbLocalMethod_->setCurrentIndex(idx);
+      dlg->accept();
+    };
+    grid->addWidget(tile, i / cols, i % cols);
   }
+
   if (cbLocalMethod_) {
     int idx = cbLocalMethod_->findText(oldMethod);
     if (idx >= 0) cbLocalMethod_->setCurrentIndex(idx);
   }
   if (cbThreshType_) cbThreshType_->setCurrentIndex(oldType);
-  if (imgs.empty()) return;
-  cv::Mat mo = makeMosaic(imgs, 4);
-  QImage qi = matToQImage(mo);
 
-  QDialog* dlg = new QDialog(this);
-  dlg->setWindowTitle("Try All Local Methods");
-  QVBoxLayout* l = new QVBoxLayout(dlg);
-  QLabel* lab = new QLabel(dlg);
-  lab->setPixmap(QPixmap::fromImage(qi));
-  l->addWidget(lab);
-  dlg->resize(qi.width()+20, qi.height()+20);
+  outer->addLayout(grid);
   dlg->exec();
 }
 
