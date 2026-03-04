@@ -174,6 +174,10 @@ void ImageViewer::clearAnnotations() {
   lineDrawing_ = false;
 }
 
+
+void ImageViewer::setLineCreatedCallback(const std::function<void(double)>& cb) { onLineCreated_ = cb; }
+void ImageViewer::setLineDoubleClickCallback(const std::function<void(double)>& cb) { onLineDoubleClick_ = cb; }
+
 void ImageViewer::applyZoom(double factor) {
   zoomFactor_ *= factor;
   zoomFactor_ = std::max(0.1, std::min(zoomFactor_, 20.0));
@@ -207,7 +211,8 @@ void ImageViewer::mousePressEvent(QMouseEvent* e) {
       lineStart_ = p;
       previewLine_ = scene_.addLine(QLineF(lineStart_, lineStart_), QPen(QColor(80,220,255), 2));
     } else {
-      scene_.addLine(QLineF(lineStart_, p), QPen(QColor(80,220,255), 2));
+      auto* finalLine = scene_.addLine(QLineF(lineStart_, p), QPen(QColor(80,220,255), 2));
+      if (onLineCreated_) onLineCreated_(finalLine->line().length());
       if (previewLine_) {
         scene_.removeItem(previewLine_);
         delete previewLine_;
@@ -226,6 +231,24 @@ void ImageViewer::mouseMoveEvent(QMouseEvent* e) {
     return;
   }
   QGraphicsView::mouseMoveEvent(e);
+}
+
+
+void ImageViewer::mouseDoubleClickEvent(QMouseEvent* e) {
+  if (e->button() != Qt::LeftButton) {
+    QGraphicsView::mouseDoubleClickEvent(e);
+    return;
+  }
+  QPointF p = mapToScene(e->pos());
+  if (QGraphicsItem* it = scene_.itemAt(p, transform())) {
+    if (it != pixmapItem_ && dynamic_cast<QGraphicsLineItem*>(it)) {
+      auto* li = static_cast<QGraphicsLineItem*>(it);
+      if (onLineDoubleClick_) onLineDoubleClick_(li->line().length());
+      e->accept();
+      return;
+    }
+  }
+  QGraphicsView::mouseDoubleClickEvent(e);
 }
 
 void ImageViewer::resizeEvent(QResizeEvent* e) {
@@ -388,7 +411,6 @@ void MainWindow::buildUI() {
     btnFileMenu_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     btnFileMenu_->setToolTip("Software info, Save Project, Load Project");
     sv->addWidget(btnFileMenu_);
-    root->addWidget(sideBar);
     sideBar->setStyleSheet(
       "#leftSidebar{background:#1f232b;border-right:1px solid #4a5568;}"
       "#sidebarTitle{font-size:11px;font-weight:600;color:#b8c4d6;padding:4px 4px;line-height:1.1;}"
@@ -396,9 +418,7 @@ void MainWindow::buildUI() {
       "QToolButton::menu-indicator{subcontrol-position:right center;right:8px;}"
       "QFrame{color:#394150;background:#394150;}");
 
-    const int sidebarReserved = sideBar->width() + 12;
-    statusBar()->setStyleSheet(QString("QStatusBar{padding-left:%1px;border-top:1px solid #3a4250;}"
-                                      "QStatusBar::item{border:none;}").arg(sidebarReserved));
+    statusBar()->setStyleSheet("QStatusBar{border-top:1px solid #3a4250;}QStatusBar::item{border:none;}");
 
     QWidget* mainPane = new QWidget(central);
     QVBoxLayout* v = new QVBoxLayout(mainPane);
@@ -435,11 +455,8 @@ void MainWindow::buildUI() {
     btnAddVideo_->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
     btnAddImgSeq_->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
     btnRemoveSource_->setIcon(style()->standardIcon(QStyle::SP_TrashIcon));
-    topSourceBar->addWidget(btnAddCam_);
-    topSourceBar->addWidget(btnAddVideo_);
-    topSourceBar->addWidget(btnAddImgSeq_);
-    topSourceBar->addWidget(btnRemoveSource_);
     topSourceBar->addStretch(1);
+    topSourceBar->addWidget(btnFileMenu_);
     v->addLayout(topSourceBar);
 
     QFrame* topSep = new QFrame(central);
@@ -541,6 +558,9 @@ void MainWindow::buildUI() {
     capv->addWidget(new QLabel("Live capture source management", tabCap));
     btnCaptureNow_ = new QPushButton("Capture", tabCap);
     capv->addWidget(btnAddCam_);
+    capv->addWidget(btnAddVideo_);
+    capv->addWidget(btnAddImgSeq_);
+    capv->addWidget(btnRemoveSource_);
     capv->addWidget(btnCaptureNow_);
     capv->addStretch(1);
     connect(btnCaptureNow_, &QPushButton::clicked, this, &MainWindow::onCaptureNow);
@@ -574,12 +594,16 @@ void MainWindow::buildUI() {
     bcLayout->addWidget(slContrast_, 1, 1);
     gbBC->setLayout(bcLayout);
 
+    btnPreAuto_ = new QPushButton("Auto", tabCal);
     lblPreprocessHint_ = new QLabel("Apply color mode + brightness/contrast to the live view.", tabCal);
     lblCaptured_ = new QLabel("Captured: 0", tabCal);
+    lblScaleInfo_ = new QLabel("Scale: not calibrated", tabCal);
 
     calv->addWidget(gbColor);
     calv->addWidget(gbBC);
+    calv->addWidget(btnPreAuto_);
     calv->addWidget(lblPreprocessHint_);
+    calv->addWidget(lblScaleInfo_);
     calv->addWidget(lblCaptured_);
     calv->addStretch(1);
 
@@ -588,6 +612,7 @@ void MainWindow::buildUI() {
     connect(cbPreColor_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onPreprocessParamsChanged);
     connect(slBrightness_, &QSlider::valueChanged, this, &MainWindow::onPreprocessParamsChanged);
     connect(slContrast_, &QSlider::valueChanged, this, &MainWindow::onPreprocessParamsChanged);
+    connect(btnPreAuto_, &QPushButton::clicked, this, &MainWindow::onPreprocessAuto);
 
     // ObjectDefine + Visual pages
     QWidget* tabObj = new QWidget(actionTabs_);
@@ -910,6 +935,16 @@ void MainWindow::rebuildSourceViews() {
     ImageViewer* v = new ImageViewer(canvas);
     v->setMinimumSize(480, 270);
     v->setToolMode(ImageViewer::PanTool);
+    v->setLineCreatedCallback([this](double pxLen){ updateScaleStatus(pxLen); });
+    v->setLineDoubleClickCallback([this](double pxLen){
+      bool ok = false;
+      double mm = QInputDialog::getDouble(this, "Scale Calibration", "Actual length (mm):", 100.0, 1e-6, 1e9, 6, &ok);
+      if (!ok || pxLen <= 1e-9) return;
+      mm_per_pixel_ = mm / pxLen;
+      updateScaleStatus(pxLen);
+      logLine(QString("Scale calibrated: %1 mm / %2 px = %3 mm/px")
+              .arg(mm,0,'f',6).arg(pxLen,0,'f',3).arg(mm_per_pixel_,0,'f',9));
+    });
     //connect(panBtn, &QToolButton::clicked, this, [v, panBtn, pointBtn, lineBtn]() {
     //  panBtn->setChecked(true); pointBtn->setChecked(false); lineBtn->setChecked(false);
     //  v->setToolMode(ImageViewer::PanTool);
@@ -1218,8 +1253,8 @@ void MainWindow::onModeTracking() {
 void MainWindow::onModeCapture() {
   mode_ = CAPTURE;
   if (btnAddCam_) btnAddCam_->setVisible(true);
-  if (btnAddVideo_) btnAddVideo_->setVisible(false);
-  if (btnAddImgSeq_) btnAddImgSeq_->setVisible(false);
+  if (btnAddVideo_) btnAddVideo_->setVisible(true);
+  if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
   if (actionTabs_ && actionTabs_->currentIndex()!=0) actionTabs_->setCurrentIndex(0);
   if (stepTabs_ && stepTabs_->currentIndex()!=0) stepTabs_->setCurrentIndex(0);
   rebuildSourceViews();
@@ -1263,6 +1298,66 @@ void MainWindow::onPreprocessParamsChanged() {
           .arg(cbPreColor_ && cbPreColor_->currentIndex()==0 ? "B/W" : "Color")
           .arg(slBrightness_ ? slBrightness_->value() : 0)
           .arg(slContrast_ ? slContrast_->value() : 0));
+}
+
+void MainWindow::onPreprocessAuto() {
+  cv::Mat frame;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    for (const auto& f : last_frames_) {
+      if (!f.empty()) { frame = f; break; }
+    }
+  }
+  if (frame.empty()) {
+    QMessageBox::information(this, "Auto", "No image available for auto adjustment.");
+    return;
+  }
+
+  cv::Mat gray;
+  if (frame.channels() == 3) cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+  else gray = frame;
+
+  const int histSize = 256;
+  float range[] = {0, 256};
+  const float* histRange = {range};
+  cv::Mat hist;
+  cv::calcHist(&gray, 1, 0, cv::Mat(), hist, 1, &histSize, &histRange, true, false);
+  const double total = static_cast<double>(gray.total());
+  const double clip = total * 0.0035; // ImageJ-like auto clip ratio
+
+  int lo = 0, hi = 255;
+  double acc = 0.0;
+  for (int i=0;i<256;++i) { acc += hist.at<float>(i); if (acc >= clip) { lo = i; break; } }
+  acc = 0.0;
+  for (int i=255;i>=0;--i) { acc += hist.at<float>(i); if (acc >= clip) { hi = i; break; } }
+  if (hi <= lo) { lo = 0; hi = 255; }
+
+  const double alpha = 255.0 / std::max(1, hi - lo);
+  const double beta = -alpha * lo;
+
+  int c = 0;
+  if (alpha >= 1.0) c = (int)std::round((alpha - 1.0) * 50.0);
+  else c = (int)std::round((alpha - 1.0) * 100.0);
+  c = std::max(-100, std::min(100, c));
+  int b = (int)std::round(beta);
+  b = std::max(-255, std::min(255, b));
+
+  if (slBrightness_) slBrightness_->setValue(b);
+  if (slContrast_) slContrast_->setValue(c);
+  logLine(QString("Auto brightness/contrast: lo=%1 hi=%2 => brightness=%3 contrast=%4")
+          .arg(lo).arg(hi).arg(b).arg(c));
+}
+
+void MainWindow::updateScaleStatus(double pxLen) {
+  if (!lblScaleInfo_) return;
+  if (mm_per_pixel_ > 0.0) {
+    lblScaleInfo_->setText(QString("Scale: %1 mm/px (line: %2 px, %3 mm)")
+                           .arg(mm_per_pixel_,0,'f',9)
+                           .arg(pxLen,0,'f',2)
+                           .arg(pxLen * mm_per_pixel_,0,'f',4));
+  } else {
+    lblScaleInfo_->setText(QString("Scale: line length %1 px (double click line to set real distance)").arg(pxLen,0,'f',2));
+  }
 }
 
 bool MainWindow::readFrames(std::vector<cv::Mat>& frames) {
