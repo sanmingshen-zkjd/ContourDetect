@@ -38,6 +38,7 @@
 #include <QLineEdit>
 #include <QStringList>
 #include <QVector>
+#include <functional>
 
 #include <opencv2/opencv.hpp>
 #include "Core.h"
@@ -71,11 +72,14 @@ public:
   void zoomOut();
   void resetView();
   void clearAnnotations();
+  void setLineCreatedCallback(const std::function<void(double)>& cb);
+  void setLineDoubleClickCallback(const std::function<void(double)>& cb);
 
 protected:
   void wheelEvent(QWheelEvent* e) override;
   void mousePressEvent(QMouseEvent* e) override;
   void mouseMoveEvent(QMouseEvent* e) override;
+  void mouseDoubleClickEvent(QMouseEvent* e) override;
   void resizeEvent(QResizeEvent* e) override;
 
 private:
@@ -88,6 +92,8 @@ private:
   bool lineDrawing_ = false;
   QPointF lineStart_;
   QGraphicsLineItem* previewLine_ = nullptr;
+  std::function<void(double)> onLineCreated_;
+  std::function<void(double)> onLineDoubleClick_;
 };
 
 class MainWindow : public QMainWindow {
@@ -149,6 +155,8 @@ private slots:
   void onModeTracking();
   void onModeCapture();
   void onModeTabChanged(int idx);
+  void onPreprocessParamsChanged();
+  void onPreprocessAuto();
 
 private:
   void buildUI();
@@ -180,6 +188,8 @@ private:
   void overlayTracking(std::vector<cv::Mat>& vis, const std::vector<cv::Mat>& frames);
 
   void updateStatus();
+  cv::Mat applyPreprocess(const cv::Mat& src) const;
+  void updateScaleStatus(double pxLen);
   bool runCalibrationOnPairs(const std::vector<int>& pairIndices, bool updateTable);
   void refreshTrajectoryPlot();
   void onAddVisualizationChart();
@@ -271,6 +281,7 @@ private:
   //QCheckBox* chkSyncPlay_=nullptr;
   //QLabel* lblPlayState_=nullptr;
   QTabBar* sideModeTabs_=nullptr;
+  QTabBar* stepTabs_=nullptr;
   QToolButton* btnFileMenu_=nullptr;
   QTabWidget* actionTabs_=nullptr;
 
@@ -288,6 +299,14 @@ private:
   QLabel* lblCalibProgress_=nullptr;
   QTableWidget* calibErrorTable_=nullptr;
   QLabel* lblCaptured_=nullptr;
+
+  // Preprocess tab
+  QComboBox* cbPreColor_=nullptr;
+  QSlider* slBrightness_=nullptr;
+  QSlider* slContrast_=nullptr;
+  QLabel* lblPreprocessHint_=nullptr;
+  QPushButton* btnPreAuto_=nullptr;
+  QLabel* lblScaleInfo_=nullptr;
 
   // Tracking tab
   QPushButton* btnLoadTag_=nullptr;
@@ -335,6 +354,7 @@ private:
   double play_fps_=30.0;
   int ui_frame_skip_=0;
   int ui_overlay_div_=4; // run heavy overlay every N UI ticks
+  double mm_per_pixel_ = 0.0;
 
   struct CalibrationPair {
     int frame_id = -1;
