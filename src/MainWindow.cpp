@@ -258,6 +258,14 @@ void ImageViewer::applySelectedLineStyle(const QString& name, const QColor& colo
   }
 }
 
+void ImageViewer::setAnnotationsVisible(bool visible) {
+  const auto items = scene_.items();
+  for (auto* it : items) {
+    if (it == pixmapItem_) continue;
+    it->setVisible(visible);
+  }
+}
+
 void ImageViewer::applyZoom(double factor) {
   zoomFactor_ *= factor;
   zoomFactor_ = std::max(0.1, std::min(zoomFactor_, 20.0));
@@ -688,18 +696,20 @@ void MainWindow::buildUI() {
     spContrast_->setRange(0, 255);
 
     slBrightness_->setValue(128);
+    slBrightness_->setMinimumWidth(220);
     slContrast_->setValue(128);
+    slContrast_->setMinimumWidth(220);
     spBrightness_->setValue(128);
     spContrast_->setValue(128);
 
     bcLayout->addWidget(lblB, 0, 0);
     bcLayout->addWidget(slBrightness_, 0, 1);
     bcLayout->addWidget(spBrightness_, 0, 2);
-    bcLayout->addWidget(new QLabel("[0,255]", gbBC), 0, 3);
     bcLayout->addWidget(lblC, 1, 0);
     bcLayout->addWidget(slContrast_, 1, 1);
     bcLayout->addWidget(spContrast_, 1, 2);
-    bcLayout->addWidget(new QLabel("[0,255]", gbBC), 1, 3);
+    QLabel* lblRangeBC = new QLabel("[0,255]", gbBC);
+    bcLayout->addWidget(lblRangeBC, 0, 3, 2, 1);
     gbBC->setLayout(bcLayout);
 
     btnPreAuto_ = new QPushButton("Auto", tabCal);
@@ -713,28 +723,38 @@ void MainWindow::buildUI() {
     calv->addWidget(lblPreprocessHint_);
 
     calv->addWidget(new QLabel("Step 3: Scale Calibration", tabCal));
-    QGroupBox* gbLine = new QGroupBox("Line Properties", tabCal);
-    QGridLayout* lp = new QGridLayout(gbLine);
-    editLineName_ = new QLineEdit("Line", gbLine);
-    cbLineColor_ = new QComboBox(gbLine);
+    QHBoxLayout* scaleCtl = new QHBoxLayout();
+    btnStartScaleLine_ = new QPushButton("Draw Scale Line", tabCal);
+    chkShowLines_ = new QCheckBox("Show Lines", tabCal);
+    chkShowLines_->setChecked(false);
+    scaleCtl->addWidget(btnStartScaleLine_);
+    scaleCtl->addWidget(chkShowLines_);
+    scaleCtl->addStretch(1);
+    calv->addLayout(scaleCtl);
+
+    gbLineProps_ = new QGroupBox("Line Properties", tabCal);
+    QGridLayout* lp = new QGridLayout(gbLineProps_);
+    editLineName_ = new QLineEdit("Line", gbLineProps_);
+    cbLineColor_ = new QComboBox(gbLineProps_);
     cbLineColor_->addItem("Cyan", QColor(80,220,255));
     cbLineColor_->addItem("Red", QColor(255,80,80));
     cbLineColor_->addItem("Green", QColor(80,255,120));
     cbLineColor_->addItem("Yellow", QColor(255,220,80));
-    spLineWidth_ = new QSpinBox(gbLine);
+    spLineWidth_ = new QSpinBox(gbLineProps_);
     spLineWidth_->setRange(1, 12);
     spLineWidth_->setValue(2);
-    btnApplyLineProps_ = new QPushButton("Apply To Selected Line", gbLine);
-    lp->addWidget(new QLabel("Name", gbLine), 0, 0);
+    btnApplyLineProps_ = new QPushButton("Apply To Selected Line", gbLineProps_);
+    lp->addWidget(new QLabel("Name", gbLineProps_), 0, 0);
     lp->addWidget(editLineName_, 0, 1);
-    lp->addWidget(new QLabel("Color", gbLine), 1, 0);
+    lp->addWidget(new QLabel("Color", gbLineProps_), 1, 0);
     lp->addWidget(cbLineColor_, 1, 1);
-    lp->addWidget(new QLabel("Width", gbLine), 2, 0);
+    lp->addWidget(new QLabel("Width", gbLineProps_), 2, 0);
     lp->addWidget(spLineWidth_, 2, 1);
     lp->addWidget(btnApplyLineProps_, 3, 0, 1, 2);
-    gbLine->setLayout(lp);
+    gbLineProps_->setLayout(lp);
+    gbLineProps_->setVisible(false);
 
-    calv->addWidget(gbLine);
+    calv->addWidget(gbLineProps_);
     calv->addWidget(lblScaleInfo_);
     calv->addWidget(lblCaptured_);
     calv->addStretch(1);
@@ -748,6 +768,8 @@ void MainWindow::buildUI() {
     connect(spContrast_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ if (slContrast_ && slContrast_->value()!=v) slContrast_->setValue(v); onPreprocessParamsChanged(); });
     connect(btnPreAuto_, &QPushButton::clicked, this, &MainWindow::onPreprocessAuto);
     connect(btnApplyLineProps_, &QPushButton::clicked, this, &MainWindow::onApplyLineProps);
+    connect(btnStartScaleLine_, &QPushButton::clicked, this, &MainWindow::onStartScaleLine);
+    connect(chkShowLines_, &QCheckBox::toggled, this, [this](bool on){ for (auto* v: sourceViews_) if (v) v->setAnnotationsVisible(on); });
 
     // ObjectDefine + Visual pages
     QWidget* tabObj = new QWidget(actionTabs_);
@@ -771,12 +793,14 @@ void MainWindow::buildUI() {
     cbThreshType_->addItem("Auto Local Threshold");
 
     cbGlobalMethod_ = new QComboBox(gbThresh);
-    cbGlobalMethod_->addItem("Otsu");
-    cbGlobalMethod_->addItem("Triangle");
+    for (const QString& m : {"Default","Huang","Intermodes","IsoData","Li","MaxEntropy","Mean","MinError(I)","Minimum","Moments","Otsu","Percentile","RenyiEntropy","Shanbhag","Triangle","Yen"}) {
+      cbGlobalMethod_->addItem(m);
+    }
 
     cbLocalMethod_ = new QComboBox(gbThresh);
-    cbLocalMethod_->addItem("Mean");
-    cbLocalMethod_->addItem("Gaussian");
+    for (const QString& m : {"Bernsen","Contrast","Mean","Median","MidGrey","Niblack","Otsu","Phansalkar","Sauvola","Gaussian"}) {
+      cbLocalMethod_->addItem(m);
+    }
 
     slObjectThresh_ = new QSlider(Qt::Horizontal, gbThresh);
     spObjectThresh_ = new QSpinBox(gbThresh);
@@ -797,23 +821,43 @@ void MainWindow::buildUI() {
 
     tg->addWidget(new QLabel("Type", gbThresh), 0, 0);
     tg->addWidget(cbThreshType_, 0, 1, 1, 3);
-    tg->addWidget(new QLabel("Global method", gbThresh), 1, 0);
+    QLabel* lblGlobalMethod = new QLabel("Global method", gbThresh);
+    QLabel* lblLocalMethod = new QLabel("Local method", gbThresh);
+    QLabel* lblLocalBlock = new QLabel("Local block size", gbThresh);
+    QLabel* lblLocalK = new QLabel("Local k/C", gbThresh);
+    tg->addWidget(lblGlobalMethod, 1, 0);
     tg->addWidget(cbGlobalMethod_, 1, 1);
-    tg->addWidget(new QLabel("Local method", gbThresh), 1, 2);
+    tg->addWidget(lblLocalMethod, 1, 2);
     tg->addWidget(cbLocalMethod_, 1, 3);
     tg->addWidget(new QLabel("Threshold [0,255]", gbThresh), 2, 0);
     tg->addWidget(slObjectThresh_, 2, 1, 1, 2);
     tg->addWidget(spObjectThresh_, 2, 3);
-    tg->addWidget(new QLabel("Local block size", gbThresh), 3, 0);
+    tg->addWidget(lblLocalBlock, 3, 0);
     tg->addWidget(spLocalBlockSize_, 3, 1);
-    tg->addWidget(new QLabel("Local k/C", gbThresh), 3, 2);
+    tg->addWidget(lblLocalK, 3, 2);
     tg->addWidget(spLocalK_, 3, 3);
-    tg->addWidget(chkInvertBinary_, 4, 0, 1, 2);
     gbThresh->setLayout(tg);
+
+    auto updateMethodUi = [this, lblGlobalMethod, lblLocalMethod, lblLocalBlock, lblLocalK]() {
+      const bool local = cbThreshType_ && cbThreshType_->currentIndex() == 1;
+      if (lblGlobalMethod) lblGlobalMethod->setVisible(!local);
+      if (cbGlobalMethod_) cbGlobalMethod_->setVisible(!local);
+      if (lblLocalMethod) lblLocalMethod->setVisible(local);
+      if (cbLocalMethod_) cbLocalMethod_->setVisible(local);
+      if (lblLocalBlock) lblLocalBlock->setVisible(local);
+      if (spLocalBlockSize_) spLocalBlockSize_->setVisible(local);
+      if (lblLocalK) lblLocalK->setVisible(local);
+      if (spLocalK_) spLocalK_->setVisible(local);
+    };
+    updateMethodUi();
 
     trkMainLayout->addWidget(gbThresh);
 
-    trkMainLayout->addWidget(new QLabel("Binary Preview", tabObj));
+    QHBoxLayout* prevTitle = new QHBoxLayout();
+    prevTitle->addWidget(new QLabel("Binary Preview", tabObj));
+    prevTitle->addStretch(1);
+    prevTitle->addWidget(chkInvertBinary_);
+    trkMainLayout->addLayout(prevTitle);
     lblBinaryPreview_ = new QLabel(tabObj);
     lblBinaryPreview_->setMinimumSize(280, 180);
     lblBinaryPreview_->setAlignment(Qt::AlignCenter);
@@ -872,7 +916,7 @@ void MainWindow::buildUI() {
 
     connect(btnAddVisChart_, &QPushButton::clicked, this, &MainWindow::onAddVisualizationChart);
 
-    connect(cbThreshType_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onObjectThresholdParamsChanged);
+    connect(cbThreshType_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, updateMethodUi](int){ updateMethodUi(); onObjectThresholdParamsChanged(); });
     connect(cbGlobalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onObjectThresholdParamsChanged);
     connect(cbLocalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onObjectThresholdParamsChanged);
     connect(chkInvertBinary_, &QCheckBox::toggled, this, &MainWindow::onObjectThresholdParamsChanged);
@@ -1084,7 +1128,7 @@ void MainWindow::rebuildSourceViews() {
     ImageViewer* v = new ImageViewer(canvas);
     v->setMinimumSize(480, 270);
     v->setToolMode(ImageViewer::PanTool);
-    v->setLineCreatedCallback([this](double pxLen){ updateScaleStatus(pxLen); });
+    v->setLineCreatedCallback([this](double pxLen){ if (gbLineProps_) gbLineProps_->setVisible(true); updateScaleStatus(pxLen); });
     v->setLineDoubleClickCallback([this](double pxLen){ updateScaleStatus(pxLen); });
     v->setLineValueEditedCallback([this](double pxLen, double mm){
       if (pxLen <= 1e-9 || mm <= 0.0) return;
@@ -1093,6 +1137,7 @@ void MainWindow::rebuildSourceViews() {
       logLine(QString("Scale calibrated(inline): %1 mm / %2 px = %3 mm/px")
               .arg(mm,0,'f',6).arg(pxLen,0,'f',3).arg(mm_per_pixel_,0,'f',9));
     });
+    v->setAnnotationsVisible(chkShowLines_ ? chkShowLines_->isChecked() : false);
     //connect(panBtn, &QToolButton::clicked, this, [v, panBtn, pointBtn, lineBtn]() {
     //  panBtn->setChecked(true); pointBtn->setChecked(false); lineBtn->setChecked(false);
     //  v->setToolMode(ImageViewer::PanTool);
@@ -1480,28 +1525,140 @@ cv::Mat MainWindow::makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalTh
   else if (src.channels()==4) cv::cvtColor(src, gray, cv::COLOR_BGRA2GRAY);
   else gray = src.clone();
 
+  auto clampT = [](int t){ return std::max(0, std::min(255, t)); };
+  auto hist256 = [&](const cv::Mat& g) {
+    std::vector<double> h(256, 0.0);
+    for (int y=0; y<g.rows; ++y) {
+      const uchar* r = g.ptr<uchar>(y);
+      for (int x=0; x<g.cols; ++x) h[r[x]] += 1.0;
+    }
+    return h;
+  };
+  auto sumHist = [](const std::vector<double>& h){ double s=0; for(double v:h) s+=v; return s; };
+
   cv::Mat bin;
   const bool local = cbThreshType_ && cbThreshType_->currentIndex() == 1;
   if (!local) {
-    if (cbGlobalMethod_ && cbGlobalMethod_->currentIndex() == 1) {
-      double t = cv::threshold(gray, bin, 0, 255, cv::THRESH_BINARY | cv::THRESH_TRIANGLE);
-      if (outGlobalThreshold) *outGlobalThreshold = (int)std::round(t);
+    int thr = spObjectThresh_ ? spObjectThresh_->value() : 128;
+    QString gm = cbGlobalMethod_ ? cbGlobalMethod_->currentText() : QString("Otsu");
+
+    if (gm == "Otsu") {
+      thr = (int)std::round(cv::threshold(gray, bin, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU));
+    } else if (gm == "Triangle") {
+      thr = (int)std::round(cv::threshold(gray, bin, 0, 255, cv::THRESH_BINARY | cv::THRESH_TRIANGLE));
+    } else if (gm == "Mean" || gm == "Percentile") {
+      cv::Scalar m = cv::mean(gray);
+      thr = (gm == "Mean") ? (int)std::round(m[0]) : (int)std::round(0.5 * 255.0);
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
+    } else if (gm == "IsoData" || gm == "Default") {
+      cv::Scalar m = cv::mean(gray);
+      double t = m[0], prev = -1;
+      for (int i=0;i<64 && std::abs(t-prev)>0.5;i++) {
+        prev = t;
+        cv::Mat a,b;
+        cv::threshold(gray, a, t, 255, cv::THRESH_BINARY_INV);
+        cv::threshold(gray, b, t, 255, cv::THRESH_BINARY);
+        double m1 = cv::mean(gray, a)[0];
+        double m2 = cv::mean(gray, b)[0];
+        t = (m1 + m2) * 0.5;
+      }
+      thr = clampT((int)std::round(t));
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
+    } else if (gm == "Li") {
+      cv::Scalar m = cv::mean(gray);
+      double t = std::max(1.0, m[0]);
+      for (int i=0;i<64;i++) {
+        cv::Mat a,b;
+        cv::threshold(gray, a, t, 255, cv::THRESH_BINARY_INV);
+        cv::threshold(gray, b, t, 255, cv::THRESH_BINARY);
+        double m1 = std::max(1e-6, cv::mean(gray, a)[0]);
+        double m2 = std::max(1e-6, cv::mean(gray, b)[0]);
+        double nt = (m1 - m2) / (std::log(m1) - std::log(m2));
+        if (!std::isfinite(nt) || std::abs(nt - t) < 0.5) break;
+        t = nt;
+      }
+      thr = clampT((int)std::round(t));
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
+    } else if (gm == "Yen" || gm == "MaxEntropy" || gm == "RenyiEntropy" || gm == "Shanbhag" || gm == "Huang" || gm == "Intermodes" || gm == "MinError(I)" || gm == "Minimum" || gm == "Moments") {
+      // Entropy-family and legacy methods: approximation via entropy-max threshold.
+      auto h = hist256(gray);
+      double total = sumHist(h);
+      if (total <= 0) total = 1;
+      for (double& v : h) v /= total;
+      std::vector<double> P1(256,0), P2(256,0), S1(256,0), S2(256,0);
+      P1[0]=h[0]; S1[0]=(h[0]>0? -h[0]*std::log(h[0]):0);
+      for(int i=1;i<256;i++){ P1[i]=P1[i-1]+h[i]; S1[i]=S1[i-1]+(h[i]>0?-h[i]*std::log(h[i]):0); }
+      P2[255]=h[255]; S2[255]=(h[255]>0? -h[255]*std::log(h[255]):0);
+      for(int i=254;i>=0;i--){ P2[i]=P2[i+1]+h[i]; S2[i]=S2[i+1]+(h[i]>0?-h[i]*std::log(h[i]):0); }
+      double best=-1e9; int bestT=thr;
+      for(int t=1;t<255;t++){
+        if (P1[t] <= 1e-12 || P2[t+1] <= 1e-12) continue;
+        double H = std::log(P1[t]) + std::log(P2[t+1]) + S1[t]/P1[t] + S2[t+1]/P2[t+1];
+        if (H>best){ best=H; bestT=t; }
+      }
+      thr = bestT;
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
     } else {
-      double t = cv::threshold(gray, bin, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
-      if (outGlobalThreshold) *outGlobalThreshold = (int)std::round(t);
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
     }
+
+    if (outGlobalThreshold) *outGlobalThreshold = thr;
   } else {
     int block = spLocalBlockSize_ ? spLocalBlockSize_->value() : 31;
     if (block % 2 == 0) block += 1;
+    block = std::max(3, block);
     double c = spLocalK_ ? spLocalK_->value() : 5.0;
-    int method = (cbLocalMethod_ && cbLocalMethod_->currentIndex()==1) ? cv::ADAPTIVE_THRESH_GAUSSIAN_C : cv::ADAPTIVE_THRESH_MEAN_C;
-    cv::adaptiveThreshold(gray, bin, 255, method, cv::THRESH_BINARY, block, c);
+    QString lm = cbLocalMethod_ ? cbLocalMethod_->currentText() : QString("Mean");
+
+    if (lm == "Gaussian") {
+      cv::adaptiveThreshold(gray, bin, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY, block, c);
+    } else if (lm == "Mean") {
+      cv::adaptiveThreshold(gray, bin, 255, cv::ADAPTIVE_THRESH_MEAN_C, cv::THRESH_BINARY, block, c);
+    } else if (lm == "Median") {
+      cv::Mat med;
+      cv::medianBlur(gray, med, std::max(3, block|1));
+      cv::subtract(med, cv::Scalar(c), med);
+      cv::compare(gray, med, bin, cv::CMP_GT);
+    } else if (lm == "MidGrey") {
+      cv::Mat mn,mx;
+      cv::erode(gray, mn, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(block, block)));
+      cv::dilate(gray, mx, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(block, block)));
+      cv::Mat mid; cv::addWeighted(mn,0.5,mx,0.5,0,mid);
+      cv::subtract(mid, cv::Scalar(c), mid);
+      cv::compare(gray, mid, bin, cv::CMP_GT);
+    } else if (lm == "Bernsen" || lm == "Contrast") {
+      cv::Mat mn,mx;
+      cv::erode(gray, mn, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(block, block)));
+      cv::dilate(gray, mx, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(block, block)));
+      cv::Mat contrast; cv::subtract(mx,mn,contrast);
+      cv::Mat mid; cv::addWeighted(mn,0.5,mx,0.5,0,mid);
+      cv::compare(gray, mid, bin, cv::CMP_GT);
+      if (lm == "Contrast") {
+        cv::Mat low; cv::threshold(contrast, low, c, 255, cv::THRESH_BINARY_INV);
+        bin.setTo(0, low);
+      }
+    } else {
+      // Niblack / Sauvola / Phansalkar / Otsu(local) fallback to Mean-style local thresholding.
+      cv::adaptiveThreshold(gray, bin, 255, cv::ADAPTIVE_THRESH_MEAN_C, cv::THRESH_BINARY, block, c);
+    }
+
     if (outGlobalThreshold) *outGlobalThreshold = spObjectThresh_ ? spObjectThresh_->value() : 128;
   }
 
   if (chkInvertBinary_ && chkInvertBinary_->isChecked()) cv::bitwise_not(bin, bin);
   cv::cvtColor(bin, bin, cv::COLOR_GRAY2BGR);
   return bin;
+}
+
+void MainWindow::onStartScaleLine() {
+  if (chkShowLines_ && !chkShowLines_->isChecked()) chkShowLines_->setChecked(true);
+  if (gbLineProps_) gbLineProps_->setVisible(true);
+  for (auto* v : sourceViews_) {
+    if (!v) continue;
+    v->setAnnotationsVisible(true);
+    v->setToolMode(ImageViewer::LineTool);
+  }
+  logLine("Scale line drawing mode enabled.");
 }
 
 void MainWindow::onApplyLineProps() {

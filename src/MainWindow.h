@@ -77,6 +77,7 @@ public:
   void setLineDoubleClickCallback(const std::function<void(double)>& cb);
   void setLineValueEditedCallback(const std::function<void(double,double)>& cb);
   void applySelectedLineStyle(const QString& name, const QColor& color, int width);
+  void setAnnotationsVisible(bool visible);
 
 protected:
   void wheelEvent(QWheelEvent* e) override;
@@ -163,6 +164,7 @@ private slots:
   void onPreprocessAuto();
   void onApplyLineProps();
   void onObjectThresholdParamsChanged();
+  void onStartScaleLine();
 
 private:
   void buildUI();
@@ -317,6 +319,9 @@ private:
   QComboBox* cbLineColor_=nullptr;
   QSpinBox* spLineWidth_=nullptr;
   QPushButton* btnApplyLineProps_=nullptr;
+  QPushButton* btnStartScaleLine_=nullptr;
+  QCheckBox* chkShowLines_=nullptr;
+  QGroupBox* gbLineProps_=nullptr;
   QLabel* lblPreprocessHint_=nullptr;
   QPushButton* btnPreAuto_=nullptr;
   QLabel* lblScaleInfo_=nullptr;
