@@ -131,12 +131,17 @@ public:
     QObject::connect(label_->document(), &QTextDocument::contentsChanged, [this]() {
       QString t = label_->toPlainText().trimmed();
       if (!t.isEmpty()) name_ = t;
-      QRegularExpression re("([-+]?[0-9]*\.?[0-9]+)");
+
+      // Regular expression to match numbers (integer or decimal)
+      QRegularExpression re("([-+]?[0-9]*\\.?[0-9]+)");
       auto m = re.match(t);
+
       if (m.hasMatch() && onValueEdited_) {
-        bool ok=false;
-        double v=m.captured(1).toDouble(&ok);
-        if (ok) onValueEdited_(line().length(), v);
+        bool ok = false;
+        double v = m.captured(1).toDouble(&ok);
+        if (ok) {
+          onValueEdited_(this->line().length(), v);
+        }
       }
     });
   }
@@ -657,7 +662,7 @@ void MainWindow::buildUI() {
     QWidget* tabCal = new QWidget(actionTabs_);
     QVBoxLayout* calv = new QVBoxLayout(tabCal);
 
-    calv->addWidget(new QLabel("Step 1: 色彩", tabCal));
+    calv->addWidget(new QLabel("Step 1: Channel", tabCal));
     QGroupBox* gbColor = new QGroupBox("Color", tabCal);
     QVBoxLayout* colorLayout = new QVBoxLayout(gbColor);
     cbPreColor_ = new QComboBox(gbColor);
@@ -667,7 +672,7 @@ void MainWindow::buildUI() {
     colorLayout->addWidget(cbPreColor_);
     gbColor->setLayout(colorLayout);
 
-    calv->addWidget(new QLabel("Step 2: 亮度对比度调节", tabCal));
+    calv->addWidget(new QLabel("Step 2: B&C", tabCal));
     QGroupBox* gbBC = new QGroupBox("Brightness / Contrast", tabCal);
     QGridLayout* bcLayout = new QGridLayout(gbBC);
     QLabel* lblB = new QLabel("Brightness (0~255)", gbBC);
@@ -707,7 +712,7 @@ void MainWindow::buildUI() {
     calv->addWidget(btnPreAuto_);
     calv->addWidget(lblPreprocessHint_);
 
-    calv->addWidget(new QLabel("Step 3: 尺度标定", tabCal));
+    calv->addWidget(new QLabel("Step 3: Scale Calibration", tabCal));
     QGroupBox* gbLine = new QGroupBox("Line Properties", tabCal);
     QGridLayout* lp = new QGridLayout(gbLine);
     editLineName_ = new QLineEdit("Line", gbLine);
@@ -757,7 +762,7 @@ void MainWindow::buildUI() {
     visScrollArea->setWidget(visContainer);
     trkVisRoot->addWidget(visScrollArea);
 
-    trkMainLayout->addWidget(new QLabel("Step 1: 阈值分割设置", tabObj));
+    trkMainLayout->addWidget(new QLabel("Step 1: Thresholding", tabObj));
     QGroupBox* gbThresh = new QGroupBox("Threshold", tabObj);
     QGridLayout* tg = new QGridLayout(gbThresh);
 
