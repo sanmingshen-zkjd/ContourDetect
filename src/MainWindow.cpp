@@ -758,7 +758,11 @@ void MainWindow::buildUI() {
       if (actionTabs_) actionTabs_->setCurrentIndex(std::max(0, std::min(idx, actionTabs_->count()-1)));
       if (idx == 0) onModeCapture();
       else if (idx == 1) onModeCalibration();
-      else onModeTracking();
+      else if (idx == 2) onModeTracking();
+      else {
+        mode_ = TRACK;
+        logLine("Switched to Visual mode.");
+      }
     });
 
     dv->addWidget(actionTabs_);
@@ -835,10 +839,10 @@ void MainWindow::refreshSourceList() {
 }
 
 std::vector<int> MainWindow::activeSourceIndices() const {
+  // Keep the main image view stable across Source / PreProcess / ObjectDefine steps.
   std::vector<int> idx;
-  for (int i=0;i<(int)sources_.size();++i) {
-    if (sources_[i].mode_owner == (int)mode_) idx.push_back(i);
-  }
+  idx.reserve(sources_.size());
+  for (int i=0;i<(int)sources_.size();++i) idx.push_back(i);
   return idx;
 }
 
@@ -1233,8 +1237,6 @@ void MainWindow::onModeCalibration() {
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
   if (actionTabs_ && actionTabs_->currentIndex()!=1) actionTabs_->setCurrentIndex(1);
   if (stepTabs_ && stepTabs_->currentIndex()!=1) stepTabs_->setCurrentIndex(1);
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
   logLine("Switched to Preprocess mode.");
 }
 
@@ -1243,11 +1245,9 @@ void MainWindow::onModeTracking() {
   if (btnAddCam_) btnAddCam_->setVisible(false);
   if (btnAddVideo_) btnAddVideo_->setVisible(true);
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-  if (actionTabs_ && actionTabs_->currentIndex()<2) actionTabs_->setCurrentIndex(2);
-  if (stepTabs_ && stepTabs_->currentIndex()<2) stepTabs_->setCurrentIndex(2);
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
-  logLine("Switched to ObjectDefine/Visual mode.");
+  if (actionTabs_ && actionTabs_->currentIndex()!=2) actionTabs_->setCurrentIndex(2);
+  if (stepTabs_ && stepTabs_->currentIndex()!=2) stepTabs_->setCurrentIndex(2);
+  logLine("Switched to ObjectDefine mode.");
 }
 
 void MainWindow::onModeCapture() {
@@ -1257,8 +1257,6 @@ void MainWindow::onModeCapture() {
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
   if (actionTabs_ && actionTabs_->currentIndex()!=0) actionTabs_->setCurrentIndex(0);
   if (stepTabs_ && stepTabs_->currentIndex()!=0) stepTabs_->setCurrentIndex(0);
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
   logLine("Switched to Source mode.");
 }
 
