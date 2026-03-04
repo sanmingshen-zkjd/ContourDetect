@@ -172,6 +172,15 @@ private:
     if (isSelected()) p.setStyle(Qt::DashLine);
     setPen(p);
   }
+  QPainterPath shape() const override {
+    QPainterPath p;
+    p.moveTo(line().p1());
+    p.lineTo(line().p2());
+    QPainterPathStroker stroker;
+    stroker.setWidth(std::max(10.0, (double)width_ + 10.0));
+    return stroker.createStroke(p);
+  }
+
   QVariant itemChange(GraphicsItemChange change, const QVariant &value) override {
     if (change == QGraphicsItem::ItemSelectedHasChanged) applyStyle();
     return QGraphicsLineItem::itemChange(change, value);
@@ -266,6 +275,25 @@ void ImageViewer::setAnnotationsVisible(bool visible) {
   }
 }
 
+void ImageViewer::clearAllLines() {
+  const auto items = scene_.items();
+  for (auto* it : items) {
+    if (it == pixmapItem_ || it == previewLine_) continue;
+    if (dynamic_cast<QGraphicsLineItem*>(it)) {
+      scene_.removeItem(it);
+      delete it;
+    }
+  }
+}
+
+double ImageViewer::selectedLineLength() const {
+  const auto items = scene_.selectedItems();
+  for (auto* it : items) {
+    if (auto* li = dynamic_cast<QGraphicsLineItem*>(it)) return li->line().length();
+  }
+  return 0.0;
+}
+
 void ImageViewer::applyZoom(double factor) {
   zoomFactor_ *= factor;
   zoomFactor_ = std::max(0.1, std::min(zoomFactor_, 20.0));
@@ -295,6 +323,7 @@ void ImageViewer::mousePressEvent(QMouseEvent* e) {
 
   if (toolMode_ == LineTool) {
     if (!lineDrawing_) {
+      clearAllLines(); // keep only one scale line
       lineDrawing_ = true;
       lineStart_ = p;
       previewLine_ = scene_.addLine(QLineF(lineStart_, lineStart_), QPen(QColor(80,220,255), 2));
@@ -683,8 +712,8 @@ void MainWindow::buildUI() {
     calv->addWidget(new QLabel("Step 2: B&C", tabCal));
     QGroupBox* gbBC = new QGroupBox("Brightness / Contrast", tabCal);
     QGridLayout* bcLayout = new QGridLayout(gbBC);
-    QLabel* lblB = new QLabel("Brightness (0~255)", gbBC);
-    QLabel* lblC = new QLabel("Contrast (0~255)", gbBC);
+    QLabel* lblB = new QLabel("Brightness", gbBC);
+    QLabel* lblC = new QLabel("Contrast", gbBC);
     slBrightness_ = new QSlider(Qt::Horizontal, gbBC);
     slContrast_ = new QSlider(Qt::Horizontal, gbBC);
     spBrightness_ = new QSpinBox(gbBC);
@@ -708,8 +737,6 @@ void MainWindow::buildUI() {
     bcLayout->addWidget(lblC, 1, 0);
     bcLayout->addWidget(slContrast_, 1, 1);
     bcLayout->addWidget(spContrast_, 1, 2);
-    QLabel* lblRangeBC = new QLabel("[0,255]", gbBC);
-    bcLayout->addWidget(lblRangeBC, 0, 3, 2, 1);
     gbBC->setLayout(bcLayout);
 
     btnPreAuto_ = new QPushButton("Auto", tabCal);
@@ -725,9 +752,11 @@ void MainWindow::buildUI() {
     calv->addWidget(new QLabel("Step 3: Scale Calibration", tabCal));
     QHBoxLayout* scaleCtl = new QHBoxLayout();
     btnStartScaleLine_ = new QPushButton("Draw Scale Line", tabCal);
+    btnDeleteScaleLine_ = new QPushButton("Delete Scale Line", tabCal);
     chkShowLines_ = new QCheckBox("Show Lines", tabCal);
     chkShowLines_->setChecked(false);
     scaleCtl->addWidget(btnStartScaleLine_);
+    scaleCtl->addWidget(btnDeleteScaleLine_);
     scaleCtl->addWidget(chkShowLines_);
     scaleCtl->addStretch(1);
     calv->addLayout(scaleCtl);
@@ -751,6 +780,14 @@ void MainWindow::buildUI() {
     lp->addWidget(new QLabel("Width", gbLineProps_), 2, 0);
     lp->addWidget(spLineWidth_, 2, 1);
     lp->addWidget(btnApplyLineProps_, 3, 0, 1, 2);
+    spPhysicalMm_ = new QDoubleSpinBox(gbLineProps_);
+    spPhysicalMm_->setRange(0.000001, 1000000.0);
+    spPhysicalMm_->setDecimals(6);
+    spPhysicalMm_->setValue(100.0);
+    btnApplyScale_ = new QPushButton("Apply Physical Distance (mm)", gbLineProps_);
+    lp->addWidget(new QLabel("Physical distance (mm)", gbLineProps_), 4, 0);
+    lp->addWidget(spPhysicalMm_, 4, 1);
+    lp->addWidget(btnApplyScale_, 5, 0, 1, 2);
     gbLineProps_->setLayout(lp);
     gbLineProps_->setVisible(false);
 
@@ -769,6 +806,8 @@ void MainWindow::buildUI() {
     connect(btnPreAuto_, &QPushButton::clicked, this, &MainWindow::onPreprocessAuto);
     connect(btnApplyLineProps_, &QPushButton::clicked, this, &MainWindow::onApplyLineProps);
     connect(btnStartScaleLine_, &QPushButton::clicked, this, &MainWindow::onStartScaleLine);
+    connect(btnDeleteScaleLine_, &QPushButton::clicked, this, &MainWindow::onDeleteScaleLine);
+    connect(btnApplyScale_, &QPushButton::clicked, this, &MainWindow::onApplyScaleFromInput);
     connect(chkShowLines_, &QCheckBox::toggled, this, [this](bool on){ for (auto* v: sourceViews_) if (v) v->setAnnotationsVisible(on); });
 
     // ObjectDefine + Visual pages
@@ -827,21 +866,24 @@ void MainWindow::buildUI() {
     QLabel* lblLocalK = new QLabel("Local k/C", gbThresh);
     tg->addWidget(lblGlobalMethod, 1, 0);
     tg->addWidget(cbGlobalMethod_, 1, 1);
-    tg->addWidget(lblLocalMethod, 1, 2);
-    tg->addWidget(cbLocalMethod_, 1, 3);
-    tg->addWidget(new QLabel("Threshold [0,255]", gbThresh), 2, 0);
-    tg->addWidget(slObjectThresh_, 2, 1, 1, 2);
-    tg->addWidget(spObjectThresh_, 2, 3);
+    btnTryAllGlobal_ = new QPushButton("Try All", gbThresh);
+    tg->addWidget(btnTryAllGlobal_, 1, 2);
+    tg->addWidget(lblLocalMethod, 2, 0);
+    tg->addWidget(cbLocalMethod_, 2, 1);
     tg->addWidget(lblLocalBlock, 3, 0);
     tg->addWidget(spLocalBlockSize_, 3, 1);
     tg->addWidget(lblLocalK, 3, 2);
     tg->addWidget(spLocalK_, 3, 3);
+    tg->addWidget(new QLabel("Threshold [0,255]", gbThresh), 4, 0);
+    tg->addWidget(slObjectThresh_, 4, 1, 1, 2);
+    tg->addWidget(spObjectThresh_, 4, 3);
     gbThresh->setLayout(tg);
 
     auto updateMethodUi = [this, lblGlobalMethod, lblLocalMethod, lblLocalBlock, lblLocalK]() {
       const bool local = cbThreshType_ && cbThreshType_->currentIndex() == 1;
       if (lblGlobalMethod) lblGlobalMethod->setVisible(!local);
       if (cbGlobalMethod_) cbGlobalMethod_->setVisible(!local);
+      if (btnTryAllGlobal_) btnTryAllGlobal_->setVisible(!local);
       if (lblLocalMethod) lblLocalMethod->setVisible(local);
       if (cbLocalMethod_) cbLocalMethod_->setVisible(local);
       if (lblLocalBlock) lblLocalBlock->setVisible(local);
@@ -916,12 +958,13 @@ void MainWindow::buildUI() {
 
     connect(btnAddVisChart_, &QPushButton::clicked, this, &MainWindow::onAddVisualizationChart);
 
-    connect(cbThreshType_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, updateMethodUi](int){ updateMethodUi(); onObjectThresholdParamsChanged(); });
-    connect(cbGlobalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onObjectThresholdParamsChanged);
-    connect(cbLocalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onObjectThresholdParamsChanged);
+    connect(cbThreshType_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, updateMethodUi](int){ object_thresh_manual_ = false; updateMethodUi(); onObjectThresholdParamsChanged(); });
+    connect(cbGlobalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ object_thresh_manual_ = false; onObjectThresholdParamsChanged(); });
+    connect(btnTryAllGlobal_, &QPushButton::clicked, this, &MainWindow::onTryAllGlobalMethods);
+    connect(cbLocalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ object_thresh_manual_ = false; onObjectThresholdParamsChanged(); });
     connect(chkInvertBinary_, &QCheckBox::toggled, this, &MainWindow::onObjectThresholdParamsChanged);
-    connect(slObjectThresh_, &QSlider::valueChanged, this, [this](int v){ if (spObjectThresh_ && spObjectThresh_->value()!=v) spObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
-    connect(spObjectThresh_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ if (slObjectThresh_ && slObjectThresh_->value()!=v) slObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
+    connect(slObjectThresh_, &QSlider::valueChanged, this, [this](int v){ object_thresh_manual_ = true; if (spObjectThresh_ && spObjectThresh_->value()!=v) spObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
+    connect(spObjectThresh_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ object_thresh_manual_ = true; if (slObjectThresh_ && slObjectThresh_->value()!=v) slObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
     connect(spLocalBlockSize_, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
     connect(spLocalK_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
 
@@ -1128,7 +1171,7 @@ void MainWindow::rebuildSourceViews() {
     ImageViewer* v = new ImageViewer(canvas);
     v->setMinimumSize(480, 270);
     v->setToolMode(ImageViewer::PanTool);
-    v->setLineCreatedCallback([this](double pxLen){ if (gbLineProps_) gbLineProps_->setVisible(true); updateScaleStatus(pxLen); });
+    v->setLineCreatedCallback([this, v](double pxLen){ if (gbLineProps_) gbLineProps_->setVisible(true); v->setToolMode(ImageViewer::PanTool); for (auto* ov: sourceViews_) if (ov!=v && ov) ov->setToolMode(ImageViewer::PanTool); updateScaleStatus(pxLen); });
     v->setLineDoubleClickCallback([this](double pxLen){ updateScaleStatus(pxLen); });
     v->setLineValueEditedCallback([this](double pxLen, double mm){
       if (pxLen <= 1e-9 || mm <= 0.0) return;
@@ -1602,7 +1645,12 @@ cv::Mat MainWindow::makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalTh
       cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
     }
 
-    if (outGlobalThreshold) *outGlobalThreshold = thr;
+    const int autoThr = thr;
+    if (object_thresh_manual_ && spObjectThresh_) {
+      thr = spObjectThresh_->value();
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
+    }
+    if (outGlobalThreshold) *outGlobalThreshold = autoThr;
   } else {
     int block = spLocalBlockSize_ ? spLocalBlockSize_->value() : 31;
     if (block % 2 == 0) block += 1;
@@ -1652,13 +1700,88 @@ cv::Mat MainWindow::makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalTh
 
 void MainWindow::onStartScaleLine() {
   if (chkShowLines_ && !chkShowLines_->isChecked()) chkShowLines_->setChecked(true);
-  if (gbLineProps_) gbLineProps_->setVisible(true);
   for (auto* v : sourceViews_) {
     if (!v) continue;
+    v->clearAllLines(); // only one line allowed
     v->setAnnotationsVisible(true);
     v->setToolMode(ImageViewer::LineTool);
   }
-  logLine("Scale line drawing mode enabled.");
+  if (gbLineProps_) gbLineProps_->setVisible(true);
+  logLine("Scale line drawing mode enabled (single line).");
+}
+
+void MainWindow::onDeleteScaleLine() {
+  for (auto* v : sourceViews_) {
+    if (v) v->clearAllLines();
+  }
+  mm_per_pixel_ = 0.0;
+  if (lblScaleInfo_) lblScaleInfo_->setText("Scale: not calibrated");
+  logLine("Scale line deleted.");
+}
+
+void MainWindow::onApplyScaleFromInput() {
+  double px = 0.0;
+  for (auto* v : sourceViews_) {
+    if (!v) continue;
+    px = std::max(px, v->selectedLineLength());
+  }
+  if (px <= 1e-9) {
+    QMessageBox::information(this, "Scale", "Please select the scale line first.");
+    return;
+  }
+  const double mm = spPhysicalMm_ ? spPhysicalMm_->value() : 0.0;
+  if (mm <= 0.0) {
+    QMessageBox::information(this, "Scale", "Please input physical distance (mm) > 0.");
+    return;
+  }
+  mm_per_pixel_ = mm / px;
+  updateScaleStatus(px);
+  logLine(QString("Scale calibrated: %1 mm / %2 px = %3 mm/px")
+          .arg(mm,0,'f',6).arg(px,0,'f',3).arg(mm_per_pixel_,0,'f',9));
+}
+
+void MainWindow::onTryAllGlobalMethods() {
+  std::vector<cv::Mat> frames;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    frames = last_frames_;
+  }
+  cv::Mat src;
+  for (auto& f: frames) { if (!f.empty()) { src = applyPreprocess(f); break; } }
+  if (src.empty()) {
+    QMessageBox::information(this, "Try All", "No image available.");
+    return;
+  }
+
+  QString oldMethod = cbGlobalMethod_ ? cbGlobalMethod_->currentText() : QString();
+  const int n = cbGlobalMethod_ ? cbGlobalMethod_->count() : 0;
+  std::vector<cv::Mat> imgs;
+  for (int i=0;i<n;++i) {
+    if (cbGlobalMethod_) cbGlobalMethod_->setCurrentIndex(i);
+    cv::Mat b = makeObjectBinaryPreview(src);
+    if (b.empty()) continue;
+    cv::putText(b, cbGlobalMethod_->itemText(i).toStdString(), cv::Point(10,22), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 1, cv::LINE_AA);
+    imgs.push_back(b);
+  }
+  if (cbGlobalMethod_) {
+    int idx = cbGlobalMethod_->findText(oldMethod);
+    if (idx >= 0) cbGlobalMethod_->setCurrentIndex(idx);
+  }
+  if (imgs.empty()) return;
+  cv::Mat mo = makeMosaic(imgs, 4);
+  QImage qi = matToQImage(mo);
+
+  QDialog* dlg = new QDialog(this);
+  dlg->setWindowTitle("Try All Global Methods");
+  QVBoxLayout* l = new QVBoxLayout(dlg);
+  QLabel* lab = new QLabel(dlg);
+  lab->setPixmap(QPixmap::fromImage(qi));
+  QScrollArea* sa = new QScrollArea(dlg);
+  sa->setWidget(lab);
+  sa->setWidgetResizable(true);
+  l->addWidget(sa);
+  dlg->resize(900, 650);
+  dlg->exec();
 }
 
 void MainWindow::onApplyLineProps() {

@@ -78,6 +78,8 @@ public:
   void setLineValueEditedCallback(const std::function<void(double,double)>& cb);
   void applySelectedLineStyle(const QString& name, const QColor& color, int width);
   void setAnnotationsVisible(bool visible);
+  void clearAllLines();
+  double selectedLineLength() const;
 
 protected:
   void wheelEvent(QWheelEvent* e) override;
@@ -165,6 +167,9 @@ private slots:
   void onApplyLineProps();
   void onObjectThresholdParamsChanged();
   void onStartScaleLine();
+  void onDeleteScaleLine();
+  void onApplyScaleFromInput();
+  void onTryAllGlobalMethods();
 
 private:
   void buildUI();
@@ -321,6 +326,9 @@ private:
   QPushButton* btnApplyLineProps_=nullptr;
   QPushButton* btnStartScaleLine_=nullptr;
   QCheckBox* chkShowLines_=nullptr;
+  QPushButton* btnDeleteScaleLine_=nullptr;
+  QDoubleSpinBox* spPhysicalMm_=nullptr;
+  QPushButton* btnApplyScale_=nullptr;
   QGroupBox* gbLineProps_=nullptr;
   QLabel* lblPreprocessHint_=nullptr;
   QPushButton* btnPreAuto_=nullptr;
@@ -336,6 +344,7 @@ private:
   QSpinBox* spLocalBlockSize_=nullptr;
   QDoubleSpinBox* spLocalK_=nullptr;
   QLabel* lblBinaryPreview_=nullptr;
+  QPushButton* btnTryAllGlobal_=nullptr;
 
   // Tracking tab
   QPushButton* btnLoadTag_=nullptr;
@@ -384,6 +393,7 @@ private:
   int ui_frame_skip_=0;
   int ui_overlay_div_=4; // run heavy overlay every N UI ticks
   double mm_per_pixel_ = 0.0;
+  bool object_thresh_manual_ = false;
 
   struct CalibrationPair {
     int frame_id = -1;
