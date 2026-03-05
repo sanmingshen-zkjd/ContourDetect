@@ -40,6 +40,7 @@
 #include <QVector>
 #include <QColor>
 #include <functional>
+#include <limits>
 
 #include <opencv2/opencv.hpp>
 #include "Core.h"
@@ -214,6 +215,8 @@ private:
   std::vector<std::vector<cv::Point>> detectBinaryContours(const cv::Mat& src, int* outGlobalThreshold=nullptr) const;
   bool runCalibrationOnPairs(const std::vector<int>& pairIndices, bool updateTable);
   void refreshTrajectoryPlot();
+  void updateMeasurementFromFrame(const cv::Mat& preprocessedFrame);
+  void updateHistogramPlot();
   void onAddVisualizationChart();
   void onVisualizationPlotContextMenu(const QPoint& pos);
   bool chooseVisualizationDataTypes(QVector<int>& components, QString& labelOut);
@@ -373,8 +376,18 @@ private:
   QPushButton* btnDetectAll_=nullptr;
   QLabel* lblPose_=nullptr;
   QLabel* lblInliers_=nullptr;
+  QLabel* visImageLabel_=nullptr;
   QCustomPlot* lblTrajPosPlot_=nullptr;
   QCustomPlot* lblTrajAngPlot_=nullptr;
+  QCustomPlot* plotArea_=nullptr;
+  QCustomPlot* plotPerimeter_=nullptr;
+  QCustomPlot* plotCircularity_=nullptr;
+  QCustomPlot* plotAccel_=nullptr;
+  QTableWidget* tblMeasurements_=nullptr;
+  QComboBox* cbHistMetric_=nullptr;
+  QDoubleSpinBox* spHistMin_=nullptr;
+  QDoubleSpinBox* spHistMax_=nullptr;
+  QCustomPlot* plotHistogram_=nullptr;
   QPushButton* btnAddVisChart_=nullptr;
   QVBoxLayout* visChartsLayout_=nullptr;
   struct VisChartConfig {
@@ -412,6 +425,11 @@ private:
   int next_track_id_ = 1;
   std::unordered_map<int, cv::Point2f> tracked_centroids_;
   std::unordered_map<int, std::vector<cv::Point>> tracked_contours_;
+  struct MeasureRow { double disp=0, speed=0, accel=0, area=0, perim=0, major=0, minor=0, circ=0; qint64 key=0; };
+  std::vector<MeasureRow> meas_rows_;
+  qint64 last_meas_key_ = std::numeric_limits<qint64>::min();
+  cv::Point2f last_ctr_{0,0};
+  double last_speed_ = 0.0;
 
   struct CalibrationPair {
     int frame_id = -1;

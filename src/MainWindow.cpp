@@ -993,11 +993,41 @@ void MainWindow::buildUI() {
     bp->addWidget(btnTrackBinary_, 2, 2, 1, 2);
     gbBinaryProc->setLayout(bp);
     trkMainLayout->addWidget(gbBinaryProc);
+
+    QGroupBox* gbHist = new QGroupBox("Statistics Histogram", tabObj);
+    QGridLayout* hg = new QGridLayout(gbHist);
+    cbHistMetric_ = new QComboBox(gbHist);
+    cbHistMetric_->addItems({"Area","Perimeter","Circularity","Speed","Displacement","MajorAxis","MinorAxis"});
+    spHistMin_ = new QDoubleSpinBox(gbHist);
+    spHistMax_ = new QDoubleSpinBox(gbHist);
+    spHistMin_->setRange(-1e9, 1e9); spHistMax_->setRange(-1e9, 1e9);
+    spHistMin_->setValue(0.0); spHistMax_->setValue(1e6);
+    plotHistogram_ = new QCustomPlot(gbHist);
+    plotHistogram_->setMinimumHeight(180);
+    plotHistogram_->addGraph();
+    hg->addWidget(new QLabel("Metric", gbHist), 0, 0);
+    hg->addWidget(cbHistMetric_, 0, 1);
+    hg->addWidget(new QLabel("Min", gbHist), 0, 2);
+    hg->addWidget(spHistMin_, 0, 3);
+    hg->addWidget(new QLabel("Max", gbHist), 0, 4);
+    hg->addWidget(spHistMax_, 0, 5);
+    hg->addWidget(plotHistogram_, 1, 0, 1, 6);
+    gbHist->setLayout(hg);
+    trkMainLayout->addWidget(gbHist);
     trkMainLayout->addStretch(1);
 
 
+    QGridLayout* visGrid = new QGridLayout();
+    visImageLabel_ = new QLabel(tabVis);
+    visImageLabel_->setMinimumSize(260, 180);
+    visImageLabel_->setAlignment(Qt::AlignCenter);
+    visImageLabel_->setStyleSheet("background:#111;border:1px solid #3a4250;color:#9aa7b8;");
+    visImageLabel_->setText("Image view");
+    visGrid->addWidget(visImageLabel_, 0, 0);
+
     btnAddVisChart_ = new QPushButton("add gragh", tabVis);
-    visChartsLayout_->addWidget(btnAddVisChart_);
+    btnAddVisChart_->setVisible(false);
+    visChartsLayout_->addLayout(visGrid);
 
     auto makeSeriesSelector = [tabVis]() {
       QComboBox* cb = new QComboBox(tabVis);
@@ -1021,8 +1051,7 @@ void MainWindow::buildUI() {
     lblTrajPosPlot_->graph(3)->setPen(QPen(QColor(255,70,70), 1.2));
     lblTrajPosPlot_->legend->setVisible(false);
     QComboBox* posSelector = makeSeriesSelector();
-    visChartsLayout_->addWidget(posSelector);
-    visChartsLayout_->addWidget(lblTrajPosPlot_);
+    visGrid->addWidget(lblTrajPosPlot_, 0, 1);
 
     lblTrajAngPlot_ = new QCustomPlot(tabVis);
     lblTrajAngPlot_->setMinimumHeight(160);
@@ -1039,8 +1068,20 @@ void MainWindow::buildUI() {
     lblTrajAngPlot_->graph(3)->setPen(QPen(QColor(255,70,70), 1.2));
     lblTrajAngPlot_->legend->setVisible(false);
     QComboBox* angSelector = makeSeriesSelector();
-    visChartsLayout_->addWidget(angSelector);
-    visChartsLayout_->addWidget(lblTrajAngPlot_);
+    visGrid->addWidget(lblTrajAngPlot_, 0, 2);
+
+    plotArea_ = new QCustomPlot(tabVis); plotArea_->setMinimumHeight(160); plotArea_->addGraph(); plotArea_->xAxis->setLabel("t"); plotArea_->yAxis->setLabel("Area");
+    plotPerimeter_ = new QCustomPlot(tabVis); plotPerimeter_->setMinimumHeight(160); plotPerimeter_->addGraph(); plotPerimeter_->xAxis->setLabel("t"); plotPerimeter_->yAxis->setLabel("Perimeter");
+    plotCircularity_ = new QCustomPlot(tabVis); plotCircularity_->setMinimumHeight(160); plotCircularity_->addGraph(); plotCircularity_->xAxis->setLabel("t"); plotCircularity_->yAxis->setLabel("Circularity");
+    visGrid->addWidget(plotArea_, 1, 0);
+    visGrid->addWidget(plotPerimeter_, 1, 1);
+    visGrid->addWidget(plotCircularity_, 1, 2);
+
+    tblMeasurements_ = new QTableWidget(tabVis);
+    tblMeasurements_->setColumnCount(9);
+    tblMeasurements_->setHorizontalHeaderLabels({"Disp","Speed","Accel","Area","Perimeter","Major","Minor","Circularity","Scale(mm/px)"});
+    tblMeasurements_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    visChartsLayout_->addWidget(tblMeasurements_);
     visChartsLayout_->addStretch(1);
 
     connect(btnAddVisChart_, &QPushButton::clicked, this, &MainWindow::onAddVisualizationChart);
@@ -1059,6 +1100,9 @@ void MainWindow::buildUI() {
     connect(spObjectThresh_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ object_thresh_manual_ = true; if (slObjectThresh_ && slObjectThresh_->value()!=v) slObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
     connect(spLocalBlockSize_, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
     connect(spLocalK_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
+    connect(cbHistMetric_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ updateHistogramPlot(); });
+    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
+    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
 
     lblTrajPosPlot_->setContextMenuPolicy(Qt::CustomContextMenu);
     lblTrajAngPlot_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -2297,6 +2341,7 @@ void MainWindow::onTick() {
   for (auto& f : vis) {
     if (!f.empty()) f = applyPreprocess(f);
   }
+  std::vector<cv::Mat> preVis = vis;
   // If sources count changed, rebuild calibrator to match to avoid crash
   if (mode_==CALIB) {
     int n = (int)frames.size();
@@ -2351,9 +2396,20 @@ void MainWindow::onTick() {
 
   updateSourceViews(vis);
 
+  for (const auto& f : preVis) {
+    if (f.empty()) continue;
+    updateMeasurementFromFrame(f);
+    if (visImageLabel_) {
+      QImage qi = matToQImage(f);
+      visImageLabel_->setPixmap(QPixmap::fromImage(qi).scaled(visImageLabel_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+    break;
+  }
+  refreshTrajectoryPlot();
+
   // ObjectDefine small binary preview
   if (lblBinaryPreview_) {
-    for (const auto& f : vis) {
+    for (const auto& f : preVis) {
       if (f.empty()) continue;
       int autoT = spObjectThresh_ ? spObjectThresh_->value() : 128;
       cv::Mat bin = makeObjectBinaryPreview(f, &autoT);
@@ -2970,117 +3026,102 @@ void MainWindow::onVisualizationPlotContextMenu(const QPoint& pos) {
   }
 }
 
-void MainWindow::refreshTrajectoryPlot() {
-  if (visCharts_.empty()) return;
-
-  static const QString kNames[6] = {"x", "y", "z", "aa_x", "aa_y", "aa_z"};
-  static const QColor kColors[6] = {
-    QColor(255,99,132), QColor(80,220,255), QColor(120,220,120),
-    QColor(255,179,71), QColor(186,104,200), QColor(121,134,203)
-  };
-
-  auto currentTrajIndex = [this]() -> int {
-    if (traj_.empty()) return -1;
-    if (play_end_frame_ > 1) {
-      double r = double(std::max<int64_t>(0, play_frame_)) / double(play_end_frame_ - 1);
-      int idx = (int)std::llround(r * double(std::max(0, (int)traj_.size() - 1)));
-      return std::max(0, std::min((int)traj_.size() - 1, idx));
-    }
-    return (int)traj_.size() - 1;
-  };
-
-  auto getComp = [&](const TrajRow& row, int comp) {
-    switch (comp) {
-      case 0: return row.t.x();
-      case 1: return row.t.y();
-      case 2: return row.t.z();
-      case 3: return row.aa.x();
-      case 4: return row.aa.y();
-      default: return row.aa.z();
-    }
-  };
-
-  for (auto& cfg : visCharts_) {
-    QCustomPlot* plot = cfg.plot;
-    if (!plot) continue;
-    const int nSeries = cfg.components.size();
-    if (nSeries <= 0) continue;
-
-    while (plot->graphCount() > nSeries + 1) plot->removeGraph(plot->graphCount()-1);
-    while (plot->graphCount() < nSeries + 1) plot->addGraph();
-
-    if (traj_.size() < 2) {
-      for (int g=0; g<plot->graphCount(); ++g) plot->graph(g)->setData({}, {});
-      plot->replot();
-      continue;
-    }
-
-    QVector<double> xs((int)traj_.size());
-    for (int i=0;i<(int)traj_.size();++i) xs[i] = i;
-
-    double yMin = 1e18, yMax = -1e18;
-    for (int g=0; g<nSeries; ++g) {
-      int comp = cfg.components[g];
-      QVector<double> ys((int)traj_.size());
-      for (int i=0;i<(int)traj_.size(); ++i) {
-        ys[i] = getComp(traj_[i], comp);
-        yMin = std::min(yMin, ys[i]);
-        yMax = std::max(yMax, ys[i]);
-      }
-      plot->graph(g)->setData(xs, ys);
-      plot->graph(g)->setPen(QPen(kColors[comp], 1.8));
-      plot->graph(g)->setName(kNames[comp]);
-    }
-    if (yMax - yMin < 1e-12) { yMax += 1.0; yMin -= 1.0; }
-
-    plot->xAxis->setRange(0, std::max(1, (int)traj_.size()-1));
-    plot->yAxis->setRange(yMin, yMax);
-
-    const int curIdx = currentTrajIndex();
-    const int cursorGraph = nSeries;
-    if (curIdx >= 0 && curIdx < (int)traj_.size()) {
-      QVector<double> cx(2), cy(2);
-      cx[0] = curIdx; cx[1] = curIdx;
-      cy[0] = yMin;   cy[1] = yMax;
-      plot->graph(cursorGraph)->setData(cx, cy);
-      plot->graph(cursorGraph)->setPen(QPen(QColor(255,70,70), 1.2));
-
-      QStringList vals;
-      vals << QString("t=%1").arg(curIdx);
-      for (int g=0; g<nSeries; ++g) {
-        int comp = cfg.components[g];
-        vals << QString("%1=%2").arg(kNames[comp]).arg(getComp(traj_[curIdx], comp), 0, 'f', 3);
-      }
-      plot->graph(cursorGraph)->setName(vals.join(" | "));
-    } else {
-      plot->graph(cursorGraph)->setData({}, {});
-      plot->graph(cursorGraph)->setName("cursor");
-    }
-
-    if (cfg.selector) {
-      QStringList options;
-      options << QString::fromUtf8("全部");
-      for (int g=0; g<nSeries; ++g) {
-        options << kNames[cfg.components[g]];
-      }
-      const int keepIndex = std::max(0, std::min(cfg.selector->currentIndex(), options.size()-1));
-      cfg.selector->blockSignals(true);
-      cfg.selector->clear();
-      cfg.selector->addItems(options);
-      cfg.selector->setCurrentIndex(keepIndex);
-      cfg.selector->blockSignals(false);
-
-      const int sel = cfg.selector->currentIndex();
-      for (int g=0; g<nSeries; ++g) {
-        const bool visible = (sel == 0) || (sel == g+1);
-        plot->graph(g)->setVisible(visible);
-      }
-    }
-
-    plot->graph(cursorGraph)->setVisible(true);
-    plot->legend->setVisible(false);
-    plot->replot();
+void MainWindow::updateMeasurementFromFrame(const cv::Mat& preprocessedFrame) {
+  if (preprocessedFrame.empty()) return;
+  auto contours = detectBinaryContours(preprocessedFrame);
+  if (contours.empty()) return;
+  size_t best = 0;
+  double bestA = 0.0;
+  for (size_t i=0;i<contours.size();++i) {
+    double a = std::abs(cv::contourArea(contours[i]));
+    if (a > bestA) { bestA = a; best = i; }
   }
+  const auto& c = contours[best];
+  cv::Moments mm = cv::moments(c);
+  if (std::abs(mm.m00) < 1e-9) return;
+  cv::Point2f ctr((float)(mm.m10/mm.m00), (float)(mm.m01/mm.m00));
+  double scale = (mm_per_pixel_ > 0.0) ? mm_per_pixel_ : 1.0;
+  double area = std::abs(cv::contourArea(c)) * scale * scale;
+  double perim = cv::arcLength(c, true) * scale;
+  cv::RotatedRect rr = cv::minAreaRect(c);
+  double major = std::max(rr.size.width, rr.size.height) * scale;
+  double minor = std::min(rr.size.width, rr.size.height) * scale;
+  double circ = (perim > 1e-9) ? (4.0 * std::acos(-1.0) * area / (perim * perim)) : 0.0;
+  qint64 key = (play_end_frame_ > 0 ? play_frame_ : last_capture_ts_ms_);
+  if (key == last_meas_key_) return;
+  MeasureRow row;
+  row.key = key;
+  row.disp = cv::norm(ctr - last_ctr_) * scale;
+  row.speed = row.disp; // per-frame speed
+  row.accel = row.speed - last_speed_;
+  row.area = area; row.perim = perim; row.major = major; row.minor = minor; row.circ = circ;
+  last_ctr_ = ctr;
+  last_speed_ = row.speed;
+  last_meas_key_ = key;
+  meas_rows_.push_back(row);
+}
+
+void MainWindow::updateHistogramPlot() {
+  if (!plotHistogram_ || !cbHistMetric_) return;
+  if (meas_rows_.empty()) { plotHistogram_->graph(0)->setData({}, {}); plotHistogram_->replot(); return; }
+  auto pick = [&](const MeasureRow& r)->double {
+    const QString m = cbHistMetric_->currentText();
+    if (m == "Perimeter") return r.perim;
+    if (m == "Circularity") return r.circ;
+    if (m == "Speed") return r.speed;
+    if (m == "Displacement") return r.disp;
+    if (m == "MajorAxis") return r.major;
+    if (m == "MinorAxis") return r.minor;
+    return r.area;
+  };
+  double lo = spHistMin_ ? spHistMin_->value() : -1e9;
+  double hi = spHistMax_ ? spHistMax_->value() : 1e9;
+  const int bins = 20;
+  QVector<double> x(bins), y(bins);
+  for (int i=0;i<bins;++i) { x[i]=i; y[i]=0; }
+  for (const auto& r : meas_rows_) {
+    double v = pick(r);
+    if (v < lo || v > hi) continue;
+    int b = (hi > lo) ? std::min(bins-1, std::max(0, (int)((v-lo)/(hi-lo)*bins))) : 0;
+    y[b] += 1.0;
+  }
+  plotHistogram_->graph(0)->setLineStyle(QCPGraph::lsStepCenter);
+  plotHistogram_->graph(0)->setData(x, y);
+  plotHistogram_->xAxis->setRange(0, bins-1);
+  plotHistogram_->rescaleAxes(true);
+  plotHistogram_->replot();
+}
+
+void MainWindow::refreshTrajectoryPlot() {
+  auto fillPlot = [&](QCustomPlot* p, auto getter, const QString& yLabel) {
+    if (!p) return;
+    const int n = (int)meas_rows_.size();
+    QVector<double> x(n), y(n);
+    for (int i=0;i<n;++i) { x[i]=i; y[i]=getter(meas_rows_[i]); }
+    if (p->graphCount() == 0) p->addGraph();
+    p->graph(0)->setData(x, y);
+    p->xAxis->setLabel("frame");
+    p->yAxis->setLabel(yLabel);
+    p->rescaleAxes(true);
+    p->replot();
+  };
+  fillPlot(lblTrajPosPlot_, [](const MeasureRow& r){ return r.disp; }, "Displacement");
+  fillPlot(lblTrajAngPlot_, [](const MeasureRow& r){ return r.speed; }, "Speed");
+  fillPlot(plotArea_, [](const MeasureRow& r){ return r.area; }, "Area");
+  fillPlot(plotPerimeter_, [](const MeasureRow& r){ return r.perim; }, "Perimeter");
+  fillPlot(plotCircularity_, [](const MeasureRow& r){ return r.circ; }, "Circularity");
+  fillPlot(plotAccel_, [](const MeasureRow& r){ return r.accel; }, "Acceleration");
+
+  if (tblMeasurements_) {
+    tblMeasurements_->setRowCount((int)meas_rows_.size());
+    for (int i=0;i<(int)meas_rows_.size();++i) {
+      const auto& r = meas_rows_[i];
+      const double sc = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
+      auto set=[&](int c,double v){ tblMeasurements_->setItem(i,c,new QTableWidgetItem(QString::number(v,'f',4))); };
+      set(0,r.disp); set(1,r.speed); set(2,r.accel); set(3,r.area); set(4,r.perim); set(5,r.major); set(6,r.minor); set(7,r.circ); set(8,sc);
+    }
+  }
+  updateHistogramPlot();
 }
 
 void MainWindow::onPoseFromWorker(const PoseResult& r) {
