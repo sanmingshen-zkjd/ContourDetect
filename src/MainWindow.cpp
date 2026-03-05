@@ -33,7 +33,10 @@
 #include <QTextDocument>
 #include <QRegularExpression>
 #include <functional>
+#include <algorithm>
 #include <climits>
+#include <cmath>
+#include <memory>
 
 static QString nowStr() {
   return QDateTime::currentDateTime().toString("hh:mm:ss");
@@ -121,11 +124,23 @@ class ThumbnailLabel : public QLabel {
 public:
   explicit ThumbnailLabel(int idx, QWidget* parent=nullptr) : QLabel(parent), index_(idx) {
     setCursor(Qt::PointingHandCursor);
-    setFrameStyle(QFrame::Box);
-    setLineWidth(1);
+    setSelected(false);
   }
+  std::function<void(int)> onClicked;
   std::function<void(int)> onDoubleClick;
+  void setSelected(bool on) {
+    selected_ = on;
+    setStyleSheet(selected_ ? "border:2px solid #22c55e;" : "border:1px solid #4b5563;");
+  }
 protected:
+  void mousePressEvent(QMouseEvent* e) override {
+    if (e->button() == Qt::LeftButton && onClicked) {
+      onClicked(index_);
+      e->accept();
+      return;
+    }
+    QLabel::mousePressEvent(e);
+  }
   void mouseDoubleClickEvent(QMouseEvent* e) override {
     if (e->button() == Qt::LeftButton && onDoubleClick) {
       onDoubleClick(index_);
@@ -136,6 +151,7 @@ protected:
   }
 private:
   int index_ = -1;
+  bool selected_ = false;
 };
 
 class NamedLineItem : public QGraphicsLineItem {
@@ -493,37 +509,56 @@ MainWindow::~MainWindow()
 }
 
 void MainWindow::buildUI() {
+    const QScreen* screen = QGuiApplication::primaryScreen();
+    const qreal dpiScale = screen ? std::clamp(screen->logicalDotsPerInch() / 96.0, 1.0, 2.25) : 1.0;
+    const qreal geomScale = screen ? std::clamp((qreal)screen->availableGeometry().width() / 1920.0, 0.85, 1.3) : 1.0;
+    const qreal uiScale = std::clamp(dpiScale * geomScale, 0.9, 2.4);
+
+    QFont baseFont = font();
+    baseFont.setPointSizeF(std::max(9.0, 9.5 * uiScale));
+    setFont(baseFont);
+
     // Top title bar spans the full QMainWindow width (including dock area)
     TitleBarWidget* titleBar = new TitleBarWidget(this);
     titleBar->setObjectName("customTitleBar");
-    titleBar->setFixedHeight(34);
+    titleBar->setFixedHeight((int)std::round(34 * uiScale));
     QHBoxLayout* titleLayout = new QHBoxLayout(titleBar);
-    titleLayout->setContentsMargins(10, 0, 0, 0);
-    titleLayout->setSpacing(6);
+    titleLayout->setContentsMargins((int)std::round(10 * uiScale), 0, 0, 0);
+    titleLayout->setSpacing((int)std::round(6 * uiScale));
 
     QLabel* titleText = new QLabel("MonoMeasure", titleBar);
     titleText->setStyleSheet("color:#c7d2df;font-weight:600;");
     titleLayout->addWidget(titleText);
     titleLayout->addStretch(1);
 
-    auto makeTitleBtn = [titleBar](const QString& text, const QString& objName) {
+    auto makeTitleBtn = [titleBar, uiScale](const QString& text, const QString& objName) {
       QToolButton* b = new QToolButton(titleBar);
       b->setObjectName(objName);
       b->setText(text);
-      b->setFixedSize(46, 34);
+      b->setFixedSize((int)std::round(46 * uiScale), (int)std::round(34 * uiScale));
       return b;
     };
+
+    btnFileMenu_ = new QToolButton(titleBar);
+    btnFileMenu_->setObjectName("fileMenuBtn");
+    btnFileMenu_->setText("File");
+    btnFileMenu_->setPopupMode(QToolButton::InstantPopup);
+    btnFileMenu_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    btnFileMenu_->setMinimumWidth((int)std::round(70 * uiScale));
+    btnFileMenu_->setToolTip("Software info, Save Project, Load Project");
 
     QToolButton* btnMin = makeTitleBtn("-", "titleMinBtn");
     QToolButton* btnMax = makeTitleBtn("[]", "titleMaxBtn");
     QToolButton* btnClose = makeTitleBtn("X", "titleCloseBtn");
+    titleLayout->addWidget(btnFileMenu_);
+    titleLayout->addSpacing((int)std::round(4 * uiScale));
     titleLayout->addWidget(btnMin);
     titleLayout->addWidget(btnMax);
     titleLayout->addWidget(btnClose);
 
     titleBar->setStyleSheet(
       "#customTitleBar{background:#1f232b;border-bottom:1px solid #3a4250;}"
-      "QToolButton{background:#2b3340;color:#cfd8e3;border:none;border-left:1px solid #4b586d;border-radius:0;font-size:12px;}"
+      "QToolButton{background:#2b3340;color:#cfd8e3;border:none;border-left:1px solid #4b586d;border-radius:0;font-size:12px;}#fileMenuBtn{border:1px solid #4b586d;border-radius:4px;padding:0 10px;}"
       "QToolButton:hover{background:#374255;}"
       "QToolButton#titleCloseBtn:hover{background:#b42318;color:#ffffff;}");
 
@@ -547,10 +582,10 @@ void MainWindow::buildUI() {
 
     QWidget* sideBar = new QWidget(central);
     sideBar->setObjectName("leftSidebar");
-    sideBar->setFixedWidth(64);
+    sideBar->setFixedWidth((int)std::round(72 * uiScale));
     QVBoxLayout* sv = new QVBoxLayout(sideBar);
-    sv->setContentsMargins(6, 8, 6, 8);
-    sv->setSpacing(10);
+    sv->setContentsMargins((int)std::round(6 * uiScale), (int)std::round(8 * uiScale), (int)std::round(6 * uiScale), (int)std::round(8 * uiScale));
+    sv->setSpacing((int)std::round(10 * uiScale));
 
     QLabel* appTitle = new QLabel("MonoMeasure", sideBar);
     appTitle->setObjectName("sidebarTitle");
@@ -570,17 +605,6 @@ void MainWindow::buildUI() {
     bottomSep->setFrameShape(QFrame::HLine);
     bottomSep->setFrameShadow(QFrame::Plain);
     sv->addWidget(bottomSep);
-
-    btnFileMenu_ = new QToolButton(sideBar);
-    btnFileMenu_->setObjectName("fileMenuBtn");
-    btnFileMenu_->setText("File");
-    btnFileMenu_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    btnFileMenu_->setIcon(style()->standardIcon(QStyle::SP_ArrowRight));
-    btnFileMenu_->setLayoutDirection(Qt::RightToLeft);
-    btnFileMenu_->setPopupMode(QToolButton::InstantPopup);
-    btnFileMenu_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    btnFileMenu_->setToolTip("Software info, Save Project, Load Project");
-    sv->addWidget(btnFileMenu_);
     sideBar->setStyleSheet(
       "#leftSidebar{background:#1f232b;border-right:1px solid #4a5568;}"
       "#sidebarTitle{font-size:11px;font-weight:600;color:#b8c4d6;padding:4px 4px;line-height:1.1;}"
@@ -626,7 +650,6 @@ void MainWindow::buildUI() {
     btnAddImgSeq_->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
     btnRemoveSource_->setIcon(style()->standardIcon(QStyle::SP_TrashIcon));
     topSourceBar->addStretch(1);
-    topSourceBar->addWidget(btnFileMenu_);
     v->addLayout(topSourceBar);
 
     QFrame* topSep = new QFrame(central);
@@ -655,7 +678,7 @@ void MainWindow::buildUI() {
     viewsGrid_ = new QGridLayout(viewsHost_);
     viewsGrid_->setContentsMargins(0,0,0,0);
     viewsGrid_->setSpacing(8);
-    viewsHost_->setMinimumSize(960, 540);
+    viewsHost_->setMinimumSize((int)std::round(960 * uiScale), (int)std::round(540 * uiScale));
     v->addWidget(viewsHost_, 1);
     rebuildSourceViews();
 
@@ -856,7 +879,6 @@ void MainWindow::buildUI() {
     visScrollArea->setWidget(visContainer);
     trkVisRoot->addWidget(visScrollArea);
 
-    trkMainLayout->addWidget(new QLabel("Step 1: Thresholding", tabObj));
     QGroupBox* gbThresh = new QGroupBox("Threshold", tabObj);
     QGridLayout* tg = new QGridLayout(gbThresh);
 
@@ -901,12 +923,13 @@ void MainWindow::buildUI() {
     cbGlobalMethod_->setMinimumWidth(170);
     cbLocalMethod_->setMinimumWidth(170);
     tg->addWidget(cbGlobalMethod_, 1, 1);
+    tg->setColumnMinimumWidth(2, 18);
     btnTryAllGlobal_ = new QPushButton("Try All", gbThresh);
-    tg->addWidget(btnTryAllGlobal_, 1, 2);
+    tg->addWidget(btnTryAllGlobal_, 1, 3);
     tg->addWidget(lblLocalMethod, 2, 0);
     tg->addWidget(cbLocalMethod_, 2, 1);
     btnTryAllLocal_ = new QPushButton("Try All", gbThresh);
-    tg->addWidget(btnTryAllLocal_, 2, 2);
+    tg->addWidget(btnTryAllLocal_, 2, 3);
     tg->addWidget(lblLocalBlock, 3, 0);
     tg->addWidget(spLocalBlockSize_, 3, 1);
     tg->addWidget(lblLocalK, 3, 2);
@@ -1805,6 +1828,7 @@ void MainWindow::onTryAllGlobalMethods() {
   dlg->setWindowTitle("Try All Global Methods");
   QVBoxLayout* outer = new QVBoxLayout(dlg);
   QGridLayout* grid = new QGridLayout();
+  auto tiles = std::make_shared<std::vector<ThumbnailLabel*>>();
   const int thumbW = 220, thumbH = 140, cols = 4;
 
   for (int i = 0; i < n; ++i) {
@@ -1820,6 +1844,11 @@ void MainWindow::onTryAllGlobalMethods() {
     tile->setPixmap(QPixmap::fromImage(matToQImage(b)));
     tile->setScaledContents(true);
     tile->setToolTip(methodName + "\nDouble-click to use this method");
+    tiles->push_back(tile);
+    tile->onClicked = [tiles, tile](int) {
+      for (auto* t : *tiles) if (t) t->setSelected(false);
+      if (tile) tile->setSelected(true);
+    };
     tile->onDoubleClick = [this, dlg](int idx) {
       if (cbGlobalMethod_ && idx >= 0 && idx < cbGlobalMethod_->count()) cbGlobalMethod_->setCurrentIndex(idx);
       dlg->accept();
@@ -1858,6 +1887,7 @@ void MainWindow::onTryAllLocalMethods() {
   dlg->setWindowTitle("Try All Local Methods");
   QVBoxLayout* outer = new QVBoxLayout(dlg);
   QGridLayout* grid = new QGridLayout();
+  auto tiles = std::make_shared<std::vector<ThumbnailLabel*>>();
   const int thumbW = 220, thumbH = 140, cols = 4;
 
   for (int i = 0; i < n; ++i) {
@@ -1873,6 +1903,11 @@ void MainWindow::onTryAllLocalMethods() {
     tile->setPixmap(QPixmap::fromImage(matToQImage(b)));
     tile->setScaledContents(true);
     tile->setToolTip(methodName + "\nDouble-click to use this method");
+    tiles->push_back(tile);
+    tile->onClicked = [tiles, tile](int) {
+      for (auto* t : *tiles) if (t) t->setSelected(false);
+      if (tile) tile->setSelected(true);
+    };
     tile->onDoubleClick = [this, dlg](int idx) {
       if (cbLocalMethod_ && idx >= 0 && idx < cbLocalMethod_->count()) cbLocalMethod_->setCurrentIndex(idx);
       dlg->accept();
