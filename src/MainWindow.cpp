@@ -689,6 +689,35 @@ void MainWindow::buildUI() {
     v->addWidget(viewsHost_, 1);
     rebuildSourceViews();
 
+    visualDashHost_ = new QWidget(this);
+    visualDashGrid_ = new QGridLayout(visualDashHost_);
+    visualDashGrid_->setContentsMargins(0,0,0,0);
+    visualDashGrid_->setSpacing(8);
+    leftVisImage_ = new QLabel(visualDashHost_);
+    leftVisImage_->setMinimumSize((int)std::round(260 * uiScale), (int)std::round(180 * uiScale));
+    leftVisImage_->setAlignment(Qt::AlignCenter);
+    leftVisImage_->setStyleSheet("background:#111;border:1px solid #3a4250;color:#9aa7b8;");
+    leftVisImage_->setText("Image view");
+    auto mkPlot=[&](const QString& y){ QCustomPlot* p=new QCustomPlot(visualDashHost_); p->setMinimumHeight((int)std::round(180 * uiScale)); p->addGraph(); p->xAxis->setLabel("frame"); p->yAxis->setLabel(y); return p; };
+    leftDispPlot_=mkPlot("Displacement");
+    leftSpeedPlot_=mkPlot("Speed");
+    leftAreaPlot_=mkPlot("Area");
+    leftPerimPlot_=mkPlot("Perimeter");
+    leftCircPlot_=mkPlot("Circularity");
+    visualDashGrid_->addWidget(leftVisImage_,0,0);
+    visualDashGrid_->addWidget(leftDispPlot_,0,1);
+    visualDashGrid_->addWidget(leftSpeedPlot_,0,2);
+    visualDashGrid_->addWidget(leftAreaPlot_,1,0);
+    visualDashGrid_->addWidget(leftPerimPlot_,1,1);
+    visualDashGrid_->addWidget(leftCircPlot_,1,2);
+    leftMeasureTable_ = new QTableWidget(visualDashHost_);
+    leftMeasureTable_->setColumnCount(9);
+    leftMeasureTable_->setHorizontalHeaderLabels({"Disp","Speed","Accel","Area","Perimeter","Major","Minor","Circularity","Scale(mm/px)"});
+    leftMeasureTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    visualDashGrid_->addWidget(leftMeasureTable_,2,0,1,3);
+    visualDashHost_->setVisible(false);
+    v->addWidget(visualDashHost_, 1);
+
     QHBoxLayout* playProgressRow = new QHBoxLayout();
     playProgressRow->addWidget(btnPlayAll_);
     playProgressRow->addWidget(btnStopAll_);
@@ -1124,11 +1153,15 @@ void MainWindow::buildUI() {
 
     connect(stepTabs_, &QTabBar::currentChanged, this, [this](int idx){
       if (actionTabs_) actionTabs_->setCurrentIndex(std::max(0, std::min(idx, actionTabs_->count()-1)));
+      const bool visual = (idx == 3);
+      if (viewsHost_) viewsHost_->setVisible(!visual);
+      if (visualDashHost_) visualDashHost_->setVisible(visual);
       if (idx == 0) onModeCapture();
       else if (idx == 1) onModeCalibration();
       else if (idx == 2) onModeTracking();
       else {
         mode_ = CAPTURE;
+        updateLeftVisualDashboard();
         logLine("Switched to Visual mode.");
       }
     });
@@ -2403,9 +2436,14 @@ void MainWindow::onTick() {
       QImage qi = matToQImage(f);
       visImageLabel_->setPixmap(QPixmap::fromImage(qi).scaled(visImageLabel_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
     }
+    if (leftVisImage_) {
+      QImage qi = matToQImage(f);
+      leftVisImage_->setPixmap(QPixmap::fromImage(qi).scaled(leftVisImage_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
     break;
   }
   refreshTrajectoryPlot();
+  updateLeftVisualDashboard();
 
   // ObjectDefine small binary preview
   if (lblBinaryPreview_) {
@@ -3122,6 +3160,24 @@ void MainWindow::refreshTrajectoryPlot() {
     }
   }
   updateHistogramPlot();
+}
+
+
+void MainWindow::updateLeftVisualDashboard() {
+  auto fill=[&](QCustomPlot* p, auto getter){ if(!p) return; int n=(int)meas_rows_.size(); QVector<double> x(n), y(n); for(int i=0;i<n;++i){x[i]=i; y[i]=getter(meas_rows_[i]);} if(p->graphCount()==0) p->addGraph(); p->graph(0)->setData(x,y); p->rescaleAxes(true); p->replot(); };
+  fill(leftDispPlot_, [](const MeasureRow& r){return r.disp;});
+  fill(leftSpeedPlot_, [](const MeasureRow& r){return r.speed;});
+  fill(leftAreaPlot_, [](const MeasureRow& r){return r.area;});
+  fill(leftPerimPlot_, [](const MeasureRow& r){return r.perim;});
+  fill(leftCircPlot_, [](const MeasureRow& r){return r.circ;});
+  if (leftMeasureTable_) {
+    leftMeasureTable_->setRowCount((int)meas_rows_.size());
+    for (int i=0;i<(int)meas_rows_.size();++i) {
+      const auto& r=meas_rows_[i]; const double sc=(mm_per_pixel_>0.0?mm_per_pixel_:1.0);
+      auto set=[&](int c,double v){ leftMeasureTable_->setItem(i,c,new QTableWidgetItem(QString::number(v,'f',4))); };
+      set(0,r.disp);set(1,r.speed);set(2,r.accel);set(3,r.area);set(4,r.perim);set(5,r.major);set(6,r.minor);set(7,r.circ);set(8,sc);
+    }
+  }
 }
 
 void MainWindow::onPoseFromWorker(const PoseResult& r) {

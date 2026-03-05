@@ -217,6 +217,7 @@ private:
   void refreshTrajectoryPlot();
   void updateMeasurementFromFrame(const cv::Mat& preprocessedFrame);
   void updateHistogramPlot();
+  void updateLeftVisualDashboard();
   void onAddVisualizationChart();
   void onVisualizationPlotContextMenu(const QPoint& pos);
   bool chooseVisualizationDataTypes(QVector<int>& components, QString& labelOut);
