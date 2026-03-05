@@ -317,6 +317,8 @@ private:
   QTabBar* sideModeTabs_=nullptr;
   QTabBar* stepTabs_=nullptr;
   bool stepDone_[4] = {false, false, false, false};
+  bool pre_scale_line_drawn_ = false;
+  bool pre_scale_calculated_ = false;
   QToolButton* btnFileMenu_=nullptr;
   QTabWidget* actionTabs_=nullptr;
 

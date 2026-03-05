@@ -48,6 +48,10 @@ static QStringList kImageNameFilters() {
   return {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff"};
 }
 
+static int stepToTabIndex(int step) { return step * 2; }
+static int tabIndexToStep(int tabIndex) { return tabIndex / 2; }
+static bool isArrowTab(int tabIndex) { return (tabIndex % 2) == 1; }
+
 class ClickJumpSlider : public QSlider {
 public:
   explicit ClickJumpSlider(Qt::Orientation orientation, QWidget* parent=nullptr)
@@ -628,19 +632,26 @@ void MainWindow::buildUI() {
 
     // Top step guide
     stepTabs_ = new QTabBar(central);
-    stepTabs_->addTab(QString::fromUtf8("① Source  →"));
-    stepTabs_->addTab(QString::fromUtf8("② PreProcess  →"));
-    stepTabs_->addTab(QString::fromUtf8("③ ObjectDefine  →"));
+    stepTabs_->addTab(QString::fromUtf8("① Source"));
+    stepTabs_->addTab(QString::fromUtf8("➡"));
+    stepTabs_->addTab(QString::fromUtf8("② PreProcess"));
+    stepTabs_->addTab(QString::fromUtf8("➡"));
+    stepTabs_->addTab(QString::fromUtf8("③ ObjectDefine"));
+    stepTabs_->addTab(QString::fromUtf8("➡"));
     stepTabs_->addTab(QString::fromUtf8("④ Visual"));
     stepTabs_->setExpanding(true);
     stepTabs_->setDocumentMode(true);
-    stepTabs_->setCurrentIndex(0);
+    stepTabs_->setCurrentIndex(stepToTabIndex(0));
     for (int i=0;i<4;++i) stepDone_[i] = false;
     stepDone_[0] = true;
     stepTabs_->setStyleSheet(
       "QTabBar::tab{padding:8px 12px;background:#2d333b;color:#dbe5f1;border:1px solid #485468;}"
       "QTabBar::tab:selected{background:#3b82f6;color:#ffffff;font-weight:700;}"
-      "QTabBar::tab:hover:!selected{background:#374151;}");
+      "QTabBar::tab:hover:!selected{background:#374151;}"
+      "QTabBar::tab:nth-child(2),QTabBar::tab:nth-child(4),QTabBar::tab:nth-child(6){background:transparent;border:none;color:#cfd4db;font-size:20px;padding:0 8px;min-width:42px;}");
+    stepTabs_->setTabEnabled(1, false);
+    stepTabs_->setTabEnabled(3, false);
+    stepTabs_->setTabEnabled(5, false);
     v->addWidget(stepTabs_);
 
     QHBoxLayout* topSourceBar = new QHBoxLayout();
@@ -1128,19 +1139,25 @@ void MainWindow::buildUI() {
     if (actionTabs_->tabBar()) actionTabs_->tabBar()->hide();
 
     connect(stepTabs_, &QTabBar::currentChanged, this, [this, leftStack](int idx){
-      if (actionTabs_) actionTabs_->setCurrentIndex(std::max(0, std::min(idx, actionTabs_->count()-1)));
-      const bool visual = (idx == 3);
+      if (isArrowTab(idx)) {
+        int fallback = stepToTabIndex(std::max(0, std::min(3, tabIndexToStep(std::max(0, idx-1)))));
+        if (stepTabs_ && stepTabs_->currentIndex() != fallback) stepTabs_->setCurrentIndex(fallback);
+        return;
+      }
+      const int stepIdx = std::max(0, std::min(3, tabIndexToStep(idx)));
+      if (actionTabs_) actionTabs_->setCurrentIndex(std::max(0, std::min(stepIdx, actionTabs_->count()-1)));
+      const bool visual = (stepIdx == 3);
       if (actionTabs_) actionTabs_->setVisible(!visual);
       if (leftStack) leftStack->setCurrentWidget(visual ? visualDashHost_ : viewsHost_);
-      if (idx == 0) onModeCapture();
-      else if (idx == 1) onModeCalibration();
-      else if (idx == 2) onModeTracking();
+      if (stepIdx == 0) onModeCapture();
+      else if (stepIdx == 1) onModeCalibration();
+      else if (stepIdx == 2) onModeTracking();
       else {
         mode_ = CAPTURE;
         updateLeftVisualDashboard();
         logLine("Switched to Visual mode.");
       }
-      if (idx >= 0 && idx < 4) stepDone_[idx] = true;
+      if (stepIdx >= 0 && stepIdx < 4) stepDone_[stepIdx] = true;
       updateStepAvailability();
     });
 
@@ -1319,7 +1336,7 @@ void MainWindow::rebuildSourceViews() {
     ImageViewer* v = new ImageViewer(canvas);
     v->setMinimumSize(480, 270);
     v->setToolMode(ImageViewer::PanTool);
-    v->setLineCreatedCallback([this, v](double pxLen){ if (gbLineProps_) gbLineProps_->setVisible(true); v->setToolMode(ImageViewer::PanTool); for (auto* ov: sourceViews_) if (ov!=v && ov) ov->setToolMode(ImageViewer::PanTool); updateScaleStatus(pxLen); });
+    v->setLineCreatedCallback([this, v](double pxLen){ if (gbLineProps_) gbLineProps_->setVisible(true); v->setToolMode(ImageViewer::PanTool); for (auto* ov: sourceViews_) if (ov!=v && ov) ov->setToolMode(ImageViewer::PanTool); pre_scale_line_drawn_ = true; updateScaleStatus(pxLen); updateStepAvailability(); });
     v->setLineDoubleClickCallback([this](double pxLen){ updateScaleStatus(pxLen); });
     v->setLineValueEditedCallback([this](double pxLen, double mm){
       if (pxLen <= 1e-9 || mm <= 0.0) return;
@@ -1424,6 +1441,7 @@ void MainWindow::onAddCamera() {
   bool ok=false;
   int camId = QInputDialog::getInt(this, "Add Camera", "Camera index:", 0, 0, 64, 1, &ok);
   if (!ok) return;
+  stepDone_[0] = true;
   if (mode_ != CAPTURE) {
     QMessageBox::information(this, "Add Camera", "Please switch to Capture tab to add camera sources.");
     return;
@@ -1479,6 +1497,7 @@ void MainWindow::onAddVideo()
     QString last = settings_.value("lastVideoDir", "").toString();
     QString path = QFileDialog::getOpenFileName(this, "Add Video", last,"Video (*.mp4 *.avi *.mov *.mkv);;All (*.*)");
     if (path.isEmpty()) return;
+    stepDone_[0] = true;
 
     if (!sources_.empty()) {
       QMessageBox::information(this, "Add Video", "Monocular mode supports only 1 source.");
@@ -1537,6 +1556,7 @@ void MainWindow::onAddImageSequence()
     QString last = settings_.value("lastImageSeqDir", "").toString();
     QString dir = QFileDialog::getExistingDirectory(this, "Add Image Sequence Folder", last);
     if (dir.isEmpty()) return;
+    stepDone_[0] = true;
 
     QDir qdir(dir);
     QFileInfoList files = qdir.entryInfoList(kImageNameFilters(), QDir::Files, QDir::Name);
@@ -1604,6 +1624,11 @@ void MainWindow::onRemoveSource() {
 
   // Source removal must reset all Visual/ObjectDefine measurement outputs.
   meas_rows_.clear();
+  pre_scale_line_drawn_ = false;
+  pre_scale_calculated_ = false;
+  stepDone_[1] = false;
+  stepDone_[2] = false;
+  stepDone_[3] = false;
   last_meas_key_ = std::numeric_limits<qint64>::min();
   last_ctr_ = cv::Point2f(0, 0);
   last_speed_ = 0.0;
@@ -1638,7 +1663,7 @@ void MainWindow::onModeCalibration() {
   if (btnAddVideo_) btnAddVideo_->setVisible(true);
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
   if (actionTabs_ && actionTabs_->currentIndex()!=1) actionTabs_->setCurrentIndex(1);
-  if (stepTabs_ && stepTabs_->currentIndex()!=1) stepTabs_->setCurrentIndex(1);
+  if (stepTabs_ && stepTabs_->currentIndex()!=stepToTabIndex(1)) stepTabs_->setCurrentIndex(stepToTabIndex(1));
   logLine("Switched to Preprocess mode.");
 }
 
@@ -1649,7 +1674,7 @@ void MainWindow::onModeTracking() {
   if (btnAddVideo_) btnAddVideo_->setVisible(true);
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
   if (actionTabs_ && actionTabs_->currentIndex()!=2) actionTabs_->setCurrentIndex(2);
-  if (stepTabs_ && stepTabs_->currentIndex()!=2) stepTabs_->setCurrentIndex(2);
+  if (stepTabs_ && stepTabs_->currentIndex()!=stepToTabIndex(2)) stepTabs_->setCurrentIndex(stepToTabIndex(2));
   logLine("Switched to ObjectDefine mode.");
 }
 
@@ -1659,7 +1684,7 @@ void MainWindow::onModeCapture() {
   if (btnAddVideo_) btnAddVideo_->setVisible(true);
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
   if (actionTabs_ && actionTabs_->currentIndex()!=0) actionTabs_->setCurrentIndex(0);
-  if (stepTabs_ && stepTabs_->currentIndex()!=0) stepTabs_->setCurrentIndex(0);
+  if (stepTabs_ && stepTabs_->currentIndex()!=stepToTabIndex(0)) stepTabs_->setCurrentIndex(stepToTabIndex(0));
   logLine("Switched to Source mode.");
 }
 
@@ -1690,11 +1715,13 @@ void MainWindow::onCaptureNow() {
 void MainWindow::onModeTabChanged(int idx) {
   if (!stepTabs_) return;
   updateStepAvailability();
-  if (idx < 0 || idx >= stepTabs_->count() || !stepTabs_->isTabEnabled(idx)) {
-    idx = stepTabs_->currentIndex();
+  const int tabIdx = stepToTabIndex(std::max(0, std::min(3, idx)));
+  int target = tabIdx;
+  if (target < 0 || target >= stepTabs_->count() || !stepTabs_->isTabEnabled(target)) {
+    target = stepTabs_->currentIndex();
   }
-  if (idx >= 0 && idx < stepTabs_->count() && stepTabs_->currentIndex()!=idx) {
-    stepTabs_->setCurrentIndex(idx);
+  if (target >= 0 && target < stepTabs_->count() && stepTabs_->currentIndex()!=target) {
+    stepTabs_->setCurrentIndex(target);
   }
 }
 
@@ -1707,25 +1734,31 @@ bool MainWindow::hasAnySourceInCurrentMode() {
 }
 
 void MainWindow::updateStepAvailability() {
-  if (!stepTabs_ || stepTabs_->count() < 4) return;
-  const bool sourceDone = hasAnySourceInCurrentMode();
+  if (!stepTabs_ || stepTabs_->count() < 7) return;
+  const bool sourceDone = stepDone_[0] || hasAnySourceInCurrentMode();
   stepDone_[0] = sourceDone;
+  stepDone_[1] = pre_scale_line_drawn_ && pre_scale_calculated_;
+  stepDone_[2] = stepDone_[2] && !meas_rows_.empty();
 
   // Progressive unlock: step N is clickable only when step N-1 is done.
   const bool en0 = true;
   const bool en1 = stepDone_[0];
   const bool en2 = en1 && stepDone_[1];
   const bool en3 = en2 && stepDone_[2];
-  stepTabs_->setTabEnabled(0, en0);
-  stepTabs_->setTabEnabled(1, en1);
-  stepTabs_->setTabEnabled(2, en2);
-  stepTabs_->setTabEnabled(3, en3);
+  stepTabs_->setTabEnabled(stepToTabIndex(0), en0);
+  stepTabs_->setTabEnabled(stepToTabIndex(1), en1);
+  stepTabs_->setTabEnabled(stepToTabIndex(2), en2);
+  stepTabs_->setTabEnabled(stepToTabIndex(3), en3);
+  stepTabs_->setTabEnabled(1, false);
+  stepTabs_->setTabEnabled(3, false);
+  stepTabs_->setTabEnabled(5, false);
 
-  int cur = stepTabs_->currentIndex();
-  if (cur == 3 && !en3) cur = 2;
-  if (cur == 2 && !en2) cur = 1;
-  if (cur == 1 && !en1) cur = 0;
-  if (cur != stepTabs_->currentIndex()) stepTabs_->setCurrentIndex(cur);
+  int curStep = tabIndexToStep(stepTabs_->currentIndex());
+  if (curStep == 3 && !en3) curStep = 2;
+  if (curStep == 2 && !en2) curStep = 1;
+  if (curStep == 1 && !en1) curStep = 0;
+  const int curTab = stepToTabIndex(curStep);
+  if (curTab != stepTabs_->currentIndex()) stepTabs_->setCurrentIndex(curTab);
 }
 
 void MainWindow::onPreprocessParamsChanged() {
@@ -2028,8 +2061,10 @@ void MainWindow::onToggleTrackBinary() {
     // immediately, without requiring manual playback.
     updatePlaybackParams();
     rebuildMeasurementSeriesFromCurrentSource();
+    if (!meas_rows_.empty()) stepDone_[2] = true;
   }
   else measurements_frozen_ = false;
+  updateStepAvailability();
   logLine(track_binary_enabled_ ? "Binary contour tracking enabled." : "Binary contour tracking disabled.");
   onTick();
 }
@@ -2072,6 +2107,9 @@ void MainWindow::onApplyScaleFromInput() {
     return;
   }
   mm_per_pixel_ = mm / px;
+  pre_scale_calculated_ = true;
+  stepDone_[1] = pre_scale_line_drawn_ && pre_scale_calculated_;
+  updateStepAvailability();
   updateScaleStatus(px);
   logLine(QString("Scale calibrated: %1 mm / %2 px = %3 mm/px")
           .arg(mm,0,'f',6).arg(px,0,'f',3).arg(mm_per_pixel_,0,'f',9));
@@ -2384,7 +2422,7 @@ void MainWindow::updateStatus() {
 
   QString m = "Source";
   if (stepTabs_) {
-    const int si = stepTabs_->currentIndex();
+    const int si = tabIndexToStep(stepTabs_->currentIndex());
     if (si == 1) m = "PreProcess";
     else if (si == 2) m = "ObjectDefine";
     else if (si == 3) m = "Visual";
