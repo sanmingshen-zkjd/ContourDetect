@@ -19,6 +19,7 @@
 #include <QStatusBar>
 #include <QGroupBox>
 #include <QGridLayout>
+#include <QVBoxLayout>
 #include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -443,6 +444,16 @@ private:
 
   // Tracking detect-all overlay cache: source index -> frame index -> visualized frame
   std::unordered_map<int, std::unordered_map<int64_t, cv::Mat>> detect_overlay_cache_;
+
+  QWidget* visualDashHost_=nullptr;
+  QGridLayout* visualDashGrid_=nullptr;
+  QLabel* leftVisImage_=nullptr;
+  QCustomPlot* leftDispPlot_=nullptr;
+  QCustomPlot* leftSpeedPlot_=nullptr;
+  QCustomPlot* leftAreaPlot_=nullptr;
+  QCustomPlot* leftPerimPlot_=nullptr;
+  QCustomPlot* leftCircPlot_=nullptr;
+  QTableWidget* leftMeasureTable_=nullptr;
 
   // Timer (UI refresh)
   QTimer timer_;
