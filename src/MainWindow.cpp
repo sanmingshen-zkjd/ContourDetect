@@ -725,6 +725,11 @@ void MainWindow::buildUI() {
     topSourceBar->addWidget(btnExportMp4_);
     topSourceBar->addWidget(btnToggleTable_);
     topSourceBar->addWidget(btnTileLayout_);
+    btnCaptureVisual_->setVisible(false);
+    btnExportTableCsv_->setVisible(false);
+    btnExportMp4_->setVisible(false);
+    btnToggleTable_->setVisible(false);
+    btnTileLayout_->setVisible(false);
     topSourceBar->addStretch(1);
     v->addLayout(topSourceBar);
 
@@ -959,9 +964,9 @@ void MainWindow::buildUI() {
     spContrast_->setRange(0, 255);
 
     slBrightness_->setValue(128);
-    slBrightness_->setMinimumWidth(220);
+    slBrightness_->setMinimumWidth(170);
     slContrast_->setValue(128);
-    slContrast_->setMinimumWidth(220);
+    slContrast_->setMinimumWidth(170);
     spBrightness_->setValue(128);
     spContrast_->setValue(128);
 
@@ -971,6 +976,8 @@ void MainWindow::buildUI() {
     bcLayout->addWidget(lblC, 1, 0);
     bcLayout->addWidget(slContrast_, 1, 1);
     bcLayout->addWidget(spContrast_, 1, 2);
+    bcLayout->setHorizontalSpacing(10);
+    bcLayout->setColumnStretch(1, 1);
     gbBC->setLayout(bcLayout);
 
     btnPreAuto_ = new QPushButton("Auto", tabCal);
@@ -989,6 +996,7 @@ void MainWindow::buildUI() {
     btnDeleteScaleLine_ = new QPushButton("Delete Scale Line", tabCal);
     chkShowLines_ = new QCheckBox("Show Lines", tabCal);
     chkShowLines_->setChecked(false);
+    chkShowLines_->setVisible(false);
     scaleCtl->addWidget(btnStartScaleLine_);
     scaleCtl->addWidget(btnDeleteScaleLine_);
     scaleCtl->addWidget(chkShowLines_);
@@ -1133,7 +1141,7 @@ void MainWindow::buildUI() {
     prevTitle->addWidget(chkInvertBinary_);
     trkMainLayout->addLayout(prevTitle);
     lblBinaryPreview_ = new QLabel(tabObj);
-    lblBinaryPreview_->setFixedSize(320, 200);
+    lblBinaryPreview_->setFixedSize(420, 240);
     lblBinaryPreview_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     lblBinaryPreview_->setAlignment(Qt::AlignCenter);
     lblBinaryPreview_->setStyleSheet("background:#111;border:1px solid #3a4250;color:#9aa7b8;");
@@ -1225,6 +1233,13 @@ void MainWindow::buildUI() {
       if (actionTabs_) actionTabs_->setVisible(!visual);
       if (log_) log_->setVisible(!visual);
       if (leftStack) leftStack->setCurrentWidget(visual ? visualDashHost_ : viewsHost_);
+      if (btnCaptureVisual_) btnCaptureVisual_->setVisible(visual);
+      if (btnExportTableCsv_) btnExportTableCsv_->setVisible(visual);
+      if (btnExportMp4_) btnExportMp4_->setVisible(visual);
+      if (btnToggleTable_) btnToggleTable_->setVisible(visual);
+      if (btnTileLayout_) btnTileLayout_->setVisible(visual);
+      const bool preprocess = (stepIdx == 1);
+      for (auto* sv : sourceViews_) if (sv) sv->setAnnotationsVisible(preprocess);
       if (stepIdx == 0) onModeCapture();
       else if (stepIdx == 1) onModeCalibration();
       else if (stepIdx == 2) onModeTracking();
@@ -2214,6 +2229,11 @@ void MainWindow::onTryAllGlobalMethods() {
   QDialog* dlg = new QDialog(this);
   dlg->setWindowTitle("Try All Global Methods");
   QVBoxLayout* outer = new QVBoxLayout(dlg);
+  QRect ar = QGuiApplication::primaryScreen()->availableGeometry();
+  dlg->resize((int)(ar.width()*0.9), (int)(ar.height()*0.9));
+  int pickedIdx = -1;
+  QScrollArea* scroll = new QScrollArea(dlg);
+  QWidget* wrap = new QWidget(scroll);
   QGridLayout* grid = new QGridLayout();
   auto tiles = std::make_shared<std::vector<ThumbnailLabel*>>();
   const int thumbW = 220, thumbH = 140, cols = 4;
@@ -2232,9 +2252,10 @@ void MainWindow::onTryAllGlobalMethods() {
     tile->setScaledContents(true);
     tile->setToolTip(methodName + "\nDouble-click to use this method");
     tiles->push_back(tile);
-    tile->onClicked = [tiles, tile](int) {
+    tile->onClicked = [tiles, tile, &pickedIdx](int idx) {
       for (auto* t : *tiles) if (t) t->setSelected(false);
       if (tile) tile->setSelected(true);
+      pickedIdx = idx;
     };
     tile->onDoubleClick = [this, dlg](int idx) {
       if (cbGlobalMethod_ && idx >= 0 && idx < cbGlobalMethod_->count()) cbGlobalMethod_->setCurrentIndex(idx);
@@ -2248,8 +2269,22 @@ void MainWindow::onTryAllGlobalMethods() {
     if (idx >= 0) cbGlobalMethod_->setCurrentIndex(idx);
   }
 
-  outer->addLayout(grid);
-  dlg->exec();
+  wrap->setLayout(grid);
+  scroll->setWidget(wrap);
+  scroll->setWidgetResizable(true);
+  outer->addWidget(scroll, 1);
+  QDialogButtonBox* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dlg);
+  connect(box, &QDialogButtonBox::accepted, dlg, &QDialog::accept);
+  connect(box, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
+  outer->addWidget(box);
+  if (dlg->exec() == QDialog::Accepted) {
+    if (pickedIdx >= 0 && cbGlobalMethod_) cbGlobalMethod_->setCurrentIndex(pickedIdx);
+  } else {
+    if (cbGlobalMethod_) {
+      int idx = cbGlobalMethod_->findText(oldMethod);
+      if (idx >= 0) cbGlobalMethod_->setCurrentIndex(idx);
+    }
+  }
 }
 
 void MainWindow::onTryAllLocalMethods() {
@@ -2273,6 +2308,11 @@ void MainWindow::onTryAllLocalMethods() {
   QDialog* dlg = new QDialog(this);
   dlg->setWindowTitle("Try All Local Methods");
   QVBoxLayout* outer = new QVBoxLayout(dlg);
+  QRect ar = QGuiApplication::primaryScreen()->availableGeometry();
+  dlg->resize((int)(ar.width()*0.9), (int)(ar.height()*0.9));
+  int pickedIdx = -1;
+  QScrollArea* scroll = new QScrollArea(dlg);
+  QWidget* wrap = new QWidget(scroll);
   QGridLayout* grid = new QGridLayout();
   auto tiles = std::make_shared<std::vector<ThumbnailLabel*>>();
   const int thumbW = 220, thumbH = 140, cols = 4;
@@ -2291,9 +2331,10 @@ void MainWindow::onTryAllLocalMethods() {
     tile->setScaledContents(true);
     tile->setToolTip(methodName + "\nDouble-click to use this method");
     tiles->push_back(tile);
-    tile->onClicked = [tiles, tile](int) {
+    tile->onClicked = [tiles, tile, &pickedIdx](int idx) {
       for (auto* t : *tiles) if (t) t->setSelected(false);
       if (tile) tile->setSelected(true);
+      pickedIdx = idx;
     };
     tile->onDoubleClick = [this, dlg](int idx) {
       if (cbLocalMethod_ && idx >= 0 && idx < cbLocalMethod_->count()) cbLocalMethod_->setCurrentIndex(idx);
@@ -2302,14 +2343,23 @@ void MainWindow::onTryAllLocalMethods() {
     grid->addWidget(tile, i / cols, i % cols);
   }
 
-  if (cbLocalMethod_) {
-    int idx = cbLocalMethod_->findText(oldMethod);
-    if (idx >= 0) cbLocalMethod_->setCurrentIndex(idx);
+  wrap->setLayout(grid);
+  scroll->setWidget(wrap);
+  scroll->setWidgetResizable(true);
+  outer->addWidget(scroll, 1);
+  QDialogButtonBox* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dlg);
+  connect(box, &QDialogButtonBox::accepted, dlg, &QDialog::accept);
+  connect(box, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
+  outer->addWidget(box);
+  if (dlg->exec() == QDialog::Accepted) {
+    if (pickedIdx >= 0 && cbLocalMethod_) cbLocalMethod_->setCurrentIndex(pickedIdx);
+  } else {
+    if (cbLocalMethod_) {
+      int idx = cbLocalMethod_->findText(oldMethod);
+      if (idx >= 0) cbLocalMethod_->setCurrentIndex(idx);
+    }
   }
   if (cbThreshType_) cbThreshType_->setCurrentIndex(oldType);
-
-  outer->addLayout(grid);
-  dlg->exec();
 }
 
 void MainWindow::onPreprocessAuto() {
