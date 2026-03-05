@@ -220,6 +220,10 @@ private:
   void updateHistogramPlot();
   void updateLeftVisualDashboard();
   void rebuildMeasurementSeriesFromCurrentSource();
+  void savePlotAsBmp(QCustomPlot* plot, const QString& nameHint);
+  void onExportTableCsv();
+  void onCaptureVisualSnapshot();
+  void onExportVisualMp4();
   void onAddVisualizationChart();
   void onVisualizationPlotContextMenu(const QPoint& pos);
   bool chooseVisualizationDataTypes(QVector<int>& components, QString& labelOut);
@@ -455,6 +459,14 @@ private:
   QCustomPlot* leftAreaPlot_=nullptr;
   QCustomPlot* leftPerimPlot_=nullptr;
   QCustomPlot* leftCircPlot_=nullptr;
+  QComboBox* cbDispMetric_=nullptr;
+  QComboBox* cbSpeedMetric_=nullptr;
+  QComboBox* cbAreaMetric_=nullptr;
+  QComboBox* cbPerimMetric_=nullptr;
+  QComboBox* cbCircMetric_=nullptr;
+  QPushButton* btnCaptureVisual_=nullptr;
+  QPushButton* btnExportTableCsv_=nullptr;
+  QPushButton* btnExportMp4_=nullptr;
   QTableWidget* leftMeasureTable_=nullptr;
 
   // Timer (UI refresh)

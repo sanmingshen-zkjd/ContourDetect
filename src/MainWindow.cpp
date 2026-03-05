@@ -33,6 +33,7 @@
 #include <QMenu>
 #include <QTextDocument>
 #include <QRegularExpression>
+#include <QTextStream>
 #include <functional>
 #include <algorithm>
 #include <climits>
@@ -703,18 +704,36 @@ void MainWindow::buildUI() {
     leftVisImage_->setAlignment(Qt::AlignCenter);
     leftVisImage_->setStyleSheet("background:#111827;border:1px solid #374151;color:#cbd5e1;");
     leftVisImage_->setText("Image view");
-    auto mkPlot=[&](const QString& y){ QCustomPlot* p=new QCustomPlot(visualDashHost_); p->setMinimumHeight(visH); p->setMaximumHeight(visH); p->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed); p->setBackground(QBrush(QColor(17,24,39))); p->xAxis->setBasePen(QPen(QColor(148,163,184))); p->yAxis->setBasePen(QPen(QColor(148,163,184))); p->xAxis->setTickPen(QPen(QColor(148,163,184))); p->yAxis->setTickPen(QPen(QColor(148,163,184))); p->xAxis->setSubTickPen(QPen(QColor(100,116,139))); p->yAxis->setSubTickPen(QPen(QColor(100,116,139))); p->xAxis->setTickLabelColor(QColor(226,232,240)); p->yAxis->setTickLabelColor(QColor(226,232,240)); p->xAxis->setLabelColor(QColor(226,232,240)); p->yAxis->setLabelColor(QColor(226,232,240)); p->addGraph(); p->graph(0)->setPen(QPen(QColor(96,165,250), 2.0)); p->addGraph(); p->graph(1)->setPen(QPen(QColor(239,68,68), 1.6)); p->xAxis->setLabel("frame"); p->yAxis->setLabel(y); return p; };
+    auto mkPlot=[&](const QString& y){ QCustomPlot* p=new QCustomPlot(visualDashHost_); p->setMinimumHeight(visH); p->setMaximumHeight(visH); p->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed); p->setBackground(QBrush(QColor(17,24,39))); p->xAxis->setBasePen(QPen(QColor(148,163,184))); p->yAxis->setBasePen(QPen(QColor(148,163,184))); p->xAxis->setTickPen(QPen(QColor(148,163,184))); p->yAxis->setTickPen(QPen(QColor(148,163,184))); p->xAxis->setSubTickPen(QPen(QColor(100,116,139))); p->yAxis->setSubTickPen(QPen(QColor(100,116,139))); p->xAxis->setTickLabelColor(QColor(226,232,240)); p->yAxis->setTickLabelColor(QColor(226,232,240)); p->xAxis->setLabelColor(QColor(226,232,240)); p->yAxis->setLabelColor(QColor(226,232,240)); p->xAxis->setUpperEnding(QCPLineEnding::esSpikeArrow); p->yAxis->setUpperEnding(QCPLineEnding::esSpikeArrow); p->addGraph(); p->graph(0)->setPen(QPen(QColor(96,165,250), 2.0)); p->addGraph(); p->graph(1)->setPen(QPen(QColor(239,68,68), 1.6)); p->xAxis->setLabel("frame"); p->yAxis->setLabel(y); return p; };
+    QStringList metricItems = {"Displacement","Speed","Acceleration","Area","Perimeter","Major Axis","Minor Axis","Circularity"};
+    auto mkPlotCard=[&](QCustomPlot* p, QComboBox*& cb, const QString& shotName){
+      QWidget* card = new QWidget(visualDashHost_);
+      QVBoxLayout* cv = new QVBoxLayout(card); cv->setContentsMargins(0,0,0,0); cv->setSpacing(2);
+      QHBoxLayout* top = new QHBoxLayout(); top->setContentsMargins(0,0,0,0);
+      cb = new QComboBox(card); cb->addItems(metricItems); cb->setMinimumWidth((int)std::round(140*uiScale));
+      QPushButton* btnShot = new QPushButton("Shot", card);
+      connect(cb, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ updateLeftVisualDashboard(); });
+      connect(btnShot, &QPushButton::clicked, this, [this, p, shotName](){ savePlotAsBmp(p, shotName); });
+      top->addWidget(cb, 1); top->addWidget(btnShot, 0);
+      cv->addLayout(top); cv->addWidget(p, 1);
+      return card;
+    };
     leftDispPlot_=mkPlot("Displacement");
     leftSpeedPlot_=mkPlot("Speed");
     leftAreaPlot_=mkPlot("Area");
     leftPerimPlot_=mkPlot("Perimeter");
     leftCircPlot_=mkPlot("Circularity");
     visualDashGrid_->addWidget(leftVisImage_,0,0);
-    visualDashGrid_->addWidget(leftDispPlot_,0,1);
-    visualDashGrid_->addWidget(leftSpeedPlot_,0,2);
-    visualDashGrid_->addWidget(leftAreaPlot_,1,0);
-    visualDashGrid_->addWidget(leftPerimPlot_,1,1);
-    visualDashGrid_->addWidget(leftCircPlot_,1,2);
+    visualDashGrid_->addWidget(mkPlotCard(leftDispPlot_, cbDispMetric_, "disp"),0,1);
+    visualDashGrid_->addWidget(mkPlotCard(leftSpeedPlot_, cbSpeedMetric_, "speed"),0,2);
+    visualDashGrid_->addWidget(mkPlotCard(leftAreaPlot_, cbAreaMetric_, "area"),1,0);
+    visualDashGrid_->addWidget(mkPlotCard(leftPerimPlot_, cbPerimMetric_, "perimeter"),1,1);
+    visualDashGrid_->addWidget(mkPlotCard(leftCircPlot_, cbCircMetric_, "circularity"),1,2);
+    if (cbDispMetric_) cbDispMetric_->setCurrentIndex(0);
+    if (cbSpeedMetric_) cbSpeedMetric_->setCurrentIndex(1);
+    if (cbAreaMetric_) cbAreaMetric_->setCurrentIndex(3);
+    if (cbPerimMetric_) cbPerimMetric_->setCurrentIndex(4);
+    if (cbCircMetric_) cbCircMetric_->setCurrentIndex(7);
     leftMeasureTable_ = new QTableWidget(visualDashHost_);
     leftMeasureTable_->setColumnCount(9);
     leftMeasureTable_->setHorizontalHeaderLabels({"Disp","Speed","Accel","Area","Perimeter","Major","Minor","Circularity","Scale(mm/px)"});
@@ -727,8 +746,22 @@ void MainWindow::buildUI() {
     visSep->setFrameShape(QFrame::HLine);
     visSep->setFrameShadow(QFrame::Plain);
     visSep->setStyleSheet("color:#475569;background:#475569;");
-    visualDashGrid_->addWidget(visSep,2,0,1,3);
-    visualDashGrid_->addWidget(leftMeasureTable_,3,0,1,3);
+    QHBoxLayout* visActions = new QHBoxLayout();
+    btnCaptureVisual_ = new QPushButton("Capture Window", visualDashHost_);
+    btnExportTableCsv_ = new QPushButton("Export CSV", visualDashHost_);
+    btnExportMp4_ = new QPushButton("Export MP4", visualDashHost_);
+    connect(btnCaptureVisual_, &QPushButton::clicked, this, &MainWindow::onCaptureVisualSnapshot);
+    connect(btnExportTableCsv_, &QPushButton::clicked, this, &MainWindow::onExportTableCsv);
+    connect(btnExportMp4_, &QPushButton::clicked, this, &MainWindow::onExportVisualMp4);
+    visActions->addWidget(btnCaptureVisual_);
+    visActions->addWidget(btnExportTableCsv_);
+    visActions->addWidget(btnExportMp4_);
+    visActions->addStretch(1);
+    QWidget* visActionHost = new QWidget(visualDashHost_);
+    visActionHost->setLayout(visActions);
+    visualDashGrid_->addWidget(visActionHost,2,0,1,3);
+    visualDashGrid_->addWidget(visSep,3,0,1,3);
+    visualDashGrid_->addWidget(leftMeasureTable_,4,0,1,3);
 
     leftStack->addWidget(viewsHost_);
     leftStack->addWidget(visualDashHost_);
@@ -1095,6 +1128,7 @@ void MainWindow::buildUI() {
     connect(stepTabs_, &QTabBar::currentChanged, this, [this, leftStack](int idx){
       if (actionTabs_) actionTabs_->setCurrentIndex(std::max(0, std::min(idx, actionTabs_->count()-1)));
       const bool visual = (idx == 3);
+      if (actionTabs_) actionTabs_->setVisible(!visual);
       if (leftStack) leftStack->setCurrentWidget(visual ? visualDashHost_ : viewsHost_);
       if (idx == 0) onModeCapture();
       else if (idx == 1) onModeCalibration();
@@ -3231,15 +3265,39 @@ void MainWindow::updateLeftVisualDashboard() {
 
   QVector<double> disp(totalFrames, std::numeric_limits<double>::quiet_NaN());
   QVector<double> speed(totalFrames, std::numeric_limits<double>::quiet_NaN());
+  QVector<double> accel(totalFrames, std::numeric_limits<double>::quiet_NaN());
   QVector<double> area(totalFrames, std::numeric_limits<double>::quiet_NaN());
   QVector<double> perim(totalFrames, std::numeric_limits<double>::quiet_NaN());
+  QVector<double> major(totalFrames, std::numeric_limits<double>::quiet_NaN());
+  QVector<double> minor(totalFrames, std::numeric_limits<double>::quiet_NaN());
   QVector<double> circ(totalFrames, std::numeric_limits<double>::quiet_NaN());
 
   for (const auto& r : meas_rows_) {
     if (r.key < 0 || r.key >= totalFrames) continue;
     int i = (int)r.key;
-    disp[i]=r.disp; speed[i]=r.speed; area[i]=r.area; perim[i]=r.perim; circ[i]=r.circ;
+    disp[i]=r.disp; speed[i]=r.speed; accel[i]=r.accel; area[i]=r.area; perim[i]=r.perim; major[i]=r.major; minor[i]=r.minor; circ[i]=r.circ;
   }
+
+  auto metricValues = [&](int idx)->QVector<double> {
+    if (idx == 1) return speed;
+    if (idx == 2) return accel;
+    if (idx == 3) return area;
+    if (idx == 4) return perim;
+    if (idx == 5) return major;
+    if (idx == 6) return minor;
+    if (idx == 7) return circ;
+    return disp;
+  };
+  auto metricLabel = [&](int idx)->QString {
+    if (idx == 1) return QString("Speed (%1/frame)").arg(lenU);
+    if (idx == 2) return QString("Acceleration (%1/frame²)").arg(lenU);
+    if (idx == 3) return QString("Area (%1)").arg(areaU);
+    if (idx == 4) return QString("Perimeter (%1)").arg(lenU);
+    if (idx == 5) return QString("Major Axis (%1)").arg(lenU);
+    if (idx == 6) return QString("Minor Axis (%1)").arg(lenU);
+    if (idx == 7) return "Circularity (-)";
+    return QString("Displacement (%1)").arg(lenU);
+  };
 
   auto fill=[&](QCustomPlot* p, const QVector<double>& vals, const QString& yLabel){
     if(!p) return;
@@ -3268,11 +3326,11 @@ void MainWindow::updateLeftVisualDashboard() {
     p->replot();
   };
 
-  fill(leftDispPlot_, disp, QString("Displacement (%1)").arg(lenU));
-  fill(leftSpeedPlot_, speed, QString("Speed (%1/frame)").arg(lenU));
-  fill(leftAreaPlot_, area, QString("Area (%1)").arg(areaU));
-  fill(leftPerimPlot_, perim, QString("Perimeter (%1)").arg(lenU));
-  fill(leftCircPlot_, circ, "Circularity (-)");
+  fill(leftDispPlot_, metricValues(cbDispMetric_ ? cbDispMetric_->currentIndex() : 0), metricLabel(cbDispMetric_ ? cbDispMetric_->currentIndex() : 0));
+  fill(leftSpeedPlot_, metricValues(cbSpeedMetric_ ? cbSpeedMetric_->currentIndex() : 1), metricLabel(cbSpeedMetric_ ? cbSpeedMetric_->currentIndex() : 1));
+  fill(leftAreaPlot_, metricValues(cbAreaMetric_ ? cbAreaMetric_->currentIndex() : 3), metricLabel(cbAreaMetric_ ? cbAreaMetric_->currentIndex() : 3));
+  fill(leftPerimPlot_, metricValues(cbPerimMetric_ ? cbPerimMetric_->currentIndex() : 4), metricLabel(cbPerimMetric_ ? cbPerimMetric_->currentIndex() : 4));
+  fill(leftCircPlot_, metricValues(cbCircMetric_ ? cbCircMetric_->currentIndex() : 7), metricLabel(cbCircMetric_ ? cbCircMetric_->currentIndex() : 7));
 
   if (leftMeasureTable_) {
     leftMeasureTable_->setHorizontalHeaderLabels({
@@ -3299,6 +3357,91 @@ void MainWindow::updateLeftVisualDashboard() {
       if (leftMeasureTable_->item(curIdx, 0)) leftMeasureTable_->scrollToItem(leftMeasureTable_->item(curIdx,0), QAbstractItemView::PositionAtCenter);
     }
   }
+}
+
+void MainWindow::savePlotAsBmp(QCustomPlot* plot, const QString& nameHint) {
+  if (!plot) return;
+  QString def = QString("%1_%2.bmp").arg(nameHint, QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+  QString path = QFileDialog::getSaveFileName(this, "Save Plot BMP", def, "Bitmap (*.bmp)");
+  if (path.isEmpty()) return;
+  const int w = std::max(1920, plot->width() * 2);
+  const int h = std::max(1080, plot->height() * 2);
+  if (!plot->saveBmp(path, w, h, 1.0, -1)) {
+    QMessageBox::warning(this, "Save BMP", "Failed to save plot image.");
+  }
+}
+
+void MainWindow::onCaptureVisualSnapshot() {
+  if (!visualDashHost_) return;
+  QString def = QString("visual_window_%1.bmp").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+  QString path = QFileDialog::getSaveFileName(this, "Save Visual Snapshot", def, "Bitmap (*.bmp)");
+  if (path.isEmpty()) return;
+  QPixmap pm = visualDashHost_->grab();
+  if (!pm.save(path, "BMP")) QMessageBox::warning(this, "Snapshot", "Failed to save snapshot.");
+}
+
+void MainWindow::onExportTableCsv() {
+  if (!leftMeasureTable_) return;
+  QString def = QString("measurements_%1.csv").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+  QString path = QFileDialog::getSaveFileName(this, "Export CSV", def, "CSV (*.csv)");
+  if (path.isEmpty()) return;
+  QFile f(path);
+  if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    QMessageBox::warning(this, "Export CSV", "Failed to open file.");
+    return;
+  }
+  QTextStream ts(&f);
+  QStringList headers;
+  for (int c=0;c<leftMeasureTable_->columnCount();++c) {
+    auto* hi = leftMeasureTable_->horizontalHeaderItem(c);
+    headers << (hi ? hi->text() : QString("Col%1").arg(c));
+  }
+  ts << "Frame," << headers.join(',') << "\n";
+  for (int r=0;r<leftMeasureTable_->rowCount();++r) {
+    ts << r;
+    for (int c=0;c<leftMeasureTable_->columnCount();++c) {
+      auto* it = leftMeasureTable_->item(r,c);
+      QString v = it ? it->text() : "";
+      if (v.contains(',')) v = QString("\"") + v + "\"";
+      ts << ',' << v;
+    }
+    ts << "\n";
+  }
+  f.close();
+}
+
+void MainWindow::onExportVisualMp4() {
+  if (!visualDashHost_ || !progressSlider_) return;
+  QString def = QString("visual_record_%1.mp4").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+  QString path = QFileDialog::getSaveFileName(this, "Export MP4", def, "MP4 (*.mp4)");
+  if (path.isEmpty()) return;
+
+  const int start = progressSlider_->minimum();
+  const int end = progressSlider_->maximum();
+  if (end < start) return;
+  int savedFrame = (int)play_frame_;
+
+  QImage first = visualDashHost_->grab().toImage().convertToFormat(QImage::Format_RGB888);
+  cv::Mat firstMat(first.height(), first.width(), CV_8UC3, (void*)first.bits(), first.bytesPerLine());
+  cv::Mat firstBgr; cv::cvtColor(firstMat, firstBgr, cv::COLOR_RGB2BGR);
+  cv::VideoWriter writer(path.toStdString(), cv::VideoWriter::fourcc('m','p','4','v'), std::max(1.0, play_fps_), firstBgr.size());
+  if (!writer.isOpened()) {
+    QMessageBox::warning(this, "Export MP4", "Failed to create mp4 writer.");
+    return;
+  }
+
+  for (int i=start; i<=end; ++i) {
+    play_frame_ = i;
+    onTick();
+    qApp->processEvents();
+    QImage qi = visualDashHost_->grab().toImage().convertToFormat(QImage::Format_RGB888);
+    cv::Mat rgb(qi.height(), qi.width(), CV_8UC3, (void*)qi.bits(), qi.bytesPerLine());
+    cv::Mat bgr; cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
+    writer.write(bgr);
+  }
+  writer.release();
+  play_frame_ = savedFrame;
+  onTick();
 }
 
 void MainWindow::onPoseFromWorker(const PoseResult& r) {
