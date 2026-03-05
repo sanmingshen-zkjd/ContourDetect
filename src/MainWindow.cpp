@@ -35,6 +35,7 @@
 #include <QTextDocument>
 #include <QRegularExpression>
 #include <QStandardItemModel>
+#include <QSignalBlocker>
 #include <QTextStream>
 #include <functional>
 #include <algorithm>
@@ -673,18 +674,27 @@ void MainWindow::buildUI() {
       "QTabBar::tab:selected{background:#3b82f6;color:#ffffff;font-weight:700;}"
       "QTabBar::tab:hover:!selected{background:#374151;}"
       "QTabBar::tab:disabled{background:#1f232b;color:#6b7280;border:1px solid #394150;}"
-      "QTabBar::tab:nth-child(2),QTabBar::tab:nth-child(4),QTabBar::tab:nth-child(6){background:transparent;border:none;color:transparent;padding:0px;margin:0 6px;min-width:30px;}"
+      "QTabBar::tab:nth-child(2),QTabBar::tab:nth-child(4),QTabBar::tab:nth-child(6){background:transparent;border:none;color:transparent;padding:0px;margin:0 10px;min-width:40px;}"
       "QTabBar::tab:nth-child(2):disabled,QTabBar::tab:nth-child(4):disabled,QTabBar::tab:nth-child(6):disabled{background:transparent;border:none;color:transparent;}");
-    auto mkArrowBtn = [this]() {
-      auto* b = new QToolButton(stepTabs_);
+    auto mkArrowBtn = [this]() -> QWidget* {
+      auto* host = new QWidget(stepTabs_);
+      host->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+      host->setFixedSize(QSize(40, 28));
+      host->setStyleSheet("QWidget{background:transparent;border:0px;}");
+      auto* lay = new QHBoxLayout(host);
+      lay->setContentsMargins(0,0,0,0);
+      lay->addStretch(1);
+      auto* b = new QToolButton(host);
       b->setIcon(style()->standardIcon(QStyle::SP_ArrowRight));
-      b->setIconSize(QSize(24, 24));
-      b->setFixedSize(QSize(28, 28));
+      b->setIconSize(QSize(20, 20));
+      b->setFixedSize(QSize(20, 20));
       b->setAutoRaise(true);
       b->setToolButtonStyle(Qt::ToolButtonIconOnly);
       b->setEnabled(false);
-      b->setStyleSheet("QToolButton{border:none;background:transparent;padding:0px;margin:0px;}QToolButton:disabled{border:none;background:transparent;}");
-      return b;
+      b->setStyleSheet("QToolButton{border:0px;background:transparent;padding:0px;margin:0px;}QToolButton:disabled{border:0px;background:transparent;}");
+      lay->addWidget(b, 0, Qt::AlignCenter);
+      lay->addStretch(1);
+      return host;
     };
     stepTabs_->setTabButton(1, QTabBar::LeftSide, mkArrowBtn());
     stepTabs_->setTabButton(3, QTabBar::LeftSide, mkArrowBtn());
@@ -719,10 +729,28 @@ void MainWindow::buildUI() {
     cbTargetFilter_ = new QComboBox(central);
     cbTargetFilter_->setMinimumWidth(220);
     cbTargetFilter_->setEditable(false);
-    cbTargetFilter_->addItem("Targets");
+    cbTargetFilter_->addItem("ALL");
     if (auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model())) {
-      if (auto* item = model->item(0)) item->setFlags(Qt::ItemIsEnabled);
-      connect(model, &QStandardItemModel::itemChanged, this, [this](QStandardItem*){ updateLeftVisualDashboard(); });
+      if (auto* item = model->item(0)) {
+        item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        item->setData(-1, Qt::UserRole);
+        item->setCheckState(Qt::Checked);
+      }
+      connect(model, &QStandardItemModel::itemChanged, this, [this, model](QStandardItem* changed){
+        if (!changed) return;
+        QSignalBlocker blocker(model);
+        const int id = changed->data(Qt::UserRole).toInt();
+        if (id == -1) {
+          const Qt::CheckState st = changed->checkState();
+          for (int i=1;i<model->rowCount();++i) if (auto* it=model->item(i)) it->setCheckState(st);
+        } else {
+          bool allChecked = true;
+          for (int i=1;i<model->rowCount();++i) { auto* it=model->item(i); if (it && it->checkState()!=Qt::Checked) { allChecked=false; break; } }
+          if (auto* allItem = model->item(0)) allItem->setCheckState(allChecked ? Qt::Checked : Qt::Unchecked);
+        }
+        blocker.unblock();
+        updateLeftVisualDashboard();
+      });
     }
     topSourceBar->addWidget(new QLabel("Targets", central));
     topSourceBar->addWidget(cbTargetFilter_);
@@ -3319,7 +3347,7 @@ void MainWindow::updateMeasurementFromFrame(const cv::Mat& preprocessedFrame) {
 
 void MainWindow::updateHistogramPlot() {
   if (!plotHistogram_ || !cbHistMetric_) return;
-  if (meas_rows_.empty()) { plotHistogram_->clearPlottables(); plotHistogram_->replot(); return; }
+
   auto pick = [&](const MeasureRow& r)->double {
     const QString m = cbHistMetric_->currentText();
     if (m == "Perimeter") return r.perim;
@@ -3330,28 +3358,62 @@ void MainWindow::updateHistogramPlot() {
     if (m == "MinorAxis") return r.minor;
     return r.area;
   };
-  double lo = spHistMin_ ? spHistMin_->value() : -1e9;
-  double hi = spHistMax_ ? spHistMax_->value() : 1e9;
+
+  std::vector<double> vals;
+  vals.reserve(std::max(target_meas_rows_.size(), meas_rows_.size()));
+  if (!target_meas_rows_.empty()) {
+    for (const auto& t : target_meas_rows_) vals.push_back(pick(t.m));
+  } else {
+    for (const auto& r : meas_rows_) vals.push_back(pick(r));
+  }
+  vals.erase(std::remove_if(vals.begin(), vals.end(), [](double v){ return !std::isfinite(v); }), vals.end());
+  if (vals.empty()) { plotHistogram_->clearPlottables(); plotHistogram_->clearItems(); plotHistogram_->replot(); return; }
+  std::sort(vals.begin(), vals.end());
+
+  double lo = spHistMin_ ? spHistMin_->value() : vals.front();
+  double hi = spHistMax_ ? spHistMax_->value() : vals.back();
   if (hi <= lo) hi = lo + 1.0;
-  const int bins = 20;
+
+  const int bins = 10;
+  const double span = hi - lo;
+  const double binW = span / bins;
   QVector<double> x(bins), y(bins);
-  for (int i=0;i<bins;++i) { x[i]=i; y[i]=0; }
-  for (const auto& r : meas_rows_) {
-    double v = pick(r);
+  for (int i=0;i<bins;++i) {
+    x[i] = lo + (i + 0.5) * binW;
+    y[i] = 0.0;
+  }
+  for (double v : vals) {
     if (v < lo || v > hi) continue;
-    int b = std::min(bins-1, std::max(0, (int)((v-lo)/(hi-lo)*bins)));
+    int b = std::min(bins-1, std::max(0, (int)((v-lo)/span*bins)));
     y[b] += 1.0;
   }
+
   plotHistogram_->clearPlottables();
+  plotHistogram_->clearItems();
   QCPBars* bars = new QCPBars(plotHistogram_->xAxis, plotHistogram_->yAxis);
-  bars->setWidth(0.85);
+  bars->setWidth(binW * 0.9);
   bars->setPen(QPen(QColor(59,130,246), 1.0));
   bars->setBrush(QColor(96,165,250,180));
   bars->setData(x, y);
-  plotHistogram_->xAxis->setLabel("Bins");
+
+  auto addVLine = [&](double xv, const QColor& c){
+    auto* line = new QCPItemStraightLine(plotHistogram_);
+    line->setPen(QPen(c, 2, Qt::DashLine));
+    line->point1->setType(QCPItemPosition::ptPlotCoords);
+    line->point2->setType(QCPItemPosition::ptPlotCoords);
+    line->point1->setCoords(xv, 0.0);
+    line->point2->setCoords(xv, 1.0);
+  };
+  addVLine(lo, QColor(244,63,94));
+  addVLine(hi, QColor(16,185,129));
+
+  const QString metric = cbHistMetric_->currentText();
+  plotHistogram_->xAxis->setLabel(metric);
   plotHistogram_->yAxis->setLabel("Count");
-  plotHistogram_->xAxis->setRange(-0.5, bins-0.5);
-  plotHistogram_->rescaleAxes(true);
+  plotHistogram_->xAxis->setRange(lo, hi);
+  double ymax = 1.0;
+  for (double c : y) ymax = std::max(ymax, c);
+  plotHistogram_->yAxis->setRange(0, ymax * 1.1);
   plotHistogram_->replot();
 }
 
@@ -3568,6 +3630,8 @@ void MainWindow::updateLeftVisualDashboard() {
     auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model());
     if (model) {
       std::map<int, Qt::CheckState> old;
+      Qt::CheckState oldAll = Qt::Checked;
+      if (auto* ai=model->item(0)) oldAll = ai->checkState();
       for (int i=1;i<model->rowCount();++i) {
         auto* it = model->item(i);
         if (!it) continue;
@@ -3576,14 +3640,19 @@ void MainWindow::updateLeftVisualDashboard() {
         if (ok) old[id] = (Qt::CheckState)it->checkState();
       }
       model->blockSignals(true);
+      if (model->rowCount() == 0) model->appendRow(new QStandardItem("ALL"));
+      if (auto* ai=model->item(0)) { ai->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable); ai->setData(-1, Qt::UserRole); ai->setCheckState(oldAll); }
       while (model->rowCount() > 1) model->removeRow(1);
+      bool allCheckedNow = true;
       for (int id : ids) {
         auto* it = new QStandardItem(QString("ID %1").arg(id));
         it->setData(id, Qt::UserRole);
         it->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
         it->setCheckState(old.count(id) ? old[id] : Qt::Checked);
+        if (it->checkState() != Qt::Checked) allCheckedNow = false;
         model->appendRow(it);
       }
+      if (auto* ai=model->item(0)) ai->setCheckState(allCheckedNow ? Qt::Checked : Qt::Unchecked);
       model->blockSignals(false);
     }
   }
@@ -3597,7 +3666,16 @@ void MainWindow::updateLeftVisualDashboard() {
       }
     }
   }
-  if (showIds.empty()) showIds = ids;
+  if (showIds.empty()) {
+    if (cbTargetFilter_) {
+      if (auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model())) {
+        auto* allItem = model->item(0);
+        if (allItem && allItem->checkState()==Qt::Checked) showIds = ids;
+      }
+    } else {
+      showIds = ids;
+    }
+  }
 
   auto fill=[&](QCustomPlot* p, int metricIdx, const QString& yLabel){
     if(!p) return;
