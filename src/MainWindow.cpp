@@ -645,16 +645,19 @@ void MainWindow::buildUI() {
     for (int i=0;i<4;++i) stepDone_[i] = false;
     stepDone_[0] = true;
     stepTabs_->setStyleSheet(
-      "QTabBar::tab{padding:8px 12px;background:#2d333b;color:#dbe5f1;border:1px solid #485468;}"
+      "QTabBar::tab{padding:9px 18px;margin-right:10px;background:#2d333b;color:#dbe5f1;border:1px solid #485468;border-radius:6px;}"
       "QTabBar::tab:selected{background:#3b82f6;color:#ffffff;font-weight:700;}"
-      "QTabBar::tab:hover:!selected{background:#374151;}");
+      "QTabBar::tab:hover:!selected{background:#374151;}"
+      "QTabBar::tab:disabled{background:#1f232b;color:#6b7280;border:1px solid #394150;}"
+      "QTabBar::tab:nth-child(2),QTabBar::tab:nth-child(4),QTabBar::tab:nth-child(6){background:transparent;border:none;color:transparent;padding:0px;margin:0 6px;min-width:34px;}"
+      "QTabBar::tab:nth-child(2):disabled,QTabBar::tab:nth-child(4):disabled,QTabBar::tab:nth-child(6):disabled{background:transparent;border:none;color:transparent;}");
     auto mkArrowBtn = [this]() {
       auto* b = new QToolButton(stepTabs_);
       b->setIcon(style()->standardIcon(QStyle::SP_ArrowRight));
       b->setIconSize(QSize(24, 24));
       b->setAutoRaise(true);
       b->setEnabled(false);
-      b->setStyleSheet("QToolButton{border:none;background:transparent;padding:0px;}");
+      b->setStyleSheet("QToolButton{border:none;background:transparent;padding:0px;margin:0px;}QToolButton:disabled{border:none;background:transparent;}");
       return b;
     };
     stepTabs_->setTabButton(1, QTabBar::LeftSide, mkArrowBtn());
