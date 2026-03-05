@@ -715,22 +715,27 @@ void MainWindow::buildUI() {
     topSourceBar->addWidget(btnAddVideo_);
     topSourceBar->addWidget(btnAddImgSeq_);
     topSourceBar->addWidget(btnRemoveSource_);
-    btnCaptureVisual_ = new QPushButton("Capture", central);
-    btnExportTableCsv_ = new QPushButton("CSV", central);
-    btnExportMp4_ = new QPushButton("MP4", central);
-    btnToggleTable_ = new QPushButton("Table On/Off", central);
-    btnTileLayout_ = new QPushButton("Tile", central);
+    topSourceBar->addStretch(1);
+    cbTargetFilter_ = new QComboBox(central);
+    cbTargetFilter_->setMinimumWidth(220);
+    cbTargetFilter_->setEditable(false);
+    cbTargetFilter_->addItem("Targets");
+    if (auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model())) {
+      if (auto* item = model->item(0)) item->setFlags(Qt::ItemIsEnabled);
+      connect(model, &QStandardItemModel::itemChanged, this, [this](QStandardItem*){ updateLeftVisualDashboard(); });
+    }
+    topSourceBar->addWidget(new QLabel("Targets", central));
+    topSourceBar->addWidget(cbTargetFilter_);
+    btnCaptureVisual_ = new QPushButton("Snap To BMP", central);
+    btnExportTableCsv_ = new QPushButton("Export To CSV", central);
+    btnExportMp4_ = new QPushButton("Export All To MP4", central);
     topSourceBar->addWidget(btnCaptureVisual_);
     topSourceBar->addWidget(btnExportTableCsv_);
     topSourceBar->addWidget(btnExportMp4_);
-    topSourceBar->addWidget(btnToggleTable_);
-    topSourceBar->addWidget(btnTileLayout_);
     btnCaptureVisual_->setVisible(false);
     btnExportTableCsv_->setVisible(false);
     btnExportMp4_->setVisible(false);
-    btnToggleTable_->setVisible(false);
-    btnTileLayout_->setVisible(false);
-    topSourceBar->addStretch(1);
+    if (cbTargetFilter_) cbTargetFilter_->setVisible(false);
     v->addLayout(topSourceBar);
 
     QFrame* topSep = new QFrame(central);
@@ -761,7 +766,7 @@ void MainWindow::buildUI() {
     viewsGrid_ = new QGridLayout(viewsHost_);
     viewsGrid_->setContentsMargins(0,0,0,0);
     viewsGrid_->setSpacing(8);
-    viewsHost_->setMinimumSize((int)std::round(960 * uiScale), (int)std::round(540 * uiScale));
+    viewsHost_->setMinimumSize((int)std::round(640 * uiScale), (int)std::round(360 * uiScale));
     rebuildSourceViews();
 
     visualDashHost_ = new QWidget(this);
@@ -808,7 +813,7 @@ void MainWindow::buildUI() {
     if (cbCircMetric_) cbCircMetric_->setCurrentIndex(7);
     leftMeasureTable_ = new QTableWidget(visualDashHost_);
     leftMeasureTable_->setColumnCount(10);
-    leftMeasureTable_->setHorizontalHeaderLabels({"ID","Frame","Disp","Speed","Accel","Area","Perimeter","Major","Minor","Circularity"});
+    leftMeasureTable_->setHorizontalHeaderLabels({"Frame","ID","Disp","Speed","Accel","Area","Perimeter","Major","Minor","Circularity"});
     leftMeasureTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     leftMeasureTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     leftMeasureTable_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -818,36 +823,18 @@ void MainWindow::buildUI() {
     visSep->setFrameShape(QFrame::HLine);
     visSep->setFrameShadow(QFrame::Plain);
     visSep->setStyleSheet("color:#475569;background:#475569;");
-    QHBoxLayout* visActions = new QHBoxLayout();
-    cbTargetFilter_ = new QComboBox(visualDashHost_);
-    cbTargetFilter_->setMinimumWidth(220);
-    cbTargetFilter_->setEditable(false);
-    cbTargetFilter_->addItem("All Targets");
-    if (auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model())) {
-      if (auto* item = model->item(0)) item->setFlags(Qt::ItemIsEnabled);
-      connect(model, &QStandardItemModel::itemChanged, this, [this](QStandardItem*){ updateLeftVisualDashboard(); });
-    }
-    connect(cbTargetFilter_, &QComboBox::currentTextChanged, this, [this](const QString&){ updateLeftVisualDashboard(); });
     connect(btnCaptureVisual_, &QPushButton::clicked, this, &MainWindow::onCaptureVisualSnapshot);
     connect(btnExportTableCsv_, &QPushButton::clicked, this, &MainWindow::onExportTableCsv);
     connect(btnExportMp4_, &QPushButton::clicked, this, &MainWindow::onExportVisualMp4);
-    connect(btnToggleTable_, &QPushButton::clicked, this, [this](){ if (leftMeasureTable_) leftMeasureTable_->setVisible(!leftMeasureTable_->isVisible()); });
-    connect(btnTileLayout_, &QPushButton::clicked, this, [this](){ if (visualDashGrid_) { visualDashGrid_->setRowStretch(0,1); visualDashGrid_->setRowStretch(1,1); visualDashGrid_->setRowStretch(4,2);} if (leftMeasureTable_) leftMeasureTable_->setVisible(true); });
-    visActions->addWidget(new QLabel("Targets", visualDashHost_));
-    visActions->addWidget(cbTargetFilter_);
-    visActions->addStretch(1);
-    QWidget* visActionHost = new QWidget(visualDashHost_);
-    visActionHost->setLayout(visActions);
-    visualDashGrid_->addWidget(visActionHost,2,0,1,3);
-    visualDashGrid_->addWidget(visSep,3,0,1,3);
-    visualDashGrid_->addWidget(leftMeasureTable_,4,0,1,3);
+    visualDashGrid_->addWidget(visSep,2,0,1,3);
+    visualDashGrid_->addWidget(leftMeasureTable_,3,0,1,3);
     connect(leftMeasureTable_, &QTableWidget::itemSelectionChanged, this, [this](){
       if (!leftMeasureTable_) return;
       auto sels = leftMeasureTable_->selectedItems();
       if (sels.isEmpty()) { selected_target_id_ = -1; selected_target_frame_ = -1; updateLeftVisualDashboard(); return; }
       int r = sels.first()->row();
-      auto* idIt = leftMeasureTable_->item(r,0);
-      auto* frIt = leftMeasureTable_->item(r,1);
+      auto* frIt = leftMeasureTable_->item(r,0);
+      auto* idIt = leftMeasureTable_->item(r,1);
       selected_target_id_ = idIt ? idIt->text().toInt() : -1;
       selected_target_frame_ = frIt ? frIt->text().toInt() : -1;
       updateLeftVisualDashboard();
@@ -964,9 +951,11 @@ void MainWindow::buildUI() {
     spContrast_->setRange(0, 255);
 
     slBrightness_->setValue(128);
-    slBrightness_->setMinimumWidth(170);
+    slBrightness_->setMinimumWidth(140);
+    slBrightness_->setMaximumWidth(180);
     slContrast_->setValue(128);
-    slContrast_->setMinimumWidth(170);
+    slContrast_->setMinimumWidth(140);
+    slContrast_->setMaximumWidth(180);
     spBrightness_->setValue(128);
     spContrast_->setValue(128);
 
@@ -1231,13 +1220,12 @@ void MainWindow::buildUI() {
       const bool visual = (stepIdx == 3);
       if (dock) dock->setVisible(!visual);
       if (actionTabs_) actionTabs_->setVisible(!visual);
-      if (log_) log_->setVisible(!visual);
+      if (log_) log_->setVisible(false);
       if (leftStack) leftStack->setCurrentWidget(visual ? visualDashHost_ : viewsHost_);
       if (btnCaptureVisual_) btnCaptureVisual_->setVisible(visual);
       if (btnExportTableCsv_) btnExportTableCsv_->setVisible(visual);
       if (btnExportMp4_) btnExportMp4_->setVisible(visual);
-      if (btnToggleTable_) btnToggleTable_->setVisible(visual);
-      if (btnTileLayout_) btnTileLayout_->setVisible(visual);
+      if (cbTargetFilter_) cbTargetFilter_->setVisible(visual);
       const bool preprocess = (stepIdx == 1);
       for (auto* sv : sourceViews_) if (sv) sv->setAnnotationsVisible(preprocess);
       if (stepIdx == 0) onModeCapture();
@@ -1263,6 +1251,7 @@ void MainWindow::buildUI() {
     log_ = new QTextEdit(dockw);
     log_->setReadOnly(true);
     log_->setMinimumHeight(120);
+    log_->setVisible(false);
     dv->addWidget(log_);
 
     dockw->setLayout(dv);
@@ -1274,6 +1263,11 @@ void MainWindow::buildUI() {
 
     root->addWidget(dock);
 
+    if (QScreen* screen = QGuiApplication::primaryScreen()) {
+      const QRect ar = screen->availableGeometry();
+      setMaximumSize(ar.size());
+      if (width() > ar.width() || height() > ar.height()) resize(ar.size());
+    }
     lblResolution_ = new QLabel("Resolution: -", this);
     statusBar()->addPermanentWidget(lblResolution_);
 
@@ -2236,7 +2230,9 @@ void MainWindow::onTryAllGlobalMethods() {
   QWidget* wrap = new QWidget(scroll);
   QGridLayout* grid = new QGridLayout();
   auto tiles = std::make_shared<std::vector<ThumbnailLabel*>>();
-  const int thumbW = 220, thumbH = 140, cols = 4;
+  const int thumbW = std::max(320, (int)(ar.width()*0.28));
+  const int thumbH = std::max(220, (int)(ar.height()*0.26));
+  const int cols = 3;
 
   for (int i = 0; i < n; ++i) {
     if (cbGlobalMethod_) cbGlobalMethod_->setCurrentIndex(i);
@@ -2315,7 +2311,9 @@ void MainWindow::onTryAllLocalMethods() {
   QWidget* wrap = new QWidget(scroll);
   QGridLayout* grid = new QGridLayout();
   auto tiles = std::make_shared<std::vector<ThumbnailLabel*>>();
-  const int thumbW = 220, thumbH = 140, cols = 4;
+  const int thumbW = std::max(320, (int)(ar.width()*0.28));
+  const int thumbH = std::max(220, (int)(ar.height()*0.26));
+  const int cols = 3;
 
   for (int i = 0; i < n; ++i) {
     if (cbLocalMethod_) cbLocalMethod_->setCurrentIndex(i);
@@ -3670,7 +3668,7 @@ void MainWindow::updateLeftVisualDashboard() {
   fill(leftCircPlot_, cbCircMetric_ ? cbCircMetric_->currentIndex() : 7, metricLabel(cbCircMetric_ ? cbCircMetric_->currentIndex() : 7));
 
   if (leftMeasureTable_) {
-    leftMeasureTable_->setHorizontalHeaderLabels({"ID","Frame",
+    leftMeasureTable_->setHorizontalHeaderLabels({"Frame","ID",
       QString("Disp (%1)").arg(lenU), QString("Speed (%1/frame)").arg(lenU), QString("Accel (%1/frame²)").arg(lenU),
       QString("Area (%1)").arg(areaU), QString("Perimeter (%1)").arg(lenU), QString("Major (%1)").arg(lenU), QString("Minor (%1)").arg(lenU), "Circularity (-)"});
     std::vector<TargetMeasureRow> rows = target_meas_rows_;
@@ -3681,21 +3679,25 @@ void MainWindow::updateLeftVisualDashboard() {
       if (a.m.key != b.m.key) return a.m.key < b.m.key;
       return a.id < b.id;
     });
+    int rr = 0;
     leftMeasureTable_->setRowCount((int)rows.size());
     auto setTxt=[&](int r,int c,const QString& v){ leftMeasureTable_->setItem(r,c,new QTableWidgetItem(v)); };
     for (int i=0;i<(int)rows.size();++i) {
       const auto& t = rows[i];
-      setTxt(i,0,QString::number(t.id));
-      setTxt(i,1,QString::number(t.m.key));
-      setTxt(i,2,QString::number(t.m.disp,'f',4));
-      setTxt(i,3,QString::number(t.m.speed,'f',4));
-      setTxt(i,4,QString::number(t.m.accel,'f',4));
-      setTxt(i,5,QString::number(t.m.area,'f',4));
-      setTxt(i,6,QString::number(t.m.perim,'f',4));
-      setTxt(i,7,QString::number(t.m.major,'f',4));
-      setTxt(i,8,QString::number(t.m.minor,'f',4));
-      setTxt(i,9,QString::number(t.m.circ,'f',4));
+      if (!showIds.count(t.id)) continue;
+      setTxt(rr,0,QString::number(t.m.key));
+      setTxt(rr,1,QString::number(t.id));
+      setTxt(rr,2,QString::number(t.m.disp,'f',4));
+      setTxt(rr,3,QString::number(t.m.speed,'f',4));
+      setTxt(rr,4,QString::number(t.m.accel,'f',4));
+      setTxt(rr,5,QString::number(t.m.area,'f',4));
+      setTxt(rr,6,QString::number(t.m.perim,'f',4));
+      setTxt(rr,7,QString::number(t.m.major,'f',4));
+      setTxt(rr,8,QString::number(t.m.minor,'f',4));
+      setTxt(rr,9,QString::number(t.m.circ,'f',4));
+      rr++;
     }
+    leftMeasureTable_->setRowCount(rr);
   }
 }
 
