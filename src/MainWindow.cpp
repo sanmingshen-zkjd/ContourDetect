@@ -48,6 +48,26 @@ static QStringList kImageNameFilters() {
   return {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff"};
 }
 
+static cv::Mat imreadUnicodePath(const QString& filePath, int flags=cv::IMREAD_COLOR) {
+  QFile f(filePath);
+  if (!f.open(QIODevice::ReadOnly)) return cv::Mat();
+  QByteArray bytes = f.readAll();
+  if (bytes.isEmpty()) return cv::Mat();
+  std::vector<uchar> buf(bytes.begin(), bytes.end());
+  return cv::imdecode(buf, flags);
+}
+
+static bool openVideoCaptureUnicode(cv::VideoCapture& cap, const QString& path) {
+  cap.release();
+  const QString nativePath = QDir::toNativeSeparators(path);
+  const QByteArray utf8 = nativePath.toUtf8();
+  if (cap.open(utf8.constData())) return true;
+  const QByteArray local = QFile::encodeName(nativePath);
+  if (cap.open(local.constData())) return true;
+  if (cap.open(nativePath.toStdString())) return true;
+  return false;
+}
+
 static int stepToTabIndex(int step) { return step * 2; }
 static int tabIndexToStep(int tabIndex) { return tabIndex / 2; }
 static bool isArrowTab(int tabIndex) { return (tabIndex % 2) == 1; }
@@ -1219,7 +1239,7 @@ bool MainWindow::openAllSources() {
       continue;
     }
     if (s.is_cam) s.cap.open(s.cam_id);
-    else s.cap.open(s.video_path.toStdString());
+    else openVideoCaptureUnicode(s.cap, s.video_path);
     if (!s.cap.isOpened()) okAll = false;
   }
   return okAll;
@@ -1522,8 +1542,7 @@ void MainWindow::onAddVideo()
     s.is_cam = false;
     s.mode_owner = (int)mode_;
     s.video_path = path;
-    std::string p = QFile::encodeName(path).constData();
-    s.cap.open(p);
+    openVideoCaptureUnicode(s.cap, path);
     if (!s.cap.isOpened()) 
     {
         QMessageBox::warning(this, "Video", "Failed to open video file.");
@@ -1592,7 +1611,7 @@ void MainWindow::onAddImageSequence()
     s.seq_idx = 0;
     for (const auto& fi : files) s.seq_files.push_back(fi.absoluteFilePath());
 
-    cv::Mat firstFrame = cv::imread(s.seq_files.front().toStdString(), cv::IMREAD_COLOR);
+    cv::Mat firstFrame = imreadUnicodePath(s.seq_files.front(), cv::IMREAD_COLOR);
     if (firstFrame.empty()) {
       QMessageBox::warning(this, "Image Sequence", "Failed to read first image in selected folder.");
       return;
@@ -1713,7 +1732,7 @@ void MainWindow::onCaptureNow() {
       if (s.is_image_seq) {
         if (!s.seq_files.isEmpty()) {
           int idx = std::max(0, std::min(s.seq_idx, s.seq_files.size()-1));
-          f = cv::imread(s.seq_files[idx].toStdString(), cv::IMREAD_COLOR);
+          f = imreadUnicodePath(s.seq_files[idx], cv::IMREAD_COLOR);
         }
       } else if (s.cap.isOpened()) {
         s.cap.read(f);
@@ -2691,7 +2710,7 @@ bool MainWindow::fromProjectJson(const QJsonObject& o) {
         s.mode_owner = owner;
         s.is_image_seq = false;
         s.video_path = si["path"].toString();
-        s.cap.open(s.video_path.toStdString());
+        openVideoCaptureUnicode(s.cap, s.video_path);
       } else if (type == "imgseq") {
         s.is_cam = false;
         s.mode_owner = owner;
@@ -3316,7 +3335,7 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource() {
     if (src.is_image_seq) {
       savedSeq = src.seq_idx;
       for (int i=0;i<totalFrames;++i) {
-        if (i < src.seq_files.size()) frames[i] = cv::imread(src.seq_files[i].toStdString(), cv::IMREAD_COLOR);
+        if (i < src.seq_files.size()) frames[i] = imreadUnicodePath(src.seq_files[i], cv::IMREAD_COLOR);
       }
       src.seq_idx = std::max(0, std::min(savedSeq, std::max(0, totalFrames-1)));
     } else {
@@ -3731,7 +3750,7 @@ void MainWindow::stepAllVideos(int delta) {
         if (src.seq_files.isEmpty()) continue;
         target = std::max<int64_t>(0, std::min<int64_t>(target, (int64_t)src.seq_files.size()-1));
         src.seq_idx = (int)target;
-        f = cv::imread(src.seq_files[(int)target].toStdString(), cv::IMREAD_COLOR);
+        f = imreadUnicodePath(src.seq_files[(int)target], cv::IMREAD_COLOR);
       } else {
         if (!src.cap.isOpened()) continue;
         if (play_end_frame_ <= 0) {
