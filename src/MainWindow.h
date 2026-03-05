@@ -29,6 +29,8 @@
 #include <QGraphicsScene>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsLineItem>
+#include <QGraphicsPolygonItem>
+#include <QPolygonF>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QResizeEvent>
@@ -67,7 +69,7 @@ class QCustomPlot;
 
 class ImageViewer : public QGraphicsView {
 public:
-  enum ToolMode { PanTool=0, PointTool=1, LineTool=2 };
+  enum ToolMode { PanTool=0, PointTool=1, LineTool=2, PolygonTool=3 };
   explicit ImageViewer(QWidget* parent=nullptr);
   void setImage(const QImage& img);
   void setToolMode(ToolMode mode);
@@ -78,6 +80,8 @@ public:
   void setLineCreatedCallback(const std::function<void(double)>& cb);
   void setLineDoubleClickCallback(const std::function<void(double)>& cb);
   void setLineValueEditedCallback(const std::function<void(double,double)>& cb);
+  void setPolygonFinishedCallback(const std::function<void(const QPolygonF&)>& cb);
+  void setRegionPolygons(const std::vector<QPolygonF>& includePolys, const std::vector<QPolygonF>& excludePolys);
   void applySelectedLineStyle(const QString& name, const QColor& color, int width);
   void setAnnotationsVisible(bool visible);
   void clearAllLines();
@@ -101,9 +105,14 @@ private:
   bool lineDrawing_ = false;
   QPointF lineStart_;
   QGraphicsLineItem* previewLine_ = nullptr;
+  bool polygonDrawing_ = false;
+  QPolygonF polygonPoints_;
+  QGraphicsPolygonItem* previewPolygon_ = nullptr;
+  std::vector<QGraphicsPolygonItem*> regionPolygonItems_;
   std::function<void(double)> onLineCreated_;
   std::function<void(double)> onLineDoubleClick_;
   std::function<void(double,double)> onLineValueEdited_;
+  std::function<void(const QPolygonF&)> onPolygonFinished_;
 };
 
 class MainWindow : public QMainWindow {
@@ -173,6 +182,9 @@ private slots:
   void onApplyScaleFromInput();
   void onTryAllGlobalMethods();
   void onTryAllLocalMethods();
+  void onAddMaskRegion();
+  void onAddDetectRegion();
+  void onDeleteRegion();
   void onSelectBinaryOp();
   void onUndoBinaryOp();
   void onAnalyzeParticles();
@@ -220,6 +232,7 @@ private:
   void refreshTrajectoryPlot();
   void updateMeasurementFromFrame(const cv::Mat& preprocessedFrame);
   void updateHistogramPlot();
+  void refreshRegionTable();
   void updateLeftVisualDashboard();
   void rebuildMeasurementSeriesFromCurrentSource(bool showProgress=false);
   void savePlotAsBmp(QCustomPlot* plot, const QString& nameHint);
@@ -354,6 +367,10 @@ private:
   QLabel* lblPreprocessHint_=nullptr;
   QPushButton* btnPreAuto_=nullptr;
   QLabel* lblScaleInfo_=nullptr;
+  QPushButton* btnAddMaskRegion_=nullptr;
+  QPushButton* btnAddDetectRegion_=nullptr;
+  QPushButton* btnDeleteRegion_=nullptr;
+  QTableWidget* tblRegions_=nullptr;
 
   // ObjectDefine tab
   QComboBox* cbThreshType_=nullptr;
@@ -445,6 +462,11 @@ private:
   cv::Point2f last_ctr_{0,0};
   double last_speed_ = 0.0;
   bool measurements_frozen_ = false;
+  struct RegionSpec { int id=0; bool include=true; QPolygonF poly; };
+  std::vector<RegionSpec> regions_;
+  int next_region_id_ = 1;
+  int drawing_region_type_ = 0; // 0 none, 1 include, 2 exclude
+  std::vector<std::vector<std::vector<cv::Point>>> analyzed_contours_by_frame_;
 
   struct CalibrationPair {
     int frame_id = -1;

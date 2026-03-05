@@ -299,6 +299,11 @@ void ImageViewer::setToolMode(ToolMode mode) {
     delete previewLine_;
     previewLine_ = nullptr;
   }
+  if (toolMode_ != PolygonTool) {
+    polygonDrawing_ = false;
+    polygonPoints_.clear();
+    if (previewPolygon_) { scene_.removeItem(previewPolygon_); delete previewPolygon_; previewPolygon_ = nullptr; }
+  }
 }
 
 void ImageViewer::zoomIn() { applyZoom(1.15); }
@@ -319,12 +324,30 @@ void ImageViewer::clearAnnotations() {
   }
   previewLine_ = nullptr;
   lineDrawing_ = false;
+  previewPolygon_ = nullptr;
+  polygonDrawing_ = false;
+  polygonPoints_.clear();
+  regionPolygonItems_.clear();
 }
 
 
 void ImageViewer::setLineCreatedCallback(const std::function<void(double)>& cb) { onLineCreated_ = cb; }
 void ImageViewer::setLineDoubleClickCallback(const std::function<void(double)>& cb) { onLineDoubleClick_ = cb; }
 void ImageViewer::setLineValueEditedCallback(const std::function<void(double,double)>& cb) { onLineValueEdited_ = cb; }
+void ImageViewer::setPolygonFinishedCallback(const std::function<void(const QPolygonF&)>& cb) { onPolygonFinished_ = cb; }
+
+void ImageViewer::setRegionPolygons(const std::vector<QPolygonF>& includePolys, const std::vector<QPolygonF>& excludePolys) {
+  for (auto* it : regionPolygonItems_) { if (it) { scene_.removeItem(it); delete it; } }
+  regionPolygonItems_.clear();
+  auto addPoly=[this](const QPolygonF& p, const QColor& c){
+    if (p.size() < 3) return;
+    auto* it = scene_.addPolygon(p, QPen(c, 2, Qt::DashLine), QBrush(QColor(c.red(), c.green(), c.blue(), 40)));
+    it->setZValue(3);
+    regionPolygonItems_.push_back(it);
+  };
+  for (const auto& p : includePolys) addPoly(p, QColor(34,197,94));
+  for (const auto& p : excludePolys) addPoly(p, QColor(239,68,68));
+}
 
 void ImageViewer::applySelectedLineStyle(const QString& name, const QColor& color, int width) {
   bool applied = false;
@@ -397,10 +420,39 @@ void ImageViewer::mousePressEvent(QMouseEvent* e) {
     QGraphicsView::mousePressEvent(e);
     return;
   }
-  if (e->button() != Qt::LeftButton || pixmapItem_->pixmap().isNull()) return;
+  if (pixmapItem_->pixmap().isNull()) return;
 
   QPointF p = mapToScene(e->pos());
   if (!sceneRect().contains(p)) return;
+
+  if (toolMode_ == PolygonTool) {
+    if (e->button() == Qt::LeftButton) {
+      if (!polygonDrawing_) {
+        polygonDrawing_ = true;
+        polygonPoints_.clear();
+        if (previewPolygon_) { scene_.removeItem(previewPolygon_); delete previewPolygon_; previewPolygon_ = nullptr; }
+        previewPolygon_ = scene_.addPolygon(QPolygonF(), QPen(QColor(250,204,21), 2, Qt::DashLine), QBrush(QColor(250,204,21,30)));
+        previewPolygon_->setZValue(4);
+      }
+      polygonPoints_ << p;
+      if (previewPolygon_) previewPolygon_->setPolygon(polygonPoints_);
+      return;
+    }
+    if (e->button() == Qt::RightButton && polygonDrawing_) {
+      if (polygonPoints_.size() >= 3) {
+        QPolygonF finalPoly = polygonPoints_;
+        if (onPolygonFinished_) onPolygonFinished_(finalPoly);
+      }
+      polygonDrawing_ = false;
+      polygonPoints_.clear();
+      if (previewPolygon_) { scene_.removeItem(previewPolygon_); delete previewPolygon_; previewPolygon_ = nullptr; }
+      setToolMode(PanTool);
+      return;
+    }
+    return;
+  }
+
+  if (e->button() != Qt::LeftButton) return;
 
   if (toolMode_ == PointTool) {
     scene_.addEllipse(p.x()-3, p.y()-3, 6, 6, QPen(QColor(255,80,80), 2), QBrush(QColor(255,80,80)));
@@ -434,6 +486,13 @@ void ImageViewer::mouseMoveEvent(QMouseEvent* e) {
   if (toolMode_ == LineTool && lineDrawing_ && previewLine_) {
     QPointF p = mapToScene(e->pos());
     previewLine_->setLine(QLineF(lineStart_, p));
+    return;
+  }
+  if (toolMode_ == PolygonTool && polygonDrawing_ && previewPolygon_) {
+    QPointF p = mapToScene(e->pos());
+    QPolygonF tmp = polygonPoints_;
+    tmp << p;
+    previewPolygon_->setPolygon(tmp);
     return;
   }
   QGraphicsView::mouseMoveEvent(e);
@@ -1045,6 +1104,27 @@ void MainWindow::buildUI() {
     calv->addWidget(gbLineProps_);
     calv->addWidget(lblScaleInfo_);
     calv->addWidget(lblCaptured_);
+    QGroupBox* gbRegion = new QGroupBox("Regions", tabCal);
+    QVBoxLayout* rv = new QVBoxLayout(gbRegion);
+    QHBoxLayout* rBtns = new QHBoxLayout();
+    btnAddMaskRegion_ = new QPushButton("Add Mask Region", gbRegion);
+    btnAddDetectRegion_ = new QPushButton("Add Detect Region", gbRegion);
+    btnDeleteRegion_ = new QPushButton("Delete Region", gbRegion);
+    rBtns->addWidget(btnAddMaskRegion_);
+    rBtns->addWidget(btnAddDetectRegion_);
+    rBtns->addWidget(btnDeleteRegion_);
+    tblRegions_ = new QTableWidget(gbRegion);
+    tblRegions_->setColumnCount(2);
+    tblRegions_->setHorizontalHeaderLabels({"Type","Points"});
+    tblRegions_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    tblRegions_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    tblRegions_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tblRegions_->setSelectionMode(QAbstractItemView::SingleSelection);
+    rv->addLayout(rBtns);
+    rv->addWidget(tblRegions_);
+    gbRegion->setLayout(rv);
+
+    calv->addWidget(gbRegion);
     calv->addStretch(1);
 
     // If board params change, rebuild calibrator and reset captures
@@ -1061,6 +1141,9 @@ void MainWindow::buildUI() {
     connect(cbLineColor_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ QColor c = cbLineColor_->currentData().value<QColor>(); int w = spLineWidth_?spLineWidth_->value():2; for (auto* v: sourceViews_) if(v) v->applySelectedLineStyle("Line", c, w); });
     connect(spLineWidth_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int){ QColor c = cbLineColor_?cbLineColor_->currentData().value<QColor>():QColor(80,220,255); int w = spLineWidth_?spLineWidth_->value():2; for (auto* v: sourceViews_) if(v) v->applySelectedLineStyle("Line", c, w); });
     connect(chkShowLines_, &QCheckBox::toggled, this, [this](bool on){ for (auto* v: sourceViews_) if (v) v->setAnnotationsVisible(on); });
+    connect(btnAddMaskRegion_, &QPushButton::clicked, this, &MainWindow::onAddMaskRegion);
+    connect(btnAddDetectRegion_, &QPushButton::clicked, this, &MainWindow::onAddDetectRegion);
+    connect(btnDeleteRegion_, &QPushButton::clicked, this, &MainWindow::onDeleteRegion);
 
     // ObjectDefine + Visual pages
     QWidget* tabObj = new QWidget(actionTabs_);
@@ -1179,8 +1262,7 @@ void MainWindow::buildUI() {
     bp->addWidget(cbBinaryOp_, 0, 1);
     bp->addWidget(btnUndoBinaryOp_, 0, 2);
     bp->addWidget(lblBinaryOps_, 1, 0, 1, 4);
-    bp->addWidget(btnAnalyzeParticles_, 2, 0, 1, 2);
-    bp->addWidget(btnTrackBinary_, 2, 2, 1, 2);
+    bp->addWidget(btnAnalyzeParticles_, 2, 0, 1, 4);
     gbBinaryProc->setLayout(bp);
     trkMainLayout->addWidget(gbBinaryProc);
 
@@ -1204,6 +1286,7 @@ void MainWindow::buildUI() {
     hg->addWidget(plotHistogram_, 1, 0, 1, 6);
     gbHist->setLayout(hg);
     trkMainLayout->addWidget(gbHist);
+    trkMainLayout->addWidget(btnTrackBinary_);
     trkMainLayout->addStretch(1);
 
 
@@ -1463,6 +1546,23 @@ void MainWindow::rebuildSourceViews() {
       logLine(QString("Scale calibrated(inline): %1 mm / %2 px = %3 mm/px")
               .arg(mm,0,'f',6).arg(pxLen,0,'f',3).arg(mm_per_pixel_,0,'f',9));
     });
+    v->setPolygonFinishedCallback([this](const QPolygonF& poly){
+      if (poly.size() < 3 || drawing_region_type_ == 0) return;
+      RegionSpec rs;
+      rs.id = next_region_id_++;
+      rs.include = (drawing_region_type_ == 1);
+      rs.poly = poly;
+      regions_.push_back(rs);
+      refreshRegionTable();
+      std::vector<QPolygonF> inc, exc;
+      for (const auto& r : regions_) (r.include ? inc : exc).push_back(r.poly);
+      for (auto* sv : sourceViews_) if (sv) sv->setRegionPolygons(inc, exc);
+      drawing_region_type_ = 0;
+      logLine(rs.include ? "Added detect region." : "Added mask region.");
+    });
+    std::vector<QPolygonF> inc, exc;
+    for (const auto& r : regions_) (r.include ? inc : exc).push_back(r.poly);
+    v->setRegionPolygons(inc, exc);
     v->setAnnotationsVisible(chkShowLines_ ? chkShowLines_->isChecked() : false);
     //connect(panBtn, &QToolButton::clicked, this, [v, panBtn, pointBtn, lineBtn]() {
     //  panBtn->setChecked(true); pointBtn->setChecked(false); lineBtn->setChecked(false);
@@ -1897,7 +1997,7 @@ void MainWindow::onPreprocessParamsChanged() {
 }
 
 void MainWindow::onObjectThresholdParamsChanged() {
-  if (track_binary_enabled_ && measurements_frozen_) rebuildMeasurementSeriesFromCurrentSource(false);
+  if (track_binary_enabled_ && measurements_frozen_) { onAnalyzeParticles(); onToggleTrackBinary(); }
   std::vector<cv::Mat> frames;
   {
     QMutexLocker locker(&frames_mutex_);
@@ -2053,6 +2153,32 @@ cv::Mat MainWindow::makeObjectBinaryMask(const cv::Mat& src, int* outGlobalThres
   }
 
   if (chkInvertBinary_ && chkInvertBinary_->isChecked()) cv::bitwise_not(bin, bin);
+
+  if (!regions_.empty() && !bin.empty()) {
+    cv::Mat regionAllow(bin.size(), CV_8UC1, cv::Scalar(255));
+    bool hasDetect = false;
+    for (const auto& r : regions_) {
+      if (r.poly.size() < 3) continue;
+      std::vector<cv::Point> pts;
+      pts.reserve(r.poly.size());
+      for (const QPointF& q : r.poly) pts.emplace_back((int)std::round(q.x()), (int)std::round(q.y()));
+      std::vector<std::vector<cv::Point>> arr{pts};
+      if (r.include) {
+        if (!hasDetect) { regionAllow.setTo(0); hasDetect = true; }
+        cv::fillPoly(regionAllow, arr, cv::Scalar(255));
+      }
+    }
+    cv::bitwise_and(bin, regionAllow, bin);
+    for (const auto& r : regions_) {
+      if (r.include || r.poly.size() < 3) continue;
+      std::vector<cv::Point> pts;
+      pts.reserve(r.poly.size());
+      for (const QPointF& q : r.poly) pts.emplace_back((int)std::round(q.x()), (int)std::round(q.y()));
+      std::vector<std::vector<cv::Point>> arr{pts};
+      cv::fillPoly(bin, arr, cv::Scalar(0));
+    }
+  }
+
   return applyBinaryProcessOps(bin);
 }
 
@@ -2151,21 +2277,66 @@ void MainWindow::onUndoBinaryOp() {
 }
 
 void MainWindow::onAnalyzeParticles() {
+  updatePlaybackParams();
+  int totalFrames = progressSlider_ ? (progressSlider_->maximum() + 1) : 0;
+  if (totalFrames <= 0) totalFrames = (int)play_end_frame_;
+  if (totalFrames <= 0) {
+    QMessageBox::information(this, "Analyze", "No frames available.");
+    return;
+  }
+
+  analyzed_contours_.clear();
+  analyzed_contours_by_frame_.clear();
+  analyzed_contours_by_frame_.resize(totalFrames);
+  target_meas_rows_.clear();
+  meas_rows_.clear();
+
+  Source& src = sources_[source_view_index_];
+  const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
+
+  for (int i=0;i<totalFrames;++i) {
+    cv::Mat f;
+    if (src.type == InputSource::VIDEO) {
+      if (!src.cap.isOpened()) continue;
+      src.cap.set(cv::CAP_PROP_POS_FRAMES, i);
+      if (!src.cap.read(f) || f.empty()) continue;
+    } else if (src.type == InputSource::IMAGE_SEQUENCE) {
+      if (i < 0 || i >= (int)src.seq_files.size()) continue;
+      f = imreadUnicodePath(src.seq_files[(size_t)i], cv::IMREAD_COLOR);
+    } else continue;
+
+    if (f.empty()) continue;
+    f = applyPreprocess(f);
+    auto contours = detectBinaryContours(f);
+    analyzed_contours_by_frame_[i] = contours;
+    if (i == (int)play_frame_) analyzed_contours_ = contours;
+
+    for (const auto& c : contours) {
+      if (c.size() < 5) continue;
+      MeasureRow row;
+      row.key = i;
+      row.area = std::abs(cv::contourArea(c)) * scale * scale;
+      row.perim = cv::arcLength(c, true) * scale;
+      cv::RotatedRect rr = cv::minAreaRect(c);
+      row.major = std::max(rr.size.width, rr.size.height) * scale;
+      row.minor = std::min(rr.size.width, rr.size.height) * scale;
+      row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
+      target_meas_rows_.push_back(TargetMeasureRow{-1, row});
+    }
+  }
+
+  // preview current frame with contours
   std::vector<cv::Mat> frames;
   { QMutexLocker locker(&frames_mutex_); frames = last_frames_; }
-  analyzed_contours_.clear();
-  std::vector<cv::Mat> vis = frames;
-  for (auto& f : vis) if (!f.empty()) f = applyPreprocess(f);
-  for (auto& f : vis) {
+  for (auto& f : frames) {
     if (f.empty()) continue;
-    analyzed_contours_ = detectBinaryContours(f); // includes current threshold + invert + binary ops
-    if (!analyzed_contours_.empty()) {
-      cv::drawContours(f, analyzed_contours_, -1, cv::Scalar(0,255,0), 2);
-    }
+    f = applyPreprocess(f);
+    if (!analyzed_contours_.empty()) cv::drawContours(f, analyzed_contours_, -1, cv::Scalar(0,255,0), 2);
     break;
   }
-  updateSourceViews(vis);
-  logLine(QString("Analyze Particles: %1 regions").arg((int)analyzed_contours_.size()));
+  updateSourceViews(frames);
+  updateHistogramPlot();
+  logLine(QString("Analyze Particles: processed %1 frames.").arg(totalFrames));
 }
 
 void MainWindow::onToggleTrackBinary() {
@@ -2173,17 +2344,96 @@ void MainWindow::onToggleTrackBinary() {
   tracked_centroids_.clear();
   tracked_contours_.clear();
   next_track_id_ = 1;
-  if (track_binary_enabled_) {
-    // Build full frame range first so Track can compute all-frame measurements
-    // immediately, without requiring manual playback.
-    updatePlaybackParams();
-    rebuildMeasurementSeriesFromCurrentSource(true);
-    if (!meas_rows_.empty()) stepDone_[2] = true;
+  if (!track_binary_enabled_) {
+    measurements_frozen_ = false;
+    updateStepAvailability();
+    logLine("Binary contour tracking disabled.");
+    return;
   }
-  else measurements_frozen_ = false;
+
+  if (analyzed_contours_by_frame_.empty()) onAnalyzeParticles();
+  if (analyzed_contours_by_frame_.empty()) return;
+
+  target_meas_rows_.clear();
+  std::unordered_map<int, cv::Point2f> id_prev;
+  std::unordered_map<int, double> id_prev_speed;
+  int nextId = 1;
+  const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
+
+  for (int i=0;i<(int)analyzed_contours_by_frame_.size();++i) {
+    std::unordered_map<int, cv::Point2f> id_curr;
+    for (const auto& c : analyzed_contours_by_frame_[i]) {
+      if (c.empty()) continue;
+      cv::Moments m = cv::moments(c);
+      if (std::abs(m.m00) < 1e-9) continue;
+      cv::Point2f ctr((float)(m.m10/m.m00), (float)(m.m01/m.m00));
+      int bestId = -1; double bestD = 1e18;
+      for (const auto& kv : id_prev) {
+        double d = cv::norm(ctr - kv.second);
+        if (d < bestD) { bestD = d; bestId = kv.first; }
+      }
+      if (bestId < 0 || bestD > 60.0) bestId = nextId++;
+      id_curr[bestId] = ctr;
+
+      MeasureRow row;
+      row.key = i;
+      row.area = std::abs(cv::contourArea(c)) * scale * scale;
+      row.perim = cv::arcLength(c, true) * scale;
+      cv::RotatedRect rr = cv::minAreaRect(c);
+      row.major = std::max(rr.size.width, rr.size.height) * scale;
+      row.minor = std::min(rr.size.width, rr.size.height) * scale;
+      row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
+      if (id_prev.count(bestId)) {
+        row.disp = cv::norm(ctr - id_prev[bestId]) * scale;
+        row.speed = row.disp;
+        row.accel = row.speed - id_prev_speed[bestId];
+      }
+      id_prev_speed[bestId] = row.speed;
+      target_meas_rows_.push_back(TargetMeasureRow{bestId, row});
+    }
+    id_prev = id_curr;
+  }
+
+  measurements_frozen_ = true;
+  stepDone_[2] = !target_meas_rows_.empty();
   updateStepAvailability();
-  logLine(track_binary_enabled_ ? "Binary contour tracking enabled." : "Binary contour tracking disabled.");
-  onTick();
+  updateLeftVisualDashboard();
+  updateHistogramPlot();
+  logLine("Track completed: associated IDs across analyzed frames.");
+}
+
+void MainWindow::refreshRegionTable() {
+  if (!tblRegions_) return;
+  tblRegions_->setRowCount((int)regions_.size());
+  for (int i=0;i<(int)regions_.size();++i) {
+    const auto& r = regions_[i];
+    tblRegions_->setItem(i, 0, new QTableWidgetItem(r.include ? "Detect" : "Mask"));
+    tblRegions_->setItem(i, 1, new QTableWidgetItem(QString("%1 pts").arg(r.poly.size())));
+  }
+}
+
+void MainWindow::onAddMaskRegion() {
+  drawing_region_type_ = 2;
+  for (auto* v : sourceViews_) if (v) { v->setAnnotationsVisible(true); v->setToolMode(ImageViewer::PolygonTool); }
+  logLine("Draw mask polygon on left view, right click to finish.");
+}
+
+void MainWindow::onAddDetectRegion() {
+  drawing_region_type_ = 1;
+  for (auto* v : sourceViews_) if (v) { v->setAnnotationsVisible(true); v->setToolMode(ImageViewer::PolygonTool); }
+  logLine("Draw detect polygon on left view, right click to finish.");
+}
+
+void MainWindow::onDeleteRegion() {
+  if (!tblRegions_) return;
+  int r = tblRegions_->currentRow();
+  if (r < 0 || r >= (int)regions_.size()) return;
+  regions_.erase(regions_.begin() + r);
+  refreshRegionTable();
+  std::vector<QPolygonF> inc, exc;
+  for (const auto& it : regions_) (it.include ? inc : exc).push_back(it.poly);
+  for (auto* sv : sourceViews_) if (sv) sv->setRegionPolygons(inc, exc);
+  logLine("Region deleted.");
 }
 
 void MainWindow::onStartScaleLine() {
