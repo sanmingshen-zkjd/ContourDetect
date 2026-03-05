@@ -930,7 +930,7 @@ void MainWindow::buildUI() {
     cbGlobalMethod_->setMinimumWidth(170);
     cbLocalMethod_->setMinimumWidth(170);
     tg->addWidget(cbGlobalMethod_, 1, 1);
-    tg->setColumnMinimumWidth(2, 18);
+    tg->setColumnMinimumWidth(2, 36);
     btnTryAllGlobal_ = new QPushButton("Try All", gbThresh);
     tg->addWidget(btnTryAllGlobal_, 1, 3);
     tg->addWidget(lblLocalMethod, 2, 0);
@@ -941,7 +941,7 @@ void MainWindow::buildUI() {
     tg->addWidget(spLocalBlockSize_, 3, 1);
     tg->addWidget(lblLocalK, 3, 2);
     tg->addWidget(spLocalK_, 3, 3);
-    tg->addWidget(new QLabel("Threshold [0,255]", gbThresh), 4, 0);
+    tg->addWidget(new QLabel("Threshold", gbThresh), 4, 0);
     tg->addWidget(slObjectThresh_, 4, 1, 1, 2);
     tg->addWidget(spObjectThresh_, 4, 3);
     gbThresh->setLayout(tg);
@@ -1912,6 +1912,7 @@ void MainWindow::onToggleTrackBinary() {
   tracked_contours_.clear();
   next_track_id_ = 1;
   logLine(track_binary_enabled_ ? "Binary contour tracking enabled." : "Binary contour tracking disabled.");
+  onTick();
 }
 
 void MainWindow::onStartScaleLine() {
@@ -2340,13 +2341,11 @@ void MainWindow::onTick() {
                       cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2, cv::LINE_AA);
         }
       }
-      break;
     }
   } else if (!analyzed_contours_.empty()) {
     for (auto& f : vis) {
       if (f.empty()) continue;
       cv::drawContours(f, analyzed_contours_, -1, cv::Scalar(0,255,0), 2);
-      break;
     }
   }
 
@@ -2420,6 +2419,18 @@ QJsonObject MainWindow::toProjectJson() const {
   }
   o["sources"] = srcs;
 
+  // ObjectDefine settings persistence
+  if (cbThreshType_) o["obj_thresh_type"] = cbThreshType_->currentIndex();
+  if (cbGlobalMethod_) o["obj_global_method"] = cbGlobalMethod_->currentText();
+  if (spObjectThresh_) o["obj_threshold"] = spObjectThresh_->value();
+  if (chkInvertBinary_) o["obj_invert"] = chkInvertBinary_->isChecked();
+  {
+    QJsonArray ops;
+    for (const auto& op : binary_ops_pipeline_) ops.append(op);
+    o["obj_binary_ops"] = ops;
+  }
+  o["obj_track_enabled"] = track_binary_enabled_;
+
   o["tagmap_path"] = tagmap_path_;
   o["calib_path"] = calib_path_;
   o["layout_geometry_b64"] = QString(saveGeometry().toBase64());
@@ -2439,6 +2450,31 @@ bool MainWindow::fromProjectJson(const QJsonObject& o) {
       if (cbTagDict_->itemData(i).toInt() == did) { cbTagDict_->setCurrentIndex(i); break; }
     }
   }
+
+  if (o.contains("obj_thresh_type") && cbThreshType_) cbThreshType_->setCurrentIndex(o["obj_thresh_type"].toInt(cbThreshType_->currentIndex()));
+  if (o.contains("obj_global_method") && cbGlobalMethod_) {
+    int idx = cbGlobalMethod_->findText(o["obj_global_method"].toString());
+    if (idx >= 0) cbGlobalMethod_->setCurrentIndex(idx);
+  }
+  if (o.contains("obj_threshold")) {
+    int t = o["obj_threshold"].toInt(spObjectThresh_ ? spObjectThresh_->value() : 128);
+    if (spObjectThresh_) spObjectThresh_->setValue(t);
+    if (slObjectThresh_) slObjectThresh_->setValue(t);
+    object_thresh_manual_ = true;
+  }
+  if (o.contains("obj_invert") && chkInvertBinary_) chkInvertBinary_->setChecked(o["obj_invert"].toBool(false));
+  binary_ops_pipeline_.clear();
+  if (o.contains("obj_binary_ops") && o["obj_binary_ops"].isArray()) {
+    for (const auto& v : o["obj_binary_ops"].toArray()) {
+      if (v.isString()) binary_ops_pipeline_.push_back(v.toString());
+    }
+  }
+  if (lblBinaryOps_) {
+    if (binary_ops_pipeline_.empty()) lblBinaryOps_->setText("Pipeline: (none)");
+    else { QStringList ops; for (const auto& op : binary_ops_pipeline_) ops << op; lblBinaryOps_->setText(QString("Pipeline: %1").arg(ops.join(" -> "))); }
+  }
+  track_binary_enabled_ = o["obj_track_enabled"].toBool(false);
+  if (btnTrackBinary_) btnTrackBinary_->setChecked(track_binary_enabled_);
 
   // Rebuild sources
   timer_.stop();
@@ -3264,20 +3300,16 @@ void MainWindow::stepAllVideos(int delta) {
   }
 
   if (stepped) {
-    std::vector<cv::Mat> uiFrames;
     {
       QMutexLocker frameLock(&frames_mutex_);
       if ((int)last_frames_.size() != (int)steppedFrames.size()) last_frames_.resize(steppedFrames.size());
       for (int i=0;i<(int)steppedFrames.size();++i) {
         if (!steppedFrames[i].empty()) last_frames_[i] = steppedFrames[i];
       }
-      uiFrames = last_frames_;
     }
     play_frame_ = progressFrame;
     updateProgressUI(play_frame_, play_end_frame_);
-    updateSourceViews(uiFrames);
-    if (show_docks_) updateSourceDocks(uiFrames);
-    updateStatus();
+    onTick();
     logLine(QString("Step frame: %1").arg(delta > 0 ? "next" : "prev"));
   } else {
     logLine("Step frame ignored: no video source ready.");
