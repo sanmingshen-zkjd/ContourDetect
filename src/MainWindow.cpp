@@ -29,6 +29,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QCheckBox>
+#include <QProgressDialog>
 #include <QFormLayout>
 #include <QMenu>
 #include <QTextDocument>
@@ -665,19 +666,21 @@ void MainWindow::buildUI() {
     stepTabs_->setCurrentIndex(stepToTabIndex(0));
     for (int i=0;i<4;++i) stepDone_[i] = false;
     stepTabs_->setStyleSheet(
-      "QTabBar::tab{padding:6px 14px;margin-right:14px;min-width:140px;background:#2d333b;color:#dbe5f1;border:1px solid #485468;border-radius:6px;}"
+      "QTabBar::tab{padding:4px 10px;margin-right:8px;min-width:112px;background:#2d333b;color:#dbe5f1;border:1px solid #485468;border-radius:6px;}"
       "QTabBar::tab:selected{background:#3b82f6;color:#ffffff;font-weight:700;}"
       "QTabBar::tab:hover:!selected{background:#374151;}"
       "QTabBar::tab:disabled{background:#1f232b;color:#6b7280;border:1px solid #394150;}"
-      "QTabBar::tab:nth-child(2),QTabBar::tab:nth-child(4),QTabBar::tab:nth-child(6){background:transparent;border:none;color:transparent;padding:0px;margin:0 10px;min-width:30px;}"
+      "QTabBar::tab:nth-child(2),QTabBar::tab:nth-child(4),QTabBar::tab:nth-child(6){background:transparent;border:none;color:transparent;padding:0px;margin:0 6px;min-width:30px;}"
       "QTabBar::tab:nth-child(2):disabled,QTabBar::tab:nth-child(4):disabled,QTabBar::tab:nth-child(6):disabled{background:transparent;border:none;color:transparent;}");
     auto mkArrowBtn = [this]() {
       auto* b = new QToolButton(stepTabs_);
       b->setIcon(style()->standardIcon(QStyle::SP_ArrowRight));
       b->setIconSize(QSize(24, 24));
+      b->setFixedSize(QSize(28, 28));
       b->setAutoRaise(true);
+      b->setToolButtonStyle(Qt::ToolButtonIconOnly);
       b->setEnabled(false);
-      b->setStyleSheet("QToolButton{border:none;background:#1f232b;padding:0px;margin:0px;}QToolButton:disabled{border:none;background:#1f232b;}");
+      b->setStyleSheet("QToolButton{border:none;background:transparent;padding:0px;margin:0px;}QToolButton:disabled{border:none;background:transparent;}");
       return b;
     };
     stepTabs_->setTabButton(1, QTabBar::LeftSide, mkArrowBtn());
@@ -1095,7 +1098,8 @@ void MainWindow::buildUI() {
     prevTitle->addWidget(chkInvertBinary_);
     trkMainLayout->addLayout(prevTitle);
     lblBinaryPreview_ = new QLabel(tabObj);
-    lblBinaryPreview_->setMinimumSize(280, 180);
+    lblBinaryPreview_->setFixedSize(320, 200);
+    lblBinaryPreview_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     lblBinaryPreview_->setAlignment(Qt::AlignCenter);
     lblBinaryPreview_->setStyleSheet("background:#111;border:1px solid #3a4250;color:#9aa7b8;");
     lblBinaryPreview_->setText("No binary preview");
@@ -1172,7 +1176,8 @@ void MainWindow::buildUI() {
     actionTabs_->addTab(tabVis, "Visual");
     if (actionTabs_->tabBar()) actionTabs_->tabBar()->hide();
 
-    connect(stepTabs_, &QTabBar::currentChanged, this, [this, leftStack, dock](int idx){
+    connect(stepTabs_, &QTabBar::currentChanged, this, [this, leftStack, dock, root](int idx){
+      const QSize keepSize = this->size();
       if (isArrowTab(idx)) {
         int fallback = stepToTabIndex(std::max(0, std::min(3, tabIndexToStep(std::max(0, idx-1)))));
         if (stepTabs_ && stepTabs_->currentIndex() != fallback) stepTabs_->setCurrentIndex(fallback);
@@ -1195,6 +1200,11 @@ void MainWindow::buildUI() {
       }
       if (stepIdx >= 0 && stepIdx < 4) stepDone_[stepIdx] = true;
       updateStepAvailability();
+      if (root) {
+        root->setStretch(0, visual ? 1 : 5);
+        root->setStretch(1, visual ? 0 : 2);
+      }
+      if (this->size() != keepSize) this->resize(keepSize);
     });
 
     dv->addWidget(actionTabs_);
@@ -1812,7 +1822,7 @@ void MainWindow::onPreprocessParamsChanged() {
 }
 
 void MainWindow::onObjectThresholdParamsChanged() {
-  if (track_binary_enabled_ && measurements_frozen_) rebuildMeasurementSeriesFromCurrentSource();
+  if (track_binary_enabled_ && measurements_frozen_) rebuildMeasurementSeriesFromCurrentSource(false);
   std::vector<cv::Mat> frames;
   {
     QMutexLocker locker(&frames_mutex_);
@@ -2092,7 +2102,7 @@ void MainWindow::onToggleTrackBinary() {
     // Build full frame range first so Track can compute all-frame measurements
     // immediately, without requiring manual playback.
     updatePlaybackParams();
-    rebuildMeasurementSeriesFromCurrentSource();
+    rebuildMeasurementSeriesFromCurrentSource(true);
     if (!meas_rows_.empty()) stepDone_[2] = true;
   }
   else measurements_frozen_ = false;
@@ -3292,7 +3302,7 @@ void MainWindow::refreshTrajectoryPlot() {
 }
 
 
-void MainWindow::rebuildMeasurementSeriesFromCurrentSource() {
+void MainWindow::rebuildMeasurementSeriesFromCurrentSource(bool showProgress) {
   measurements_frozen_ = false;
   int totalFrames = progressSlider_ ? (progressSlider_->maximum() + 1) : 0;
   if (totalFrames <= 0 && play_end_frame_ > 0) totalFrames = (int)play_end_frame_;
@@ -3323,6 +3333,17 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource() {
     }
   }
   if (totalFrames <= 0) return;
+
+  std::unique_ptr<QProgressDialog> progress;
+  if (showProgress) {
+    progress.reset(new QProgressDialog("Tracking all frames...", QString(), 0, totalFrames, this));
+    progress->setWindowModality(Qt::ApplicationModal);
+    progress->setCancelButton(nullptr);
+    progress->setMinimumDuration(0);
+    progress->setValue(0);
+    progress->show();
+    qApp->processEvents();
+  }
 
   std::vector<cv::Mat> frames(totalFrames);
   int savedSeq = -1;
@@ -3359,6 +3380,11 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource() {
   updateProgressUI(play_frame_, play_end_frame_);
 
   for (int i=0;i<totalFrames;++i) {
+    if (progress) {
+      progress->setValue(i);
+      progress->setLabelText(QString("Tracking all frames... %1/%2").arg(i+1).arg(totalFrames));
+      qApp->processEvents();
+    }
     if (frames[i].empty()) continue;
     cv::Mat f = applyPreprocess(frames[i]);
     play_frame_ = i;
@@ -3367,6 +3393,10 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource() {
   play_frame_ = savedPlayFrame;
   updateProgressUI(play_frame_, play_end_frame_);
   measurements_frozen_ = true;
+  if (progress) {
+    progress->setValue(totalFrames);
+    qApp->processEvents();
+  }
   updateLeftVisualDashboard();
 }
 

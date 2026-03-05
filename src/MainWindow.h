@@ -221,7 +221,7 @@ private:
   void updateMeasurementFromFrame(const cv::Mat& preprocessedFrame);
   void updateHistogramPlot();
   void updateLeftVisualDashboard();
-  void rebuildMeasurementSeriesFromCurrentSource();
+  void rebuildMeasurementSeriesFromCurrentSource(bool showProgress=false);
   void savePlotAsBmp(QCustomPlot* plot, const QString& nameHint);
   void onExportTableCsv();
   void onCaptureVisualSnapshot();
