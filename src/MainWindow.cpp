@@ -628,13 +628,15 @@ void MainWindow::buildUI() {
 
     // Top step guide
     stepTabs_ = new QTabBar(central);
-    stepTabs_->addTab("1 Source");
-    stepTabs_->addTab("2 PreProcess");
-    stepTabs_->addTab("3 ObjectDefine");
-    stepTabs_->addTab("4 Visual");
+    stepTabs_->addTab(QString::fromUtf8("① Source  →"));
+    stepTabs_->addTab(QString::fromUtf8("② PreProcess  →"));
+    stepTabs_->addTab(QString::fromUtf8("③ ObjectDefine  →"));
+    stepTabs_->addTab(QString::fromUtf8("④ Visual"));
     stepTabs_->setExpanding(true);
     stepTabs_->setDocumentMode(true);
     stepTabs_->setCurrentIndex(0);
+    for (int i=0;i<4;++i) stepDone_[i] = false;
+    stepDone_[0] = true;
     stepTabs_->setStyleSheet(
       "QTabBar::tab{padding:8px 12px;background:#2d333b;color:#dbe5f1;border:1px solid #485468;}"
       "QTabBar::tab:selected{background:#3b82f6;color:#ffffff;font-weight:700;}"
@@ -1138,6 +1140,8 @@ void MainWindow::buildUI() {
         updateLeftVisualDashboard();
         logLine("Switched to Visual mode.");
       }
+      if (idx >= 0 && idx < 4) stepDone_[idx] = true;
+      updateStepAvailability();
     });
 
     dv->addWidget(actionTabs_);
@@ -1162,6 +1166,7 @@ void MainWindow::buildUI() {
 
     refreshTrajectoryPlot();
     onModeCapture();
+    updateStepAvailability();
     statusBar()->showMessage("Ready");
     refreshSourceList();
     // Per-source docks are OFF by default to avoid duplicate display.
@@ -1464,6 +1469,8 @@ void MainWindow::onAddCamera() {
   if (show_docks_) rebuildSourceDocks();
   rebuildSourceViews();
   updateSourceViews(last_frames_);
+  updateStatus();
+  updateStepAvailability();
 }
 
 void MainWindow::onAddVideo() 
@@ -1518,6 +1525,8 @@ void MainWindow::onAddVideo()
     if (show_docks_) rebuildSourceDocks();
     rebuildSourceViews();
     updateSourceViews(last_frames_);
+    updateStatus();
+    updateStepAvailability();
     logLine(QString("Added video: %1").arg(path));
 }
 
@@ -1574,6 +1583,8 @@ void MainWindow::onAddImageSequence()
     if (show_docks_) rebuildSourceDocks();
     rebuildSourceViews();
     updateSourceViews(last_frames_);
+    updateStatus();
+    updateStepAvailability();
     logLine(QString("Added image sequence: %1 (%2 frames)").arg(dir).arg(files.size()));
 }
 
@@ -1616,6 +1627,7 @@ void MainWindow::onRemoveSource() {
   rebuildSourceViews();
   updateSourceViews(last_frames_);
   updateStatus();
+  updateStepAvailability();
   logLine(QString("Removed %1 source(s) in current mode.").arg(removed));
 }
 
@@ -1677,9 +1689,43 @@ void MainWindow::onCaptureNow() {
 
 void MainWindow::onModeTabChanged(int idx) {
   if (!stepTabs_) return;
+  updateStepAvailability();
+  if (idx < 0 || idx >= stepTabs_->count() || !stepTabs_->isTabEnabled(idx)) {
+    idx = stepTabs_->currentIndex();
+  }
   if (idx >= 0 && idx < stepTabs_->count() && stepTabs_->currentIndex()!=idx) {
     stepTabs_->setCurrentIndex(idx);
   }
+}
+
+bool MainWindow::hasAnySourceInCurrentMode() {
+  QMutexLocker srcLock(&sources_mutex_);
+  for (const auto& s : sources_) {
+    if (s.mode_owner == (int)mode_) return true;
+  }
+  return false;
+}
+
+void MainWindow::updateStepAvailability() {
+  if (!stepTabs_ || stepTabs_->count() < 4) return;
+  const bool sourceDone = hasAnySourceInCurrentMode();
+  stepDone_[0] = sourceDone;
+
+  // Progressive unlock: step N is clickable only when step N-1 is done.
+  const bool en0 = true;
+  const bool en1 = stepDone_[0];
+  const bool en2 = en1 && stepDone_[1];
+  const bool en3 = en2 && stepDone_[2];
+  stepTabs_->setTabEnabled(0, en0);
+  stepTabs_->setTabEnabled(1, en1);
+  stepTabs_->setTabEnabled(2, en2);
+  stepTabs_->setTabEnabled(3, en3);
+
+  int cur = stepTabs_->currentIndex();
+  if (cur == 3 && !en3) cur = 2;
+  if (cur == 2 && !en2) cur = 1;
+  if (cur == 1 && !en1) cur = 0;
+  if (cur != stepTabs_->currentIndex()) stepTabs_->setCurrentIndex(cur);
 }
 
 void MainWindow::onPreprocessParamsChanged() {
@@ -2332,6 +2378,7 @@ cv::Mat MainWindow::applyPreprocess(const cv::Mat& src) const {
 }
 
 void MainWindow::updateStatus() {
+  updateStepAvailability();
   if (lblCaptured_) lblCaptured_->setText(QString("Captured: %1").arg(calibrator_->captured()));
   if (lblInliers_) lblInliers_->setText(QString("Inliers: %1").arg(last_inliers_));
 

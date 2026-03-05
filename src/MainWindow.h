@@ -208,6 +208,8 @@ private:
   void overlayTracking(std::vector<cv::Mat>& vis, const std::vector<cv::Mat>& frames);
 
   void updateStatus();
+  void updateStepAvailability();
+  bool hasAnySourceInCurrentMode();
   cv::Mat applyPreprocess(const cv::Mat& src) const;
   void updateScaleStatus(double pxLen);
   cv::Mat makeObjectBinaryMask(const cv::Mat& src, int* outGlobalThreshold=nullptr) const;
@@ -314,6 +316,7 @@ private:
   //QLabel* lblPlayState_=nullptr;
   QTabBar* sideModeTabs_=nullptr;
   QTabBar* stepTabs_=nullptr;
+  bool stepDone_[4] = {false, false, false, false};
   QToolButton* btnFileMenu_=nullptr;
   QTabWidget* actionTabs_=nullptr;
 
