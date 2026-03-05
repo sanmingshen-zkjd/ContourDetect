@@ -1308,7 +1308,37 @@ void MainWindow::buildUI() {
     connect(spObjectThresh_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ object_thresh_manual_ = true; if (slObjectThresh_ && slObjectThresh_->value()!=v) slObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
     connect(spLocalBlockSize_, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
     connect(spLocalK_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
-    connect(cbHistMetric_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ updateHistogramPlot(); });
+    connect(cbHistMetric_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){
+      if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) { updateHistogramPlot(); return; }
+      auto pick = [&](const MeasureRow& r)->double {
+        const QString m = cbHistMetric_->currentText();
+        if (m == "Perimeter") return r.perim;
+        if (m == "Circularity") return r.circ;
+        if (m == "Speed") return r.speed;
+        if (m == "Displacement") return r.disp;
+        if (m == "MajorAxis") return r.major;
+        if (m == "MinorAxis") return r.minor;
+        return r.area;
+      };
+      std::vector<double> vals;
+      vals.reserve(std::max(target_meas_rows_.size(), meas_rows_.size()));
+      if (!target_meas_rows_.empty()) { for (const auto& t : target_meas_rows_) vals.push_back(pick(t.m)); }
+      else { for (const auto& r : meas_rows_) vals.push_back(pick(r)); }
+      vals.erase(std::remove_if(vals.begin(), vals.end(), [](double v){ return !std::isfinite(v); }), vals.end());
+      double lo = 0.0, hi = 1.0;
+      const QString m = cbHistMetric_->currentText();
+      if (m == "Circularity") { lo = 0.0; hi = 1.0; }
+      else if (!vals.empty()) {
+        auto mm = std::minmax_element(vals.begin(), vals.end());
+        lo = *mm.first; hi = *mm.second;
+        if (hi <= lo) hi = lo + 1.0;
+      }
+      QSignalBlocker b1(spHistMin_);
+      QSignalBlocker b2(spHistMax_);
+      spHistMin_->setValue(lo);
+      spHistMax_->setValue(hi);
+      updateHistogramPlot();
+    });
     connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
     connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
 
