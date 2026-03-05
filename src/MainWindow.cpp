@@ -1162,6 +1162,7 @@ void MainWindow::buildUI() {
       if (actionTabs_) actionTabs_->setCurrentIndex(std::max(0, std::min(stepIdx, actionTabs_->count()-1)));
       const bool visual = (stepIdx == 3);
       if (actionTabs_) actionTabs_->setVisible(!visual);
+      if (log_) log_->setVisible(!visual);
       if (leftStack) leftStack->setCurrentWidget(visual ? visualDashHost_ : viewsHost_);
       if (stepIdx == 0) onModeCapture();
       else if (stepIdx == 1) onModeCalibration();
