@@ -1564,8 +1564,8 @@ void MainWindow::onRemoveSource() {
   last_speed_ = 0.0;
   measurements_frozen_ = false;
   track_binary_enabled_ = false;
-  tracked_next_id_ = 1;
-  tracked_centers_.clear();
+  next_track_id_ = 1;
+  tracked_centroids_.clear();
   tracked_contours_.clear();
   if (btnTrackBinary_) btnTrackBinary_->setChecked(false);
   refreshTrajectoryPlot();
