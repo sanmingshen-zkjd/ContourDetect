@@ -694,11 +694,11 @@ void MainWindow::buildUI() {
     visualDashGrid_->setContentsMargins(0,0,0,0);
     visualDashGrid_->setSpacing(8);
     leftVisImage_ = new QLabel(visualDashHost_);
-    leftVisImage_->setMinimumSize((int)std::round(260 * uiScale), (int)std::round(180 * uiScale));
+    leftVisImage_->setMinimumSize((int)std::round(320 * uiScale), (int)std::round(240 * uiScale));
     leftVisImage_->setAlignment(Qt::AlignCenter);
     leftVisImage_->setStyleSheet("background:#111;border:1px solid #3a4250;color:#9aa7b8;");
     leftVisImage_->setText("Image view");
-    auto mkPlot=[&](const QString& y){ QCustomPlot* p=new QCustomPlot(visualDashHost_); p->setMinimumHeight((int)std::round(180 * uiScale)); p->addGraph(); p->xAxis->setLabel("frame"); p->yAxis->setLabel(y); return p; };
+    auto mkPlot=[&](const QString& y){ QCustomPlot* p=new QCustomPlot(visualDashHost_); p->setMinimumHeight((int)std::round(240 * uiScale)); p->addGraph(); p->xAxis->setLabel("frame"); p->yAxis->setLabel(y); return p; };
     leftDispPlot_=mkPlot("Displacement");
     leftSpeedPlot_=mkPlot("Speed");
     leftAreaPlot_=mkPlot("Area");
@@ -714,6 +714,7 @@ void MainWindow::buildUI() {
     leftMeasureTable_->setColumnCount(9);
     leftMeasureTable_->setHorizontalHeaderLabels({"Disp","Speed","Accel","Area","Perimeter","Major","Minor","Circularity","Scale(mm/px)"});
     leftMeasureTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    leftMeasureTable_->setStyleSheet("QTableWidget{background:#1f2937;color:#e5e7eb;gridline-color:#4b5563;selection-background-color:#2563eb;selection-color:#ffffff;}QHeaderView::section{background:#374151;color:#f9fafb;border:1px solid #4b5563;padding:4px;}");
     visualDashGrid_->addWidget(leftMeasureTable_,2,0,1,3);
     visualDashHost_->setVisible(false);
     v->addWidget(visualDashHost_, 1);
@@ -1046,74 +1047,9 @@ void MainWindow::buildUI() {
     trkMainLayout->addStretch(1);
 
 
-    QGridLayout* visGrid = new QGridLayout();
-    visImageLabel_ = new QLabel(tabVis);
-    visImageLabel_->setMinimumSize(260, 180);
-    visImageLabel_->setAlignment(Qt::AlignCenter);
-    visImageLabel_->setStyleSheet("background:#111;border:1px solid #3a4250;color:#9aa7b8;");
-    visImageLabel_->setText("Image view");
-    visGrid->addWidget(visImageLabel_, 0, 0);
-
-    btnAddVisChart_ = new QPushButton("add gragh", tabVis);
-    btnAddVisChart_->setVisible(false);
-    visChartsLayout_->addLayout(visGrid);
-
-    auto makeSeriesSelector = [tabVis]() {
-      QComboBox* cb = new QComboBox(tabVis);
-      cb->setToolTip(QString::fromUtf8("choose curve to show"));
-      cb->addItem(QString::fromUtf8("all"));
-      return cb;
-    };
-
-    lblTrajPosPlot_ = new QCustomPlot(tabVis);
-    lblTrajPosPlot_->setMinimumHeight(160);
-    lblTrajPosPlot_->setStyleSheet("background:#1d232b;border:1px solid #3a4250;color:#9fb0c4;");
-    lblTrajPosPlot_->xAxis->setLabel("t");
-    lblTrajPosPlot_->yAxis->setLabel("Position");
-    lblTrajPosPlot_->addGraph();
-    lblTrajPosPlot_->addGraph();
-    lblTrajPosPlot_->addGraph();
-    lblTrajPosPlot_->addGraph(); // red cursor line
-    lblTrajPosPlot_->graph(0)->setPen(QPen(QColor(255,99,132), 1.8));
-    lblTrajPosPlot_->graph(1)->setPen(QPen(QColor(80,220,255), 1.8));
-    lblTrajPosPlot_->graph(2)->setPen(QPen(QColor(120,220,120), 1.8));
-    lblTrajPosPlot_->graph(3)->setPen(QPen(QColor(255,70,70), 1.2));
-    lblTrajPosPlot_->legend->setVisible(false);
-    QComboBox* posSelector = makeSeriesSelector();
-    visGrid->addWidget(lblTrajPosPlot_, 0, 1);
-
-    lblTrajAngPlot_ = new QCustomPlot(tabVis);
-    lblTrajAngPlot_->setMinimumHeight(160);
-    lblTrajAngPlot_->setStyleSheet("background:#1d232b;border:1px solid #3a4250;color:#9fb0c4;");
-    lblTrajAngPlot_->xAxis->setLabel("t");
-    lblTrajAngPlot_->yAxis->setLabel("Angle-axis");
-    lblTrajAngPlot_->addGraph();
-    lblTrajAngPlot_->addGraph();
-    lblTrajAngPlot_->addGraph();
-    lblTrajAngPlot_->addGraph(); // red cursor line
-    lblTrajAngPlot_->graph(0)->setPen(QPen(QColor(255,179,71), 1.8));
-    lblTrajAngPlot_->graph(1)->setPen(QPen(QColor(186,104,200), 1.8));
-    lblTrajAngPlot_->graph(2)->setPen(QPen(QColor(121,134,203), 1.8));
-    lblTrajAngPlot_->graph(3)->setPen(QPen(QColor(255,70,70), 1.2));
-    lblTrajAngPlot_->legend->setVisible(false);
-    QComboBox* angSelector = makeSeriesSelector();
-    visGrid->addWidget(lblTrajAngPlot_, 0, 2);
-
-    plotArea_ = new QCustomPlot(tabVis); plotArea_->setMinimumHeight(160); plotArea_->addGraph(); plotArea_->xAxis->setLabel("t"); plotArea_->yAxis->setLabel("Area");
-    plotPerimeter_ = new QCustomPlot(tabVis); plotPerimeter_->setMinimumHeight(160); plotPerimeter_->addGraph(); plotPerimeter_->xAxis->setLabel("t"); plotPerimeter_->yAxis->setLabel("Perimeter");
-    plotCircularity_ = new QCustomPlot(tabVis); plotCircularity_->setMinimumHeight(160); plotCircularity_->addGraph(); plotCircularity_->xAxis->setLabel("t"); plotCircularity_->yAxis->setLabel("Circularity");
-    visGrid->addWidget(plotArea_, 1, 0);
-    visGrid->addWidget(plotPerimeter_, 1, 1);
-    visGrid->addWidget(plotCircularity_, 1, 2);
-
-    tblMeasurements_ = new QTableWidget(tabVis);
-    tblMeasurements_->setColumnCount(9);
-    tblMeasurements_->setHorizontalHeaderLabels({"Disp","Speed","Accel","Area","Perimeter","Major","Minor","Circularity","Scale(mm/px)"});
-    tblMeasurements_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    visChartsLayout_->addWidget(tblMeasurements_);
+    visCharts_.clear();
+    visChartsLayout_->addWidget(new QLabel("Visual dashboard is shown in the left player area.", tabVis));
     visChartsLayout_->addStretch(1);
-
-    connect(btnAddVisChart_, &QPushButton::clicked, this, &MainWindow::onAddVisualizationChart);
 
     connect(cbThreshType_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, updateMethodUi](int){ object_thresh_manual_ = false; updateMethodUi(); onObjectThresholdParamsChanged(); });
     connect(cbGlobalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ object_thresh_manual_ = false; onObjectThresholdParamsChanged(); });
@@ -1133,17 +1069,6 @@ void MainWindow::buildUI() {
     connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
     connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
 
-    lblTrajPosPlot_->setContextMenuPolicy(Qt::CustomContextMenu);
-    lblTrajAngPlot_->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(lblTrajPosPlot_, &QWidget::customContextMenuRequested, this, &MainWindow::onVisualizationPlotContextMenu);
-    connect(lblTrajAngPlot_, &QWidget::customContextMenuRequested, this, &MainWindow::onVisualizationPlotContextMenu);
-
-    visCharts_.clear();
-    visCharts_.push_back({lblTrajPosPlot_, posSelector, {0,1,2}, "Position", false});
-    visCharts_.push_back({lblTrajAngPlot_, angSelector, {3,4,5}, "Angle-axis", false});
-
-    connect(posSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); });
-    connect(angSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); });
 
     actionTabs_->addTab(tabCap, "Source");
     actionTabs_->addTab(tabCal, "PreProcess");
