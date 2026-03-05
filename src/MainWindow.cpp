@@ -2316,8 +2316,8 @@ void MainWindow::onAnalyzeParticles() {
   }
 
   analyzed_contours_.clear();
-  analyzed_contours_by_frame_.clear();
-  analyzed_contours_by_frame_.resize(totalFrames);
+  analyzed_contours_by_frame_.assign(totalFrames, {});
+  tracked_contours_by_frame_.clear();
   target_meas_rows_.clear();
   meas_rows_.clear();
 
@@ -2334,7 +2334,16 @@ void MainWindow::onAnalyzeParticles() {
   InputSource& src = sources_[srcIdx];
   const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
 
+  QProgressDialog progress("Analyzing all frames...", "", 0, totalFrames, this);
+  progress.setWindowModality(Qt::WindowModal);
+  progress.setCancelButton(nullptr);
+  progress.setMinimumDuration(0);
+
   for (int i=0;i<totalFrames;++i) {
+    progress.setValue(i);
+    progress.setLabelText(QString("Analyze Particles... %1/%2").arg(i+1).arg(totalFrames));
+    qApp->processEvents();
+
     cv::Mat f;
     if (!src.is_image_seq) {
       if (!src.cap.isOpened()) continue;
@@ -2349,7 +2358,6 @@ void MainWindow::onAnalyzeParticles() {
     f = applyPreprocess(f);
     auto contours = detectBinaryContours(f);
     analyzed_contours_by_frame_[i] = contours;
-    if (i == (int)play_frame_) analyzed_contours_ = contours;
 
     for (const auto& c : contours) {
       if (c.size() < 5) continue;
@@ -2365,17 +2373,17 @@ void MainWindow::onAnalyzeParticles() {
     }
   }
 
-  // preview current frame with contours
-  std::vector<cv::Mat> frames;
-  { QMutexLocker locker(&frames_mutex_); frames = last_frames_; }
-  for (auto& f : frames) {
-    if (f.empty()) continue;
-    f = applyPreprocess(f);
-    if (!analyzed_contours_.empty()) cv::drawContours(f, analyzed_contours_, -1, cv::Scalar(0,255,0), 2);
-    break;
+  progress.setValue(totalFrames);
+  if ((int)play_frame_ >= 0 && (int)play_frame_ < (int)analyzed_contours_by_frame_.size()) {
+    analyzed_contours_ = analyzed_contours_by_frame_[(int)play_frame_];
   }
-  updateSourceViews(frames);
+
+  measurements_frozen_ = true;
+  stepDone_[2] = !target_meas_rows_.empty();
+  updateStepAvailability();
   updateHistogramPlot();
+  updateLeftVisualDashboard();
+  onTick();
   logLine(QString("Analyze Particles: processed %1 frames.").arg(totalFrames));
 }
 
@@ -2386,50 +2394,122 @@ void MainWindow::onToggleTrackBinary() {
   next_track_id_ = 1;
   if (!track_binary_enabled_) {
     measurements_frozen_ = false;
+    tracked_contours_by_frame_.clear();
     updateStepAvailability();
     logLine("Binary contour tracking disabled.");
+    onTick();
     return;
   }
 
   if (analyzed_contours_by_frame_.empty()) onAnalyzeParticles();
   if (analyzed_contours_by_frame_.empty()) return;
 
+  // Hungarian assignment based on centroid distance for inter-frame association.
   target_meas_rows_.clear();
+  tracked_contours_by_frame_.assign(analyzed_contours_by_frame_.size(), {});
   std::unordered_map<int, cv::Point2f> id_prev;
   std::unordered_map<int, double> id_prev_speed;
   int nextId = 1;
   const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
+  const double maxDist = 60.0;
+
+  auto hungarian = [](const std::vector<std::vector<double>>& a)->std::vector<int> {
+    int n = (int)a.size();
+    if (n == 0) return {};
+    int m = (int)a[0].size();
+    int N = std::max(n, m);
+    std::vector<std::vector<double>> cost(N, std::vector<double>(N, 1e6));
+    for (int i=0;i<n;++i) for (int j=0;j<m;++j) cost[i][j]=a[i][j];
+    std::vector<double> u(N+1), v(N+1);
+    std::vector<int> p(N+1), way(N+1);
+    for (int i=1;i<=N;++i) {
+      p[0] = i;
+      int j0 = 0;
+      std::vector<double> minv(N+1, 1e18);
+      std::vector<char> used(N+1, false);
+      do {
+        used[j0] = true;
+        int i0 = p[j0], j1 = 0;
+        double delta = 1e18;
+        for (int j=1;j<=N;++j) if (!used[j]) {
+          double cur = cost[i0-1][j-1]-u[i0]-v[j];
+          if (cur < minv[j]) { minv[j] = cur; way[j] = j0; }
+          if (minv[j] < delta) { delta = minv[j]; j1 = j; }
+        }
+        for (int j=0;j<=N;++j) {
+          if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
+          else minv[j] -= delta;
+        }
+        j0 = j1;
+      } while (p[j0] != 0);
+      do {
+        int j1 = way[j0];
+        p[j0] = p[j1];
+        j0 = j1;
+      } while (j0);
+    }
+    std::vector<int> ans(n, -1);
+    for (int j=1;j<=N;++j) if (p[j] && p[j] <= n && j <= m) ans[p[j]-1] = j-1;
+    return ans;
+  };
 
   for (int i=0;i<(int)analyzed_contours_by_frame_.size();++i) {
-    std::unordered_map<int, cv::Point2f> id_curr;
-    for (const auto& c : analyzed_contours_by_frame_[i]) {
+    std::vector<cv::Point2f> currCtrs;
+    std::vector<int> validIdx;
+    for (int ci=0; ci<(int)analyzed_contours_by_frame_[i].size(); ++ci) {
+      const auto& c = analyzed_contours_by_frame_[i][ci];
       if (c.empty()) continue;
       cv::Moments m = cv::moments(c);
       if (std::abs(m.m00) < 1e-9) continue;
-      cv::Point2f ctr((float)(m.m10/m.m00), (float)(m.m01/m.m00));
-      int bestId = -1; double bestD = 1e18;
-      for (const auto& kv : id_prev) {
-        double d = cv::norm(ctr - kv.second);
-        if (d < bestD) { bestD = d; bestId = kv.first; }
+      currCtrs.push_back(cv::Point2f((float)(m.m10/m.m00), (float)(m.m01/m.m00)));
+      validIdx.push_back(ci);
+    }
+
+    std::vector<int> prevIds;
+    std::vector<cv::Point2f> prevCtrs;
+    prevIds.reserve(id_prev.size()); prevCtrs.reserve(id_prev.size());
+    for (const auto& kv : id_prev) { prevIds.push_back(kv.first); prevCtrs.push_back(kv.second); }
+
+    std::vector<int> assignedCurr(currCtrs.size(), -1);
+    if (!prevCtrs.empty() && !currCtrs.empty()) {
+      std::vector<std::vector<double>> cost(prevCtrs.size(), std::vector<double>(currCtrs.size(), 1e6));
+      for (int r=0;r<(int)prevCtrs.size();++r) {
+        for (int c=0;c<(int)currCtrs.size();++c) {
+          cost[r][c] = cv::norm(prevCtrs[r] - currCtrs[c]);
+        }
       }
-      if (bestId < 0 || bestD > 60.0) bestId = nextId++;
-      id_curr[bestId] = ctr;
+      auto match = hungarian(cost);
+      for (int r=0;r<(int)match.size();++r) {
+        int cidx = match[r];
+        if (cidx >= 0 && cidx < (int)currCtrs.size() && cost[r][cidx] <= maxDist) {
+          assignedCurr[cidx] = prevIds[r];
+        }
+      }
+    }
+
+    std::unordered_map<int, cv::Point2f> id_curr;
+    for (int c=0;c<(int)currCtrs.size();++c) {
+      int id = assignedCurr[c];
+      if (id < 0) id = nextId++;
+      id_curr[id] = currCtrs[c];
+      const auto& contour = analyzed_contours_by_frame_[i][validIdx[c]];
+      tracked_contours_by_frame_[i].push_back(TrackedContour{id, contour, currCtrs[c]});
 
       MeasureRow row;
       row.key = i;
-      row.area = std::abs(cv::contourArea(c)) * scale * scale;
-      row.perim = cv::arcLength(c, true) * scale;
-      cv::RotatedRect rr = cv::minAreaRect(c);
+      row.area = std::abs(cv::contourArea(contour)) * scale * scale;
+      row.perim = cv::arcLength(contour, true) * scale;
+      cv::RotatedRect rr = cv::minAreaRect(contour);
       row.major = std::max(rr.size.width, rr.size.height) * scale;
       row.minor = std::min(rr.size.width, rr.size.height) * scale;
       row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
-      if (id_prev.count(bestId)) {
-        row.disp = cv::norm(ctr - id_prev[bestId]) * scale;
+      if (id_prev.count(id)) {
+        row.disp = cv::norm(currCtrs[c] - id_prev[id]) * scale;
         row.speed = row.disp;
-        row.accel = row.speed - id_prev_speed[bestId];
+        row.accel = row.speed - id_prev_speed[id];
       }
-      id_prev_speed[bestId] = row.speed;
-      target_meas_rows_.push_back(TargetMeasureRow{bestId, row});
+      id_prev_speed[id] = row.speed;
+      target_meas_rows_.push_back(TargetMeasureRow{id, row});
     }
     id_prev = id_curr;
   }
@@ -2439,7 +2519,8 @@ void MainWindow::onToggleTrackBinary() {
   updateStepAvailability();
   updateLeftVisualDashboard();
   updateHistogramPlot();
-  logLine("Track completed: associated IDs across analyzed frames.");
+  onTick();
+  logLine("Track completed using Hungarian association on analyzed contours.");
 }
 
 void MainWindow::refreshRegionTable() {
@@ -2915,37 +2996,20 @@ void MainWindow::onTick() {
   // Tracking overlay is triggered by the explicit Detect button to avoid
   // repeatedly accumulating visual detections on static frames.
 
-  if (track_binary_enabled_) {
-    const float maxDist = 60.0f;
-    for (size_t i = 0; i < vis.size(); ++i) {
-      if (vis[i].empty()) continue;
-      auto contours = detectBinaryContours(vis[i]);
-      std::unordered_map<int, cv::Point2f> newCenters;
-      std::unordered_map<int, std::vector<cv::Point>> newContours;
-      for (const auto& c : contours) {
-        if (c.empty()) continue;
-        cv::Moments mm = cv::moments(c);
-        if (std::abs(mm.m00) < 1e-6) continue;
-        cv::Point2f ctr((float)(mm.m10/mm.m00), (float)(mm.m01/mm.m00));
-        int bestId = -1; float bestD = maxDist;
-        for (const auto& kv : tracked_centroids_) {
-          float d = cv::norm(ctr - kv.second);
-          if (d < bestD) { bestD = d; bestId = kv.first; }
-        }
-        if (bestId < 0) bestId = next_track_id_++;
-        newCenters[bestId] = ctr;
-        newContours[bestId] = c;
+  int frameIdx = std::max(0, (int)play_frame_);
+  if (track_binary_enabled_ && frameIdx < (int)tracked_contours_by_frame_.size()) {
+    for (auto& f : vis) {
+      if (f.empty()) continue;
+      for (const auto& tc : tracked_contours_by_frame_[frameIdx]) {
+        cv::drawContours(f, std::vector<std::vector<cv::Point>>{tc.contour}, -1, cv::Scalar(0,255,0), 2);
+        cv::putText(f, std::string("ID:")+std::to_string(tc.id), tc.centroid + cv::Point2f(3.f,-3.f),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2, cv::LINE_AA);
       }
-      tracked_centroids_ = std::move(newCenters);
-      tracked_contours_ = std::move(newContours);
-      for (const auto& kv : tracked_contours_) {
-        cv::drawContours(vis[i], std::vector<std::vector<cv::Point>>{kv.second}, -1, cv::Scalar(0,255,0), 2);
-        auto itc = tracked_centroids_.find(kv.first);
-        if (itc != tracked_centroids_.end()) {
-          cv::putText(vis[i], std::string("ID:")+std::to_string(kv.first), itc->second + cv::Point2f(3.f,-3.f),
-                      cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2, cv::LINE_AA);
-        }
-      }
+    }
+  } else if (frameIdx < (int)analyzed_contours_by_frame_.size()) {
+    for (auto& f : vis) {
+      if (f.empty()) continue;
+      cv::drawContours(f, analyzed_contours_by_frame_[frameIdx], -1, cv::Scalar(0,255,0), 2);
     }
   } else if (!analyzed_contours_.empty()) {
     for (auto& f : vis) {

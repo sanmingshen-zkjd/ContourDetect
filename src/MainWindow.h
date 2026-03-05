@@ -467,6 +467,8 @@ private:
   int next_region_id_ = 1;
   int drawing_region_type_ = 0; // 0 none, 1 include, 2 exclude
   std::vector<std::vector<std::vector<cv::Point>>> analyzed_contours_by_frame_;
+  struct TrackedContour { int id=-1; std::vector<cv::Point> contour; cv::Point2f centroid{0,0}; };
+  std::vector<std::vector<TrackedContour>> tracked_contours_by_frame_;
 
   struct CalibrationPair {
     int frame_id = -1;
