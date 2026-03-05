@@ -171,8 +171,8 @@ private slots:
   void onApplyScaleFromInput();
   void onTryAllGlobalMethods();
   void onTryAllLocalMethods();
-  void onApplyBinaryOp();
-  void onClearBinaryOps();
+  void onSelectBinaryOp();
+  void onUndoBinaryOp();
   void onAnalyzeParticles();
   void onToggleTrackBinary();
 
@@ -353,8 +353,7 @@ private:
   QPushButton* btnTryAllGlobal_=nullptr;
   QPushButton* btnTryAllLocal_=nullptr;
   QComboBox* cbBinaryOp_=nullptr;
-  QPushButton* btnAddBinaryOp_=nullptr;
-  QPushButton* btnClearBinaryOps_=nullptr;
+  QPushButton* btnUndoBinaryOp_=nullptr;
   QPushButton* btnAnalyzeParticles_=nullptr;
   QPushButton* btnTrackBinary_=nullptr;
   QLabel* lblBinaryOps_=nullptr;

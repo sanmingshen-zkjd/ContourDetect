@@ -972,8 +972,7 @@ void MainWindow::buildUI() {
     QGridLayout* bp = new QGridLayout(gbBinaryProc);
     cbBinaryOp_ = new QComboBox(gbBinaryProc);
     for (const QString& op : {"Erode","Dilate","Open","Close","Fill Holes","Watershed","Skeletonize","Outline","Clear Border"}) cbBinaryOp_->addItem(op);
-    btnAddBinaryOp_ = new QPushButton("Add", gbBinaryProc);
-    btnClearBinaryOps_ = new QPushButton("Clear", gbBinaryProc);
+    btnUndoBinaryOp_ = new QPushButton("Undo", gbBinaryProc);
     lblBinaryOps_ = new QLabel("Pipeline: (none)", gbBinaryProc);
     lblBinaryOps_->setWordWrap(true);
     btnAnalyzeParticles_ = new QPushButton("Analyze Particles", gbBinaryProc);
@@ -981,8 +980,7 @@ void MainWindow::buildUI() {
     btnTrackBinary_->setCheckable(true);
     bp->addWidget(new QLabel("Operation", gbBinaryProc), 0, 0);
     bp->addWidget(cbBinaryOp_, 0, 1);
-    bp->addWidget(btnAddBinaryOp_, 0, 2);
-    bp->addWidget(btnClearBinaryOps_, 0, 3);
+    bp->addWidget(btnUndoBinaryOp_, 0, 2);
     bp->addWidget(lblBinaryOps_, 1, 0, 1, 4);
     bp->addWidget(btnAnalyzeParticles_, 2, 0, 1, 2);
     bp->addWidget(btnTrackBinary_, 2, 2, 1, 2);
@@ -1044,8 +1042,8 @@ void MainWindow::buildUI() {
     connect(cbGlobalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ object_thresh_manual_ = false; onObjectThresholdParamsChanged(); });
     connect(btnTryAllGlobal_, &QPushButton::clicked, this, &MainWindow::onTryAllGlobalMethods);
     connect(btnTryAllLocal_, &QPushButton::clicked, this, &MainWindow::onTryAllLocalMethods);
-    connect(btnAddBinaryOp_, &QPushButton::clicked, this, &MainWindow::onApplyBinaryOp);
-    connect(btnClearBinaryOps_, &QPushButton::clicked, this, &MainWindow::onClearBinaryOps);
+    connect(cbBinaryOp_, QOverload<int>::of(&QComboBox::activated), this, &MainWindow::onSelectBinaryOp);
+    connect(btnUndoBinaryOp_, &QPushButton::clicked, this, &MainWindow::onUndoBinaryOp);
     connect(btnAnalyzeParticles_, &QPushButton::clicked, this, &MainWindow::onAnalyzeParticles);
     connect(btnTrackBinary_, &QPushButton::clicked, this, &MainWindow::onToggleTrackBinary);
     connect(cbLocalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ object_thresh_manual_ = false; onObjectThresholdParamsChanged(); });
@@ -1862,9 +1860,11 @@ std::vector<std::vector<cv::Point>> MainWindow::detectBinaryContours(const cv::M
   return contours;
 }
 
-void MainWindow::onApplyBinaryOp() {
+void MainWindow::onSelectBinaryOp() {
   if (!cbBinaryOp_) return;
-  binary_ops_pipeline_.push_back(cbBinaryOp_->currentText());
+  const QString op = cbBinaryOp_->currentText();
+  if (op.isEmpty()) return;
+  binary_ops_pipeline_.push_back(op);
   if (lblBinaryOps_) {
     QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o;
     lblBinaryOps_->setText(QString("Pipeline: %1").arg(ops.join(" -> ")));
@@ -1872,9 +1872,12 @@ void MainWindow::onApplyBinaryOp() {
   onObjectThresholdParamsChanged();
 }
 
-void MainWindow::onClearBinaryOps() {
-  binary_ops_pipeline_.clear();
-  if (lblBinaryOps_) lblBinaryOps_->setText("Pipeline: (none)");
+void MainWindow::onUndoBinaryOp() {
+  if (!binary_ops_pipeline_.empty()) binary_ops_pipeline_.pop_back();
+  if (lblBinaryOps_) {
+    if (binary_ops_pipeline_.empty()) lblBinaryOps_->setText("Pipeline: (none)");
+    else { QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o; lblBinaryOps_->setText(QString("Pipeline: %1").arg(ops.join(" -> "))); }
+  }
   onObjectThresholdParamsChanged();
 }
 
@@ -1882,11 +1885,17 @@ void MainWindow::onAnalyzeParticles() {
   std::vector<cv::Mat> frames;
   { QMutexLocker locker(&frames_mutex_); frames = last_frames_; }
   analyzed_contours_.clear();
-  for (const auto& f : frames) {
+  std::vector<cv::Mat> vis = frames;
+  for (auto& f : vis) if (!f.empty()) f = applyPreprocess(f);
+  for (auto& f : vis) {
     if (f.empty()) continue;
-    analyzed_contours_ = detectBinaryContours(applyPreprocess(f));
+    analyzed_contours_ = detectBinaryContours(f); // includes current threshold + invert + binary ops
+    if (!analyzed_contours_.empty()) {
+      cv::drawContours(f, analyzed_contours_, -1, cv::Scalar(0,255,0), 2);
+    }
     break;
   }
+  updateSourceViews(vis);
   logLine(QString("Analyze Particles: %1 regions").arg((int)analyzed_contours_.size()));
 }
 
