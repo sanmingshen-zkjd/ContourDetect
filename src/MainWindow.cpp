@@ -2291,19 +2291,29 @@ void MainWindow::onAnalyzeParticles() {
   target_meas_rows_.clear();
   meas_rows_.clear();
 
-  Source& src = sources_[source_view_index_];
+  int srcIdx = -1;
+  if (!active_view_source_indices_.empty()) srcIdx = active_view_source_indices_.front();
+  else {
+    for (int i=0;i<(int)sources_.size();++i) { if (!sources_[i].is_cam) { srcIdx = i; break; } }
+  }
+  if (srcIdx < 0 || srcIdx >= (int)sources_.size()) {
+    QMessageBox::information(this, "Analyze", "No valid source for analysis.");
+    return;
+  }
+
+  InputSource& src = sources_[srcIdx];
   const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
 
   for (int i=0;i<totalFrames;++i) {
     cv::Mat f;
-    if (src.type == InputSource::VIDEO) {
+    if (!src.is_image_seq) {
       if (!src.cap.isOpened()) continue;
       src.cap.set(cv::CAP_PROP_POS_FRAMES, i);
       if (!src.cap.read(f) || f.empty()) continue;
-    } else if (src.type == InputSource::IMAGE_SEQUENCE) {
+    } else {
       if (i < 0 || i >= (int)src.seq_files.size()) continue;
       f = imreadUnicodePath(src.seq_files[(size_t)i], cv::IMREAD_COLOR);
-    } else continue;
+    }
 
     if (f.empty()) continue;
     f = applyPreprocess(f);
