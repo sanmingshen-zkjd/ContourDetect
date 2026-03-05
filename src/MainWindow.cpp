@@ -967,6 +967,27 @@ void MainWindow::buildUI() {
     lblBinaryPreview_->setStyleSheet("background:#111;border:1px solid #3a4250;color:#9aa7b8;");
     lblBinaryPreview_->setText("No binary preview");
     trkMainLayout->addWidget(lblBinaryPreview_);
+
+    QGroupBox* gbBinaryProc = new QGroupBox("Process(Binary)", tabObj);
+    QGridLayout* bp = new QGridLayout(gbBinaryProc);
+    cbBinaryOp_ = new QComboBox(gbBinaryProc);
+    for (const QString& op : {"Erode","Dilate","Open","Close","Fill Holes","Watershed","Skeletonize","Outline","Clear Border"}) cbBinaryOp_->addItem(op);
+    btnAddBinaryOp_ = new QPushButton("Add", gbBinaryProc);
+    btnClearBinaryOps_ = new QPushButton("Clear", gbBinaryProc);
+    lblBinaryOps_ = new QLabel("Pipeline: (none)", gbBinaryProc);
+    lblBinaryOps_->setWordWrap(true);
+    btnAnalyzeParticles_ = new QPushButton("Analyze Particles", gbBinaryProc);
+    btnTrackBinary_ = new QPushButton("Track", gbBinaryProc);
+    btnTrackBinary_->setCheckable(true);
+    bp->addWidget(new QLabel("Operation", gbBinaryProc), 0, 0);
+    bp->addWidget(cbBinaryOp_, 0, 1);
+    bp->addWidget(btnAddBinaryOp_, 0, 2);
+    bp->addWidget(btnClearBinaryOps_, 0, 3);
+    bp->addWidget(lblBinaryOps_, 1, 0, 1, 4);
+    bp->addWidget(btnAnalyzeParticles_, 2, 0, 1, 2);
+    bp->addWidget(btnTrackBinary_, 2, 2, 1, 2);
+    gbBinaryProc->setLayout(bp);
+    trkMainLayout->addWidget(gbBinaryProc);
     trkMainLayout->addStretch(1);
 
 
@@ -1023,6 +1044,10 @@ void MainWindow::buildUI() {
     connect(cbGlobalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ object_thresh_manual_ = false; onObjectThresholdParamsChanged(); });
     connect(btnTryAllGlobal_, &QPushButton::clicked, this, &MainWindow::onTryAllGlobalMethods);
     connect(btnTryAllLocal_, &QPushButton::clicked, this, &MainWindow::onTryAllLocalMethods);
+    connect(btnAddBinaryOp_, &QPushButton::clicked, this, &MainWindow::onApplyBinaryOp);
+    connect(btnClearBinaryOps_, &QPushButton::clicked, this, &MainWindow::onClearBinaryOps);
+    connect(btnAnalyzeParticles_, &QPushButton::clicked, this, &MainWindow::onAnalyzeParticles);
+    connect(btnTrackBinary_, &QPushButton::clicked, this, &MainWindow::onToggleTrackBinary);
     connect(cbLocalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ object_thresh_manual_ = false; onObjectThresholdParamsChanged(); });
     connect(chkInvertBinary_, &QCheckBox::toggled, this, &MainWindow::onObjectThresholdParamsChanged);
     connect(slObjectThresh_, &QSlider::valueChanged, this, [this](int v){ object_thresh_manual_ = true; if (spObjectThresh_ && spObjectThresh_->value()!=v) spObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
@@ -1628,7 +1653,7 @@ void MainWindow::onObjectThresholdParamsChanged() {
   }
 }
 
-cv::Mat MainWindow::makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalThreshold) const {
+cv::Mat MainWindow::makeObjectBinaryMask(const cv::Mat& src, int* outGlobalThreshold) const {
   if (src.empty()) return cv::Mat();
   cv::Mat gray;
   if (src.channels()==3) cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
@@ -1761,8 +1786,116 @@ cv::Mat MainWindow::makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalTh
   }
 
   if (chkInvertBinary_ && chkInvertBinary_->isChecked()) cv::bitwise_not(bin, bin);
-  cv::cvtColor(bin, bin, cv::COLOR_GRAY2BGR);
-  return bin;
+  return applyBinaryProcessOps(bin);
+}
+
+cv::Mat MainWindow::applyBinaryProcessOps(const cv::Mat& binMask) const {
+  if (binMask.empty()) return cv::Mat();
+  cv::Mat out = binMask.clone();
+  auto fillHoles = [](cv::Mat& m) {
+    cv::Mat flood = m.clone();
+    cv::floodFill(flood, cv::Point(0,0), cv::Scalar(255));
+    cv::bitwise_not(flood, flood);
+    cv::bitwise_or(m, flood, m);
+  };
+  auto skeletonize = [](const cv::Mat& src){
+    cv::Mat skel(src.size(), CV_8UC1, cv::Scalar(0));
+    cv::Mat img = src.clone();
+    cv::Mat temp, eroded;
+    cv::Mat element = cv::getStructuringElement(cv::MORPH_CROSS, cv::Size(3,3));
+    bool done;
+    do {
+      cv::erode(img, eroded, element);
+      cv::dilate(eroded, temp, element);
+      cv::subtract(img, temp, temp);
+      cv::bitwise_or(skel, temp, skel);
+      eroded.copyTo(img);
+      done = (cv::countNonZero(img) == 0);
+    } while(!done);
+    return skel;
+  };
+  auto clearBorder = [](cv::Mat& m) {
+    std::vector<std::vector<cv::Point>> cs;
+    cv::findContours(m.clone(), cs, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    for (const auto& c : cs) {
+      cv::Rect r = cv::boundingRect(c);
+      if (r.x <= 0 || r.y <= 0 || r.br().x >= m.cols-1 || r.br().y >= m.rows-1) {
+        cv::drawContours(m, std::vector<std::vector<cv::Point>>{c}, -1, cv::Scalar(0), cv::FILLED);
+      }
+    }
+  };
+  for (const auto& op : binary_ops_pipeline_) {
+    if (op == "Erode") cv::erode(out, out, cv::Mat(), cv::Point(-1,-1), 1);
+    else if (op == "Dilate") cv::dilate(out, out, cv::Mat(), cv::Point(-1,-1), 1);
+    else if (op == "Open") cv::morphologyEx(out, out, cv::MORPH_OPEN, cv::Mat());
+    else if (op == "Close") cv::morphologyEx(out, out, cv::MORPH_CLOSE, cv::Mat());
+    else if (op == "Fill Holes") fillHoles(out);
+    else if (op == "Skeletonize") out = skeletonize(out);
+    else if (op == "Outline") { cv::Mat e; cv::erode(out, e, cv::Mat()); cv::subtract(out, e, out); }
+    else if (op == "Clear Border") clearBorder(out);
+    else if (op == "Watershed") {
+      cv::Mat dist; cv::distanceTransform(out, dist, cv::DIST_L2, 5);
+      cv::normalize(dist, dist, 0, 1.0, cv::NORM_MINMAX);
+      cv::Mat peaks; cv::threshold(dist, peaks, 0.4, 1.0, cv::THRESH_BINARY);
+      peaks.convertTo(peaks, CV_8U, 255);
+      cv::Mat markers; cv::connectedComponents(peaks, markers);
+      cv::Mat color; cv::cvtColor(out, color, cv::COLOR_GRAY2BGR);
+      cv::watershed(color, markers);
+      out.setTo(0);
+      out.setTo(255, markers > 1);
+    }
+  }
+  return out;
+}
+
+cv::Mat MainWindow::makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalThreshold) const {
+  cv::Mat mask = makeObjectBinaryMask(src, outGlobalThreshold);
+  if (mask.empty()) return cv::Mat();
+  cv::Mat bgr; cv::cvtColor(mask, bgr, cv::COLOR_GRAY2BGR);
+  return bgr;
+}
+
+std::vector<std::vector<cv::Point>> MainWindow::detectBinaryContours(const cv::Mat& src, int* outGlobalThreshold) const {
+  cv::Mat mask = makeObjectBinaryMask(src, outGlobalThreshold);
+  std::vector<std::vector<cv::Point>> contours;
+  if (!mask.empty()) cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+  return contours;
+}
+
+void MainWindow::onApplyBinaryOp() {
+  if (!cbBinaryOp_) return;
+  binary_ops_pipeline_.push_back(cbBinaryOp_->currentText());
+  if (lblBinaryOps_) {
+    QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o;
+    lblBinaryOps_->setText(QString("Pipeline: %1").arg(ops.join(" -> ")));
+  }
+  onObjectThresholdParamsChanged();
+}
+
+void MainWindow::onClearBinaryOps() {
+  binary_ops_pipeline_.clear();
+  if (lblBinaryOps_) lblBinaryOps_->setText("Pipeline: (none)");
+  onObjectThresholdParamsChanged();
+}
+
+void MainWindow::onAnalyzeParticles() {
+  std::vector<cv::Mat> frames;
+  { QMutexLocker locker(&frames_mutex_); frames = last_frames_; }
+  analyzed_contours_.clear();
+  for (const auto& f : frames) {
+    if (f.empty()) continue;
+    analyzed_contours_ = detectBinaryContours(applyPreprocess(f));
+    break;
+  }
+  logLine(QString("Analyze Particles: %1 regions").arg((int)analyzed_contours_.size()));
+}
+
+void MainWindow::onToggleTrackBinary() {
+  track_binary_enabled_ = btnTrackBinary_ && btnTrackBinary_->isChecked();
+  tracked_centroids_.clear();
+  tracked_contours_.clear();
+  next_track_id_ = 1;
+  logLine(track_binary_enabled_ ? "Binary contour tracking enabled." : "Binary contour tracking disabled.");
 }
 
 void MainWindow::onStartScaleLine() {
@@ -2159,6 +2292,47 @@ void MainWindow::onTick() {
   }
   // Tracking overlay is triggered by the explicit Detect button to avoid
   // repeatedly accumulating visual detections on static frames.
+
+  if (track_binary_enabled_) {
+    const float maxDist = 60.0f;
+    for (size_t i = 0; i < vis.size(); ++i) {
+      if (vis[i].empty()) continue;
+      auto contours = detectBinaryContours(vis[i]);
+      std::unordered_map<int, cv::Point2f> newCenters;
+      std::unordered_map<int, std::vector<cv::Point>> newContours;
+      for (const auto& c : contours) {
+        if (c.empty()) continue;
+        cv::Moments mm = cv::moments(c);
+        if (std::abs(mm.m00) < 1e-6) continue;
+        cv::Point2f ctr((float)(mm.m10/mm.m00), (float)(mm.m01/mm.m00));
+        int bestId = -1; float bestD = maxDist;
+        for (const auto& kv : tracked_centroids_) {
+          float d = cv::norm(ctr - kv.second);
+          if (d < bestD) { bestD = d; bestId = kv.first; }
+        }
+        if (bestId < 0) bestId = next_track_id_++;
+        newCenters[bestId] = ctr;
+        newContours[bestId] = c;
+      }
+      tracked_centroids_ = std::move(newCenters);
+      tracked_contours_ = std::move(newContours);
+      for (const auto& kv : tracked_contours_) {
+        cv::drawContours(vis[i], std::vector<std::vector<cv::Point>>{kv.second}, -1, cv::Scalar(0,255,0), 2);
+        auto itc = tracked_centroids_.find(kv.first);
+        if (itc != tracked_centroids_.end()) {
+          cv::putText(vis[i], std::string("ID:")+std::to_string(kv.first), itc->second + cv::Point2f(3.f,-3.f),
+                      cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2, cv::LINE_AA);
+        }
+      }
+      break;
+    }
+  } else if (!analyzed_contours_.empty()) {
+    for (auto& f : vis) {
+      if (f.empty()) continue;
+      cv::drawContours(f, analyzed_contours_, -1, cv::Scalar(0,255,0), 2);
+      break;
+    }
+  }
 
   updateSourceViews(vis);
 

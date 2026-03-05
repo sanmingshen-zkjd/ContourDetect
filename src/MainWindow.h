@@ -171,6 +171,10 @@ private slots:
   void onApplyScaleFromInput();
   void onTryAllGlobalMethods();
   void onTryAllLocalMethods();
+  void onApplyBinaryOp();
+  void onClearBinaryOps();
+  void onAnalyzeParticles();
+  void onToggleTrackBinary();
 
 private:
   void buildUI();
@@ -204,7 +208,10 @@ private:
   void updateStatus();
   cv::Mat applyPreprocess(const cv::Mat& src) const;
   void updateScaleStatus(double pxLen);
+  cv::Mat makeObjectBinaryMask(const cv::Mat& src, int* outGlobalThreshold=nullptr) const;
+  cv::Mat applyBinaryProcessOps(const cv::Mat& binMask) const;
   cv::Mat makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalThreshold=nullptr) const;
+  std::vector<std::vector<cv::Point>> detectBinaryContours(const cv::Mat& src, int* outGlobalThreshold=nullptr) const;
   bool runCalibrationOnPairs(const std::vector<int>& pairIndices, bool updateTable);
   void refreshTrajectoryPlot();
   void onAddVisualizationChart();
@@ -345,6 +352,12 @@ private:
   QLabel* lblBinaryPreview_=nullptr;
   QPushButton* btnTryAllGlobal_=nullptr;
   QPushButton* btnTryAllLocal_=nullptr;
+  QComboBox* cbBinaryOp_=nullptr;
+  QPushButton* btnAddBinaryOp_=nullptr;
+  QPushButton* btnClearBinaryOps_=nullptr;
+  QPushButton* btnAnalyzeParticles_=nullptr;
+  QPushButton* btnTrackBinary_=nullptr;
+  QLabel* lblBinaryOps_=nullptr;
 
   // Tracking tab
   QPushButton* btnLoadTag_=nullptr;
@@ -394,6 +407,12 @@ private:
   int ui_overlay_div_=4; // run heavy overlay every N UI ticks
   double mm_per_pixel_ = 0.0;
   bool object_thresh_manual_ = false;
+  std::vector<QString> binary_ops_pipeline_;
+  std::vector<std::vector<cv::Point>> analyzed_contours_;
+  bool track_binary_enabled_ = false;
+  int next_track_id_ = 1;
+  std::unordered_map<int, cv::Point2f> tracked_centroids_;
+  std::unordered_map<int, std::vector<cv::Point>> tracked_contours_;
 
   struct CalibrationPair {
     int frame_id = -1;
