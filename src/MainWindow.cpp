@@ -632,14 +632,14 @@ void MainWindow::buildUI() {
 
     // Top step guide
     stepTabs_ = new QTabBar(central);
-    stepTabs_->addTab(QString::fromUtf8("① Source"));
-    stepTabs_->addTab(QString::fromUtf8("➡"));
-    stepTabs_->addTab(QString::fromUtf8("② PreProcess"));
-    stepTabs_->addTab(QString::fromUtf8("➡"));
-    stepTabs_->addTab(QString::fromUtf8("③ ObjectDefine"));
-    stepTabs_->addTab(QString::fromUtf8("➡"));
-    stepTabs_->addTab(QString::fromUtf8("④ Visual"));
-    stepTabs_->setExpanding(true);
+    stepTabs_->addTab("1 Source");
+    stepTabs_->addTab("");
+    stepTabs_->addTab("2 PreProcess");
+    stepTabs_->addTab("");
+    stepTabs_->addTab("3 ObjectDefine");
+    stepTabs_->addTab("");
+    stepTabs_->addTab("4 Visual");
+    stepTabs_->setExpanding(false);
     stepTabs_->setDocumentMode(true);
     stepTabs_->setCurrentIndex(stepToTabIndex(0));
     for (int i=0;i<4;++i) stepDone_[i] = false;
@@ -647,8 +647,19 @@ void MainWindow::buildUI() {
     stepTabs_->setStyleSheet(
       "QTabBar::tab{padding:8px 12px;background:#2d333b;color:#dbe5f1;border:1px solid #485468;}"
       "QTabBar::tab:selected{background:#3b82f6;color:#ffffff;font-weight:700;}"
-      "QTabBar::tab:hover:!selected{background:#374151;}"
-      "QTabBar::tab:nth-child(2),QTabBar::tab:nth-child(4),QTabBar::tab:nth-child(6){background:transparent;border:none;color:#cfd4db;font-size:20px;padding:0 8px;min-width:42px;}");
+      "QTabBar::tab:hover:!selected{background:#374151;}");
+    auto mkArrowBtn = [this]() {
+      auto* b = new QToolButton(stepTabs_);
+      b->setIcon(style()->standardIcon(QStyle::SP_ArrowRight));
+      b->setIconSize(QSize(24, 24));
+      b->setAutoRaise(true);
+      b->setEnabled(false);
+      b->setStyleSheet("QToolButton{border:none;background:transparent;padding:0px;}");
+      return b;
+    };
+    stepTabs_->setTabButton(1, QTabBar::LeftSide, mkArrowBtn());
+    stepTabs_->setTabButton(3, QTabBar::LeftSide, mkArrowBtn());
+    stepTabs_->setTabButton(5, QTabBar::LeftSide, mkArrowBtn());
     stepTabs_->setTabEnabled(1, false);
     stepTabs_->setTabEnabled(3, false);
     stepTabs_->setTabEnabled(5, false);
