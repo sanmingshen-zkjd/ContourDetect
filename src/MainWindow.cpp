@@ -1985,7 +1985,7 @@ void MainWindow::updateStepAvailability() {
   const bool sourceDone = hasAnySourceInCurrentMode();
   stepDone_[0] = sourceDone;
   stepDone_[1] = pre_scale_line_drawn_ && pre_scale_calculated_;
-  stepDone_[2] = stepDone_[2] && !meas_rows_.empty();
+  stepDone_[2] = stepDone_[2] && (!target_meas_rows_.empty() || !meas_rows_.empty());
 
   // Progressive unlock: step N is clickable only when step N-1 is done.
   const bool en0 = true;
@@ -2456,13 +2456,37 @@ void MainWindow::onToggleTrackBinary() {
   for (int i=0;i<(int)analyzed_contours_by_frame_.size();++i) {
     std::vector<cv::Point2f> currCtrs;
     std::vector<int> validIdx;
+    std::vector<MeasureRow> preRows;
+    const QString metric = cbHistMetric_ ? cbHistMetric_->currentText() : "Area";
+    const double loTh = spHistMin_ ? spHistMin_->value() : -1e9;
+    const double hiTh = spHistMax_ ? spHistMax_->value() : 1e9;
+    auto metricValue = [&](const MeasureRow& r)->double {
+      if (metric == "Perimeter") return r.perim;
+      if (metric == "Circularity") return r.circ;
+      if (metric == "Speed") return r.speed;
+      if (metric == "Displacement") return r.disp;
+      if (metric == "MajorAxis") return r.major;
+      if (metric == "MinorAxis") return r.minor;
+      return r.area;
+    };
     for (int ci=0; ci<(int)analyzed_contours_by_frame_[i].size(); ++ci) {
       const auto& c = analyzed_contours_by_frame_[i][ci];
       if (c.empty()) continue;
       cv::Moments m = cv::moments(c);
       if (std::abs(m.m00) < 1e-9) continue;
+      MeasureRow mr;
+      mr.key = i;
+      mr.area = std::abs(cv::contourArea(c)) * scale * scale;
+      mr.perim = cv::arcLength(c, true) * scale;
+      cv::RotatedRect rr = cv::minAreaRect(c);
+      mr.major = std::max(rr.size.width, rr.size.height) * scale;
+      mr.minor = std::min(rr.size.width, rr.size.height) * scale;
+      mr.circ = (mr.perim > 1e-9) ? (4.0 * std::acos(-1.0) * mr.area / (mr.perim * mr.perim)) : 0.0;
+      double mv = metricValue(mr);
+      if (mv < loTh || mv > hiTh) continue;
       currCtrs.push_back(cv::Point2f((float)(m.m10/m.m00), (float)(m.m01/m.m00)));
       validIdx.push_back(ci);
+      preRows.push_back(mr);
     }
 
     std::vector<int> prevIds;
@@ -2495,14 +2519,7 @@ void MainWindow::onToggleTrackBinary() {
       const auto& contour = analyzed_contours_by_frame_[i][validIdx[c]];
       tracked_contours_by_frame_[i].push_back(TrackedContour{id, contour, currCtrs[c]});
 
-      MeasureRow row;
-      row.key = i;
-      row.area = std::abs(cv::contourArea(contour)) * scale * scale;
-      row.perim = cv::arcLength(contour, true) * scale;
-      cv::RotatedRect rr = cv::minAreaRect(contour);
-      row.major = std::max(rr.size.width, rr.size.height) * scale;
-      row.minor = std::min(rr.size.width, rr.size.height) * scale;
-      row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
+      MeasureRow row = preRows[c];
       if (id_prev.count(id)) {
         row.disp = cv::norm(currCtrs[c] - id_prev[id]) * scale;
         row.speed = row.disp;
@@ -3724,21 +3741,26 @@ void MainWindow::updateHistogramPlot() {
   if (vals.empty()) { plotHistogram_->clearPlottables(); plotHistogram_->clearItems(); plotHistogram_->replot(); return; }
   std::sort(vals.begin(), vals.end());
 
-  double lo = spHistMin_ ? spHistMin_->value() : vals.front();
-  double hi = spHistMax_ ? spHistMax_->value() : vals.back();
+  // Histogram bars/range are fixed by data distribution; Min/Max only move guide lines.
+  double dataLo = vals.front();
+  double dataHi = vals.back();
+  if (cbHistMetric_->currentText() == "Circularity") { dataLo = 0.0; dataHi = 1.0; }
+  if (dataHi <= dataLo) dataHi = dataLo + 1.0;
+
+  double lo = spHistMin_ ? spHistMin_->value() : dataLo;
+  double hi = spHistMax_ ? spHistMax_->value() : dataHi;
   if (hi <= lo) hi = lo + 1.0;
 
   const int bins = 10;
-  const double span = hi - lo;
+  const double span = dataHi - dataLo;
   const double binW = span / bins;
   QVector<double> x(bins), y(bins);
   for (int i=0;i<bins;++i) {
-    x[i] = lo + (i + 0.5) * binW;
+    x[i] = dataLo + (i + 0.5) * binW;
     y[i] = 0.0;
   }
   for (double v : vals) {
-    if (v < lo || v > hi) continue;
-    int b = std::min(bins-1, std::max(0, (int)((v-lo)/span*bins)));
+    int b = std::min(bins-1, std::max(0, (int)((v-dataLo)/span*bins)));
     y[b] += 1.0;
   }
 
@@ -3764,7 +3786,7 @@ void MainWindow::updateHistogramPlot() {
   const QString metric = cbHistMetric_->currentText();
   plotHistogram_->xAxis->setLabel(metric);
   plotHistogram_->yAxis->setLabel("Count");
-  plotHistogram_->xAxis->setRange(lo, hi);
+  plotHistogram_->xAxis->setRange(dataLo, dataHi);
   double ymax = 1.0;
   for (double c : y) ymax = std::max(ymax, c);
   plotHistogram_->yAxis->setRange(0, ymax * 1.1);
