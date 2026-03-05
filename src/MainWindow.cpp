@@ -1985,7 +1985,7 @@ void MainWindow::updateStepAvailability() {
   const bool sourceDone = hasAnySourceInCurrentMode();
   stepDone_[0] = sourceDone;
   stepDone_[1] = pre_scale_line_drawn_ && pre_scale_calculated_;
-  stepDone_[2] = stepDone_[2] && (!target_meas_rows_.empty() || !meas_rows_.empty());
+  stepDone_[2] = stepDone_[2] && (!target_meas_rows_.empty() || !meas_rows_.empty() || !tracked_contours_by_frame_.empty());
 
   // Progressive unlock: step N is clickable only when step N-1 is done.
   const bool en0 = true;
@@ -2405,8 +2405,8 @@ void MainWindow::onToggleTrackBinary() {
   if (analyzed_contours_by_frame_.empty()) return;
 
   // Hungarian assignment based on centroid distance for inter-frame association.
-  target_meas_rows_.clear();
-  tracked_contours_by_frame_.assign(analyzed_contours_by_frame_.size(), {});
+  std::vector<TargetMeasureRow> newTrackedRows;
+  std::vector<std::vector<TrackedContour>> newTrackedContours(analyzed_contours_by_frame_.size());
   std::unordered_map<int, cv::Point2f> id_prev;
   std::unordered_map<int, double> id_prev_speed;
   int nextId = 1;
@@ -2517,7 +2517,7 @@ void MainWindow::onToggleTrackBinary() {
       if (id < 0) id = nextId++;
       id_curr[id] = currCtrs[c];
       const auto& contour = analyzed_contours_by_frame_[i][validIdx[c]];
-      tracked_contours_by_frame_[i].push_back(TrackedContour{id, contour, currCtrs[c]});
+      newTrackedContours[i].push_back(TrackedContour{id, contour, currCtrs[c]});
 
       MeasureRow row = preRows[c];
       if (id_prev.count(id)) {
@@ -2526,9 +2526,14 @@ void MainWindow::onToggleTrackBinary() {
         row.accel = row.speed - id_prev_speed[id];
       }
       id_prev_speed[id] = row.speed;
-      target_meas_rows_.push_back(TargetMeasureRow{id, row});
+      newTrackedRows.push_back(TargetMeasureRow{id, row});
     }
     id_prev = id_curr;
+  }
+
+  if (!newTrackedRows.empty()) {
+    target_meas_rows_ = std::move(newTrackedRows);
+    tracked_contours_by_frame_ = std::move(newTrackedContours);
   }
 
   measurements_frozen_ = true;
@@ -3013,11 +3018,30 @@ void MainWindow::onTick() {
   // Tracking overlay is triggered by the explicit Detect button to avoid
   // repeatedly accumulating visual detections on static frames.
 
+  auto contourMetricPass = [&](const std::vector<cv::Point>& c)->bool {
+    if (!cbHistMetric_ || !spHistMin_ || !spHistMax_ || c.empty()) return true;
+    const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
+    MeasureRow r;
+    r.area = std::abs(cv::contourArea(c)) * scale * scale;
+    r.perim = cv::arcLength(c, true) * scale;
+    cv::RotatedRect rr = cv::minAreaRect(c);
+    r.major = std::max(rr.size.width, rr.size.height) * scale;
+    r.minor = std::min(rr.size.width, rr.size.height) * scale;
+    r.circ = (r.perim > 1e-9) ? (4.0 * std::acos(-1.0) * r.area / (r.perim * r.perim)) : 0.0;
+    QString n = cbHistMetric_->currentText();
+    double v = r.area;
+    if (n == "Perimeter") v = r.perim;
+    else if (n == "Circularity") v = r.circ;
+    else if (n == "MajorAxis") v = r.major;
+    else if (n == "MinorAxis") v = r.minor;
+    return v >= spHistMin_->value() && v <= spHistMax_->value();
+  };
   int frameIdx = std::max(0, (int)play_frame_);
   if (track_binary_enabled_ && frameIdx < (int)tracked_contours_by_frame_.size()) {
     for (auto& f : vis) {
       if (f.empty()) continue;
       for (const auto& tc : tracked_contours_by_frame_[frameIdx]) {
+        if (!contourMetricPass(tc.contour)) continue;
         cv::drawContours(f, std::vector<std::vector<cv::Point>>{tc.contour}, -1, cv::Scalar(0,255,0), 2);
         cv::putText(f, std::string("ID:")+std::to_string(tc.id), tc.centroid + cv::Point2f(3.f,-3.f),
                     cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2, cv::LINE_AA);
@@ -3026,12 +3050,16 @@ void MainWindow::onTick() {
   } else if (frameIdx < (int)analyzed_contours_by_frame_.size()) {
     for (auto& f : vis) {
       if (f.empty()) continue;
-      cv::drawContours(f, analyzed_contours_by_frame_[frameIdx], -1, cv::Scalar(0,255,0), 2);
+      std::vector<std::vector<cv::Point>> show;
+      for (const auto& c : analyzed_contours_by_frame_[frameIdx]) if (contourMetricPass(c)) show.push_back(c);
+      if (!show.empty()) cv::drawContours(f, show, -1, cv::Scalar(0,255,0), 2);
     }
   } else if (!analyzed_contours_.empty()) {
     for (auto& f : vis) {
       if (f.empty()) continue;
-      cv::drawContours(f, analyzed_contours_, -1, cv::Scalar(0,255,0), 2);
+      std::vector<std::vector<cv::Point>> show;
+      for (const auto& c : analyzed_contours_) if (contourMetricPass(c)) show.push_back(c);
+      if (!show.empty()) cv::drawContours(f, show, -1, cv::Scalar(0,255,0), 2);
     }
   }
 
@@ -3987,6 +4015,25 @@ void MainWindow::updateLeftVisualDashboard() {
     if (idx == 7) return r.circ;
     return r.disp;
   };
+  auto metricValueByName = [&](const MeasureRow& r, const QString& name)->double {
+    if (name == "Speed") return r.speed;
+    if (name == "Acceleration") return r.accel;
+    if (name == "Area") return r.area;
+    if (name == "Perimeter") return r.perim;
+    if (name == "Major Axis") return r.major;
+    if (name == "Minor Axis") return r.minor;
+    if (name == "Circularity") return r.circ;
+    return r.disp;
+  };
+  auto passHistThreshold = [&](const MeasureRow& r)->bool {
+    if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return true;
+    QString n = cbHistMetric_->currentText();
+    if (n == "MajorAxis") n = "Major Axis";
+    if (n == "MinorAxis") n = "Minor Axis";
+    const double v = metricValueByName(r, n);
+    return v >= spHistMin_->value() && v <= spHistMax_->value();
+  };
+
   auto metricLabel = [&](int idx)->QString {
     if (idx == 1) return QString("Speed (%1/frame)").arg(lenU);
     if (idx == 2) return QString("Acceleration (%1/frame²)").arg(lenU);
@@ -4063,7 +4110,7 @@ void MainWindow::updateLeftVisualDashboard() {
       QVector<double> x, y;
       if (!target_meas_rows_.empty()) {
         for (const auto& tr : target_meas_rows_) {
-          if (tr.id != id) continue;
+          if (tr.id != id || !passHistThreshold(tr.m)) continue;
           x.push_back((double)tr.m.key);
           double v = metricOf(tr.m, metricIdx);
           y.push_back(v);
@@ -4074,6 +4121,7 @@ void MainWindow::updateLeftVisualDashboard() {
         }
       } else {
         for (const auto& r : meas_rows_) {
+          if (!passHistThreshold(r)) continue;
           x.push_back((double)r.key);
           double v = metricOf(r, metricIdx);
           y.push_back(v);
@@ -4138,7 +4186,7 @@ void MainWindow::updateLeftVisualDashboard() {
     auto setTxt=[&](int r,int c,const QString& v){ leftMeasureTable_->setItem(r,c,new QTableWidgetItem(v)); };
     for (int i=0;i<(int)rows.size();++i) {
       const auto& t = rows[i];
-      if (!showIds.count(t.id)) continue;
+      if (!showIds.count(t.id) || !passHistThreshold(t.m)) continue;
       setTxt(rr,0,QString::number(t.m.key));
       setTxt(rr,1,QString::number(t.id));
       setTxt(rr,2,QString::number(t.m.disp,'f',4));
