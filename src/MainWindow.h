@@ -219,6 +219,7 @@ private:
   void updateMeasurementFromFrame(const cv::Mat& preprocessedFrame);
   void updateHistogramPlot();
   void updateLeftVisualDashboard();
+  void rebuildMeasurementSeriesFromCurrentSource();
   void onAddVisualizationChart();
   void onVisualizationPlotContextMenu(const QPoint& pos);
   bool chooseVisualizationDataTypes(QVector<int>& components, QString& labelOut);
@@ -432,6 +433,7 @@ private:
   qint64 last_meas_key_ = std::numeric_limits<qint64>::min();
   cv::Point2f last_ctr_{0,0};
   double last_speed_ = 0.0;
+  bool measurements_frozen_ = false;
 
   struct CalibrationPair {
     int frame_id = -1;

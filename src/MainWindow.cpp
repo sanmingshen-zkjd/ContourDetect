@@ -18,6 +18,7 @@
 #include <QJsonArray>
 #include <QFile>
 #include <QScrollArea>
+#include <QStackedWidget>
 #include <QApplication>
 #include <QScreen>
 #include <QHeaderView>
@@ -681,18 +682,19 @@ void MainWindow::buildUI() {
 
     // Per-view toolbars are created in rebuildSourceViews(), one toolbar per player.
 
+    auto* leftStack = new QStackedWidget(central);
+
     viewsHost_ = new QWidget(this);
     viewsGrid_ = new QGridLayout(viewsHost_);
     viewsGrid_->setContentsMargins(0,0,0,0);
     viewsGrid_->setSpacing(8);
     viewsHost_->setMinimumSize((int)std::round(960 * uiScale), (int)std::round(540 * uiScale));
-    v->addWidget(viewsHost_, 1);
     rebuildSourceViews();
 
     visualDashHost_ = new QWidget(this);
     visualDashGrid_ = new QGridLayout(visualDashHost_);
-    visualDashGrid_->setContentsMargins(0,0,0,0);
-    visualDashGrid_->setSpacing(8);
+    visualDashGrid_->setContentsMargins(2,2,2,2);
+    visualDashGrid_->setSpacing(4);
     leftVisImage_ = new QLabel(visualDashHost_);
     const int visH = (int)std::round(240 * uiScale);
     leftVisImage_->setMinimumSize((int)std::round(320 * uiScale), visH);
@@ -721,9 +723,17 @@ void MainWindow::buildUI() {
     leftMeasureTable_->setSelectionMode(QAbstractItemView::SingleSelection);
     leftMeasureTable_->setMaximumHeight((int)std::round(220 * uiScale));
     leftMeasureTable_->setStyleSheet("QTableWidget{background:#1f2937;color:#e5e7eb;gridline-color:#4b5563;selection-background-color:#2563eb;selection-color:#ffffff;}QHeaderView::section{background:#334155;color:#f8fafc;border:1px solid #475569;padding:5px;font-weight:600;}");
-    visualDashGrid_->addWidget(leftMeasureTable_,2,0,1,3);
-    visualDashHost_->setVisible(false);
-    v->addWidget(visualDashHost_, 1);
+    QFrame* visSep = new QFrame(visualDashHost_);
+    visSep->setFrameShape(QFrame::HLine);
+    visSep->setFrameShadow(QFrame::Plain);
+    visSep->setStyleSheet("color:#475569;background:#475569;");
+    visualDashGrid_->addWidget(visSep,2,0,1,3);
+    visualDashGrid_->addWidget(leftMeasureTable_,3,0,1,3);
+
+    leftStack->addWidget(viewsHost_);
+    leftStack->addWidget(visualDashHost_);
+    leftStack->setCurrentWidget(viewsHost_);
+    v->addWidget(leftStack, 1);
 
     QHBoxLayout* playProgressRow = new QHBoxLayout();
     playProgressRow->addWidget(btnPlayAll_);
@@ -1082,11 +1092,10 @@ void MainWindow::buildUI() {
     actionTabs_->addTab(tabVis, "Visual");
     if (actionTabs_->tabBar()) actionTabs_->tabBar()->hide();
 
-    connect(stepTabs_, &QTabBar::currentChanged, this, [this](int idx){
+    connect(stepTabs_, &QTabBar::currentChanged, this, [this, leftStack](int idx){
       if (actionTabs_) actionTabs_->setCurrentIndex(std::max(0, std::min(idx, actionTabs_->count()-1)));
       const bool visual = (idx == 3);
-      if (viewsHost_) viewsHost_->setVisible(!visual);
-      if (visualDashHost_) visualDashHost_->setVisible(visual);
+      if (leftStack) leftStack->setCurrentWidget(visual ? visualDashHost_ : viewsHost_);
       if (idx == 0) onModeCapture();
       else if (idx == 1) onModeCalibration();
       else if (idx == 2) onModeTracking();
@@ -1644,6 +1653,7 @@ void MainWindow::onPreprocessParamsChanged() {
 }
 
 void MainWindow::onObjectThresholdParamsChanged() {
+  if (track_binary_enabled_ && measurements_frozen_) rebuildMeasurementSeriesFromCurrentSource();
   std::vector<cv::Mat> frames;
   {
     QMutexLocker locker(&frames_mutex_);
@@ -1919,6 +1929,8 @@ void MainWindow::onToggleTrackBinary() {
   tracked_centroids_.clear();
   tracked_contours_.clear();
   next_track_id_ = 1;
+  if (track_binary_enabled_) rebuildMeasurementSeriesFromCurrentSource();
+  else measurements_frozen_ = false;
   logLine(track_binary_enabled_ ? "Binary contour tracking enabled." : "Binary contour tracking disabled.");
   onTick();
 }
@@ -2362,7 +2374,7 @@ void MainWindow::onTick() {
 
   for (const auto& f : preVis) {
     if (f.empty()) continue;
-    updateMeasurementFromFrame(f);
+    if (!measurements_frozen_) updateMeasurementFromFrame(f);
     if (visImageLabel_) {
       QImage qi = matToQImage(f);
       visImageLabel_->setPixmap(QPixmap::fromImage(qi).scaled(visImageLabel_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
@@ -3038,7 +3050,7 @@ void MainWindow::updateMeasurementFromFrame(const cv::Mat& preprocessedFrame) {
 
 void MainWindow::updateHistogramPlot() {
   if (!plotHistogram_ || !cbHistMetric_) return;
-  if (meas_rows_.empty()) { plotHistogram_->graph(0)->setData({}, {}); plotHistogram_->replot(); return; }
+  if (meas_rows_.empty()) { plotHistogram_->clearPlottables(); plotHistogram_->replot(); return; }
   auto pick = [&](const MeasureRow& r)->double {
     const QString m = cbHistMetric_->currentText();
     if (m == "Perimeter") return r.perim;
@@ -3051,18 +3063,25 @@ void MainWindow::updateHistogramPlot() {
   };
   double lo = spHistMin_ ? spHistMin_->value() : -1e9;
   double hi = spHistMax_ ? spHistMax_->value() : 1e9;
+  if (hi <= lo) hi = lo + 1.0;
   const int bins = 20;
   QVector<double> x(bins), y(bins);
   for (int i=0;i<bins;++i) { x[i]=i; y[i]=0; }
   for (const auto& r : meas_rows_) {
     double v = pick(r);
     if (v < lo || v > hi) continue;
-    int b = (hi > lo) ? std::min(bins-1, std::max(0, (int)((v-lo)/(hi-lo)*bins))) : 0;
+    int b = std::min(bins-1, std::max(0, (int)((v-lo)/(hi-lo)*bins)));
     y[b] += 1.0;
   }
-  plotHistogram_->graph(0)->setLineStyle(QCPGraph::lsStepCenter);
-  plotHistogram_->graph(0)->setData(x, y);
-  plotHistogram_->xAxis->setRange(0, bins-1);
+  plotHistogram_->clearPlottables();
+  QCPBars* bars = new QCPBars(plotHistogram_->xAxis, plotHistogram_->yAxis);
+  bars->setWidth(0.85);
+  bars->setPen(QPen(QColor(59,130,246), 1.0));
+  bars->setBrush(QColor(96,165,250,180));
+  bars->setData(x, y);
+  plotHistogram_->xAxis->setLabel("Bins");
+  plotHistogram_->yAxis->setLabel("Count");
+  plotHistogram_->xAxis->setRange(-0.5, bins-0.5);
   plotHistogram_->rescaleAxes(true);
   plotHistogram_->replot();
 }
@@ -3100,52 +3119,153 @@ void MainWindow::refreshTrajectoryPlot() {
 }
 
 
-void MainWindow::updateLeftVisualDashboard() {
-  int curIdx = -1;
-  if (!meas_rows_.empty()) {
-    const qint64 key = (play_end_frame_ > 0 ? play_frame_ : last_capture_ts_ms_);
-    for (int i = (int)meas_rows_.size() - 1; i >= 0; --i) {
-      if (meas_rows_[i].key <= key) { curIdx = i; break; }
+void MainWindow::rebuildMeasurementSeriesFromCurrentSource() {
+  measurements_frozen_ = false;
+  int totalFrames = progressSlider_ ? (progressSlider_->maximum() + 1) : 0;
+  if (totalFrames <= 0) return;
+
+  int srcIdx = -1;
+  {
+    QMutexLocker srcLock(&sources_mutex_);
+    for (int i=0;i<(int)sources_.size();++i) {
+      if (!sources_[i].is_cam && sources_[i].mode_owner==(int)mode_) { srcIdx = i; break; }
     }
-    if (curIdx < 0) curIdx = (int)meas_rows_.size() - 1;
+  }
+  if (srcIdx < 0) return;
+
+  std::vector<cv::Mat> frames(totalFrames);
+  int savedSeq = -1;
+  double savedPos = -1.0;
+  {
+    QMutexLocker srcLock(&sources_mutex_);
+    if (srcIdx >= (int)sources_.size()) return;
+    auto& src = sources_[srcIdx];
+    if (src.is_cam) return;
+    if (src.is_image_seq) {
+      savedSeq = src.seq_idx;
+      for (int i=0;i<totalFrames;++i) {
+        if (i < src.seq_files.size()) frames[i] = cv::imread(src.seq_files[i].toStdString(), cv::IMREAD_COLOR);
+      }
+      src.seq_idx = std::max(0, std::min(savedSeq, std::max(0, totalFrames-1)));
+    } else {
+      if (!src.cap.isOpened()) return;
+      savedPos = src.cap.get(cv::CAP_PROP_POS_FRAMES);
+      for (int i=0;i<totalFrames;++i) {
+        src.cap.set(cv::CAP_PROP_POS_FRAMES, (double)i);
+        src.cap.read(frames[i]);
+      }
+      src.cap.set(cv::CAP_PROP_POS_FRAMES, savedPos);
+    }
   }
 
-  auto fill=[&](QCustomPlot* p, auto getter){
+  meas_rows_.clear();
+  last_meas_key_ = std::numeric_limits<qint64>::min();
+  last_ctr_ = cv::Point2f(0,0);
+  last_speed_ = 0.0;
+
+  for (int i=0;i<totalFrames;++i) {
+    if (frames[i].empty()) continue;
+    cv::Mat f = applyPreprocess(frames[i]);
+    auto contours = detectBinaryContours(f);
+    if (contours.empty()) continue;
+    size_t best = 0; double bestA = 0.0;
+    for (size_t k=0;k<contours.size();++k) { double a=std::abs(cv::contourArea(contours[k])); if (a>bestA){bestA=a; best=k;} }
+    const auto& c = contours[best];
+    cv::Moments mm = cv::moments(c);
+    if (std::abs(mm.m00) < 1e-9) continue;
+    cv::Point2f ctr((float)(mm.m10/mm.m00), (float)(mm.m01/mm.m00));
+    double scale = (mm_per_pixel_ > 0.0) ? mm_per_pixel_ : 1.0;
+    MeasureRow row;
+    row.key = i;
+    row.area = std::abs(cv::contourArea(c)) * scale * scale;
+    row.perim = cv::arcLength(c, true) * scale;
+    cv::RotatedRect rr = cv::minAreaRect(c);
+    row.major = std::max(rr.size.width, rr.size.height) * scale;
+    row.minor = std::min(rr.size.width, rr.size.height) * scale;
+    row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
+    if (meas_rows_.empty()) { row.disp=0; row.speed=0; row.accel=0; }
+    else { row.disp=cv::norm(ctr-last_ctr_) * scale; row.speed=row.disp; row.accel=row.speed-last_speed_; }
+    last_ctr_ = ctr;
+    last_speed_ = row.speed;
+    last_meas_key_ = row.key;
+    meas_rows_.push_back(row);
+  }
+  measurements_frozen_ = true;
+}
+
+void MainWindow::updateLeftVisualDashboard() {
+  const bool realScale = mm_per_pixel_ > 0.0;
+  const QString lenU = realScale ? "mm" : "px";
+  const QString areaU = realScale ? "mm²" : "px²";
+
+  int curIdx = -1;
+  int totalFrames = progressSlider_ ? (progressSlider_->maximum() + 1) : ((play_end_frame_ > 0) ? (int)play_end_frame_ : (int)meas_rows_.size());
+  if (totalFrames <= 0) totalFrames = (int)meas_rows_.size();
+  if (totalFrames > 0) curIdx = std::max(0, std::min((int)play_frame_, totalFrames - 1));
+
+  QVector<double> disp(totalFrames, std::numeric_limits<double>::quiet_NaN());
+  QVector<double> speed(totalFrames, std::numeric_limits<double>::quiet_NaN());
+  QVector<double> area(totalFrames, std::numeric_limits<double>::quiet_NaN());
+  QVector<double> perim(totalFrames, std::numeric_limits<double>::quiet_NaN());
+  QVector<double> circ(totalFrames, std::numeric_limits<double>::quiet_NaN());
+
+  for (const auto& r : meas_rows_) {
+    if (r.key < 0 || r.key >= totalFrames) continue;
+    int i = (int)r.key;
+    disp[i]=r.disp; speed[i]=r.speed; area[i]=r.area; perim[i]=r.perim; circ[i]=r.circ;
+  }
+
+  auto fill=[&](QCustomPlot* p, const QVector<double>& vals, const QString& yLabel){
     if(!p) return;
-    const int n=(int)meas_rows_.size();
-    QVector<double> x(n), y(n);
+    QVector<double> x(vals.size());
     double yMin = 0.0, yMax = 1.0;
-    for(int i=0;i<n;++i){
-      x[i]=i; y[i]=getter(meas_rows_[i]);
-      if (i==0) { yMin = yMax = y[i]; }
-      else { yMin = std::min(yMin, y[i]); yMax = std::max(yMax, y[i]); }
+    bool has=false;
+    for(int i=0;i<vals.size();++i){
+      x[i]=i;
+      if (std::isfinite(vals[i])) {
+        if(!has){ yMin=yMax=vals[i]; has=true; }
+        else { yMin=std::min(yMin, vals[i]); yMax=std::max(yMax, vals[i]); }
+      }
     }
+    if(!has){ yMin=0.0; yMax=1.0; }
+    if(std::abs(yMax-yMin) < 1e-9){ yMin-=1.0; yMax+=1.0; }
     if(p->graphCount()<2){ while(p->graphCount()<2) p->addGraph(); p->graph(1)->setPen(QPen(QColor(239,68,68),1.6)); }
-    p->graph(0)->setData(x,y);
+    p->graph(0)->setData(x, vals);
+    p->graph(1)->setData({}, {});
     if (curIdx >= 0) {
-      QVector<double> cx(2), cy(2);
-      cx[0]=curIdx; cx[1]=curIdx;
-      if (std::abs(yMax-yMin) < 1e-9) { yMin -= 1.0; yMax += 1.0; }
-      cy[0]=yMin; cy[1]=yMax;
-      p->graph(1)->setData(cx,cy);
-    } else {
-      p->graph(1)->setData({}, {});
+      QVector<double> cx(2), cy(2); cx[0]=curIdx; cx[1]=curIdx; cy[0]=yMin; cy[1]=yMax; p->graph(1)->setData(cx,cy);
     }
-    p->rescaleAxes(true);
+    p->xAxis->setLabel("Frame");
+    p->yAxis->setLabel(yLabel);
+    p->xAxis->setRange(0, std::max(1, vals.size()-1));
+    p->yAxis->setRange(yMin, yMax);
     p->replot();
   };
-  fill(leftDispPlot_, [](const MeasureRow& r){return r.disp;});
-  fill(leftSpeedPlot_, [](const MeasureRow& r){return r.speed;});
-  fill(leftAreaPlot_, [](const MeasureRow& r){return r.area;});
-  fill(leftPerimPlot_, [](const MeasureRow& r){return r.perim;});
-  fill(leftCircPlot_, [](const MeasureRow& r){return r.circ;});
+
+  fill(leftDispPlot_, disp, QString("Displacement (%1)").arg(lenU));
+  fill(leftSpeedPlot_, speed, QString("Speed (%1/frame)").arg(lenU));
+  fill(leftAreaPlot_, area, QString("Area (%1)").arg(areaU));
+  fill(leftPerimPlot_, perim, QString("Perimeter (%1)").arg(lenU));
+  fill(leftCircPlot_, circ, "Circularity (-)");
 
   if (leftMeasureTable_) {
-    leftMeasureTable_->setRowCount((int)meas_rows_.size());
-    for (int i=0;i<(int)meas_rows_.size();++i) {
-      const auto& r=meas_rows_[i]; const double sc=(mm_per_pixel_>0.0?mm_per_pixel_:1.0);
-      auto set=[&](int c,double v){ leftMeasureTable_->setItem(i,c,new QTableWidgetItem(QString::number(v,'f',4))); };
-      set(0,r.disp);set(1,r.speed);set(2,r.accel);set(3,r.area);set(4,r.perim);set(5,r.major);set(6,r.minor);set(7,r.circ);set(8,sc);
+    leftMeasureTable_->setHorizontalHeaderLabels({
+      QString("Disp (%1)").arg(lenU), QString("Speed (%1/frame)").arg(lenU), QString("Accel (%1/frame²)").arg(lenU),
+      QString("Area (%1)").arg(areaU), QString("Perimeter (%1)").arg(lenU), QString("Major (%1)").arg(lenU), QString("Minor (%1)").arg(lenU),
+      "Circularity (-)", "Scale (mm/px)"
+    });
+    leftMeasureTable_->setRowCount(totalFrames);
+    auto setNum=[&](int r,int c,double v){ leftMeasureTable_->setItem(r,c,new QTableWidgetItem(std::isfinite(v)?QString::number(v,'f',4):"-")); };
+    for (int i=0;i<totalFrames;++i) {
+      const MeasureRow* rp = nullptr;
+      for (const auto& r : meas_rows_) if (r.key == i) { rp = &r; break; }
+      if (rp) {
+        const double sc=(mm_per_pixel_>0.0?mm_per_pixel_:1.0);
+        setNum(i,0,rp->disp); setNum(i,1,rp->speed); setNum(i,2,rp->accel); setNum(i,3,rp->area); setNum(i,4,rp->perim); setNum(i,5,rp->major); setNum(i,6,rp->minor); setNum(i,7,rp->circ); setNum(i,8,sc);
+      } else {
+        for (int c=0;c<8;++c) setNum(i,c,std::numeric_limits<double>::quiet_NaN());
+        setNum(i,8,(mm_per_pixel_>0.0?mm_per_pixel_:1.0));
+      }
     }
     leftMeasureTable_->clearSelection();
     if (curIdx >= 0 && curIdx < leftMeasureTable_->rowCount()) {
