@@ -1557,6 +1557,20 @@ void MainWindow::onRemoveSource() {
   }
   if (removed <= 0) return;
 
+  // Source removal must reset all Visual/ObjectDefine measurement outputs.
+  meas_rows_.clear();
+  last_meas_key_ = std::numeric_limits<qint64>::min();
+  last_ctr_ = cv::Point2f(0, 0);
+  last_speed_ = 0.0;
+  measurements_frozen_ = false;
+  track_binary_enabled_ = false;
+  tracked_next_id_ = 1;
+  tracked_centers_.clear();
+  tracked_contours_.clear();
+  if (btnTrackBinary_) btnTrackBinary_->setChecked(false);
+  refreshTrajectoryPlot();
+  updateLeftVisualDashboard();
+
   num_cams_ = (int)sources_.size();
   source_enabled_.assign(std::max(0,num_cams_), true);
   // last_frames_ will be populated by CaptureWorker when frames arrive.
