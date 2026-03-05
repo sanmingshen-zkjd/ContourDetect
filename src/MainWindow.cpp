@@ -694,11 +694,14 @@ void MainWindow::buildUI() {
     visualDashGrid_->setContentsMargins(0,0,0,0);
     visualDashGrid_->setSpacing(8);
     leftVisImage_ = new QLabel(visualDashHost_);
-    leftVisImage_->setMinimumSize((int)std::round(320 * uiScale), (int)std::round(240 * uiScale));
+    const int visH = (int)std::round(240 * uiScale);
+    leftVisImage_->setMinimumSize((int)std::round(320 * uiScale), visH);
+    leftVisImage_->setMaximumHeight(visH);
+    leftVisImage_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     leftVisImage_->setAlignment(Qt::AlignCenter);
-    leftVisImage_->setStyleSheet("background:#111;border:1px solid #3a4250;color:#9aa7b8;");
+    leftVisImage_->setStyleSheet("background:#111827;border:1px solid #374151;color:#cbd5e1;");
     leftVisImage_->setText("Image view");
-    auto mkPlot=[&](const QString& y){ QCustomPlot* p=new QCustomPlot(visualDashHost_); p->setMinimumHeight((int)std::round(240 * uiScale)); p->addGraph(); p->xAxis->setLabel("frame"); p->yAxis->setLabel(y); return p; };
+    auto mkPlot=[&](const QString& y){ QCustomPlot* p=new QCustomPlot(visualDashHost_); p->setMinimumHeight(visH); p->setMaximumHeight(visH); p->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed); p->setBackground(QBrush(QColor(17,24,39))); p->xAxis->setBasePen(QPen(QColor(148,163,184))); p->yAxis->setBasePen(QPen(QColor(148,163,184))); p->xAxis->setTickPen(QPen(QColor(148,163,184))); p->yAxis->setTickPen(QPen(QColor(148,163,184))); p->xAxis->setSubTickPen(QPen(QColor(100,116,139))); p->yAxis->setSubTickPen(QPen(QColor(100,116,139))); p->xAxis->setTickLabelColor(QColor(226,232,240)); p->yAxis->setTickLabelColor(QColor(226,232,240)); p->xAxis->setLabelColor(QColor(226,232,240)); p->yAxis->setLabelColor(QColor(226,232,240)); p->addGraph(); p->graph(0)->setPen(QPen(QColor(96,165,250), 2.0)); p->addGraph(); p->graph(1)->setPen(QPen(QColor(239,68,68), 1.6)); p->xAxis->setLabel("frame"); p->yAxis->setLabel(y); return p; };
     leftDispPlot_=mkPlot("Displacement");
     leftSpeedPlot_=mkPlot("Speed");
     leftAreaPlot_=mkPlot("Area");
@@ -714,7 +717,10 @@ void MainWindow::buildUI() {
     leftMeasureTable_->setColumnCount(9);
     leftMeasureTable_->setHorizontalHeaderLabels({"Disp","Speed","Accel","Area","Perimeter","Major","Minor","Circularity","Scale(mm/px)"});
     leftMeasureTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    leftMeasureTable_->setStyleSheet("QTableWidget{background:#1f2937;color:#e5e7eb;gridline-color:#4b5563;selection-background-color:#2563eb;selection-color:#ffffff;}QHeaderView::section{background:#374151;color:#f9fafb;border:1px solid #4b5563;padding:4px;}");
+    leftMeasureTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    leftMeasureTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    leftMeasureTable_->setMaximumHeight((int)std::round(220 * uiScale));
+    leftMeasureTable_->setStyleSheet("QTableWidget{background:#1f2937;color:#e5e7eb;gridline-color:#4b5563;selection-background-color:#2563eb;selection-color:#ffffff;}QHeaderView::section{background:#334155;color:#f8fafc;border:1px solid #475569;padding:5px;font-weight:600;}");
     visualDashGrid_->addWidget(leftMeasureTable_,2,0,1,3);
     visualDashHost_->setVisible(false);
     v->addWidget(visualDashHost_, 1);
@@ -3014,9 +3020,15 @@ void MainWindow::updateMeasurementFromFrame(const cv::Mat& preprocessedFrame) {
   if (key == last_meas_key_) return;
   MeasureRow row;
   row.key = key;
-  row.disp = cv::norm(ctr - last_ctr_) * scale;
-  row.speed = row.disp; // per-frame speed
-  row.accel = row.speed - last_speed_;
+  if (meas_rows_.empty()) {
+    row.disp = 0.0;
+    row.speed = 0.0;
+    row.accel = 0.0;
+  } else {
+    row.disp = cv::norm(ctr - last_ctr_) * scale;
+    row.speed = row.disp; // per-frame speed
+    row.accel = row.speed - last_speed_;
+  }
   row.area = area; row.perim = perim; row.major = major; row.minor = minor; row.circ = circ;
   last_ctr_ = ctr;
   last_speed_ = row.speed;
@@ -3089,18 +3101,56 @@ void MainWindow::refreshTrajectoryPlot() {
 
 
 void MainWindow::updateLeftVisualDashboard() {
-  auto fill=[&](QCustomPlot* p, auto getter){ if(!p) return; int n=(int)meas_rows_.size(); QVector<double> x(n), y(n); for(int i=0;i<n;++i){x[i]=i; y[i]=getter(meas_rows_[i]);} if(p->graphCount()==0) p->addGraph(); p->graph(0)->setData(x,y); p->rescaleAxes(true); p->replot(); };
+  int curIdx = -1;
+  if (!meas_rows_.empty()) {
+    const qint64 key = (play_end_frame_ > 0 ? play_frame_ : last_capture_ts_ms_);
+    for (int i = (int)meas_rows_.size() - 1; i >= 0; --i) {
+      if (meas_rows_[i].key <= key) { curIdx = i; break; }
+    }
+    if (curIdx < 0) curIdx = (int)meas_rows_.size() - 1;
+  }
+
+  auto fill=[&](QCustomPlot* p, auto getter){
+    if(!p) return;
+    const int n=(int)meas_rows_.size();
+    QVector<double> x(n), y(n);
+    double yMin = 0.0, yMax = 1.0;
+    for(int i=0;i<n;++i){
+      x[i]=i; y[i]=getter(meas_rows_[i]);
+      if (i==0) { yMin = yMax = y[i]; }
+      else { yMin = std::min(yMin, y[i]); yMax = std::max(yMax, y[i]); }
+    }
+    if(p->graphCount()<2){ while(p->graphCount()<2) p->addGraph(); p->graph(1)->setPen(QPen(QColor(239,68,68),1.6)); }
+    p->graph(0)->setData(x,y);
+    if (curIdx >= 0) {
+      QVector<double> cx(2), cy(2);
+      cx[0]=curIdx; cx[1]=curIdx;
+      if (std::abs(yMax-yMin) < 1e-9) { yMin -= 1.0; yMax += 1.0; }
+      cy[0]=yMin; cy[1]=yMax;
+      p->graph(1)->setData(cx,cy);
+    } else {
+      p->graph(1)->setData({}, {});
+    }
+    p->rescaleAxes(true);
+    p->replot();
+  };
   fill(leftDispPlot_, [](const MeasureRow& r){return r.disp;});
   fill(leftSpeedPlot_, [](const MeasureRow& r){return r.speed;});
   fill(leftAreaPlot_, [](const MeasureRow& r){return r.area;});
   fill(leftPerimPlot_, [](const MeasureRow& r){return r.perim;});
   fill(leftCircPlot_, [](const MeasureRow& r){return r.circ;});
+
   if (leftMeasureTable_) {
     leftMeasureTable_->setRowCount((int)meas_rows_.size());
     for (int i=0;i<(int)meas_rows_.size();++i) {
       const auto& r=meas_rows_[i]; const double sc=(mm_per_pixel_>0.0?mm_per_pixel_:1.0);
       auto set=[&](int c,double v){ leftMeasureTable_->setItem(i,c,new QTableWidgetItem(QString::number(v,'f',4))); };
       set(0,r.disp);set(1,r.speed);set(2,r.accel);set(3,r.area);set(4,r.perim);set(5,r.major);set(6,r.minor);set(7,r.circ);set(8,sc);
+    }
+    leftMeasureTable_->clearSelection();
+    if (curIdx >= 0 && curIdx < leftMeasureTable_->rowCount()) {
+      leftMeasureTable_->selectRow(curIdx);
+      if (leftMeasureTable_->item(curIdx, 0)) leftMeasureTable_->scrollToItem(leftMeasureTable_->item(curIdx,0), QAbstractItemView::PositionAtCenter);
     }
   }
 }
