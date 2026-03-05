@@ -75,7 +75,8 @@ set(RESOURCE_FILES ./assets/resourcefile.qrc)
 # 添加可执行文件
 add_executable(multicam_rig_toolkit_qt
   src/main.cpp
-  src/MainWindow.h
+  # MainWindow.h contains Q_OBJECT; keep it out of explicit source list to avoid
+  # duplicate automoc symbol generation on MSVC link in some configurations.
   src/MainWindow.cpp
   src/Core.h
   src/Core.cpp
