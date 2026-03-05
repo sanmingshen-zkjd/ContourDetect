@@ -1943,7 +1943,12 @@ void MainWindow::onToggleTrackBinary() {
   tracked_centroids_.clear();
   tracked_contours_.clear();
   next_track_id_ = 1;
-  if (track_binary_enabled_) rebuildMeasurementSeriesFromCurrentSource();
+  if (track_binary_enabled_) {
+    // Build full frame range first so Track can compute all-frame measurements
+    // immediately, without requiring manual playback.
+    updatePlaybackParams();
+    rebuildMeasurementSeriesFromCurrentSource();
+  }
   else measurements_frozen_ = false;
   logLine(track_binary_enabled_ ? "Binary contour tracking enabled." : "Binary contour tracking disabled.");
   onTick();
@@ -3139,7 +3144,7 @@ void MainWindow::refreshTrajectoryPlot() {
 void MainWindow::rebuildMeasurementSeriesFromCurrentSource() {
   measurements_frozen_ = false;
   int totalFrames = progressSlider_ ? (progressSlider_->maximum() + 1) : 0;
-  if (totalFrames <= 0) return;
+  if (totalFrames <= 0 && play_end_frame_ > 0) totalFrames = (int)play_end_frame_;
 
   int srcIdx = -1;
   {
@@ -3154,6 +3159,19 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource() {
     }
   }
   if (srcIdx < 0) return;
+
+  if (totalFrames <= 0) {
+    QMutexLocker srcLock(&sources_mutex_);
+    if (srcIdx >= 0 && srcIdx < (int)sources_.size()) {
+      const auto& src = sources_[srcIdx];
+      if (src.is_image_seq) totalFrames = (int)src.seq_files.size();
+      else if (src.cap.isOpened()) {
+        double fc = src.cap.get(cv::CAP_PROP_FRAME_COUNT);
+        if (fc > 0) totalFrames = (int)fc;
+      }
+    }
+  }
+  if (totalFrames <= 0) return;
 
   std::vector<cv::Mat> frames(totalFrames);
   int savedSeq = -1;
@@ -3185,34 +3203,20 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource() {
   last_ctr_ = cv::Point2f(0,0);
   last_speed_ = 0.0;
 
+  const int64_t savedPlayFrame = play_frame_;
+  if (play_end_frame_ < totalFrames) play_end_frame_ = totalFrames;
+  updateProgressUI(play_frame_, play_end_frame_);
+
   for (int i=0;i<totalFrames;++i) {
     if (frames[i].empty()) continue;
     cv::Mat f = applyPreprocess(frames[i]);
-    auto contours = detectBinaryContours(f);
-    if (contours.empty()) continue;
-    size_t best = 0; double bestA = 0.0;
-    for (size_t k=0;k<contours.size();++k) { double a=std::abs(cv::contourArea(contours[k])); if (a>bestA){bestA=a; best=k;} }
-    const auto& c = contours[best];
-    cv::Moments mm = cv::moments(c);
-    if (std::abs(mm.m00) < 1e-9) continue;
-    cv::Point2f ctr((float)(mm.m10/mm.m00), (float)(mm.m01/mm.m00));
-    double scale = (mm_per_pixel_ > 0.0) ? mm_per_pixel_ : 1.0;
-    MeasureRow row;
-    row.key = i;
-    row.area = std::abs(cv::contourArea(c)) * scale * scale;
-    row.perim = cv::arcLength(c, true) * scale;
-    cv::RotatedRect rr = cv::minAreaRect(c);
-    row.major = std::max(rr.size.width, rr.size.height) * scale;
-    row.minor = std::min(rr.size.width, rr.size.height) * scale;
-    row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
-    if (meas_rows_.empty()) { row.disp=0; row.speed=0; row.accel=0; }
-    else { row.disp=cv::norm(ctr-last_ctr_) * scale; row.speed=row.disp; row.accel=row.speed-last_speed_; }
-    last_ctr_ = ctr;
-    last_speed_ = row.speed;
-    last_meas_key_ = row.key;
-    meas_rows_.push_back(row);
+    play_frame_ = i;
+    updateMeasurementFromFrame(f);
   }
+  play_frame_ = savedPlayFrame;
+  updateProgressUI(play_frame_, play_end_frame_);
   measurements_frozen_ = true;
+  updateLeftVisualDashboard();
 }
 
 void MainWindow::updateLeftVisualDashboard() {
