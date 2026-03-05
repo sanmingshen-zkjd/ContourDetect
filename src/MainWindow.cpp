@@ -629,6 +629,7 @@ void MainWindow::buildUI() {
 
     QWidget* mainPane = new QWidget(central);
     QVBoxLayout* v = new QVBoxLayout(mainPane);
+    v->setSpacing(10);
 
     // Top step guide
     stepTabs_ = new QTabBar(central);
@@ -643,13 +644,12 @@ void MainWindow::buildUI() {
     stepTabs_->setDocumentMode(true);
     stepTabs_->setCurrentIndex(stepToTabIndex(0));
     for (int i=0;i<4;++i) stepDone_[i] = false;
-    stepDone_[0] = true;
     stepTabs_->setStyleSheet(
-      "QTabBar::tab{padding:9px 18px;margin-right:10px;background:#2d333b;color:#dbe5f1;border:1px solid #485468;border-radius:6px;}"
+      "QTabBar::tab{padding:6px 14px;margin-right:14px;min-width:140px;background:#2d333b;color:#dbe5f1;border:1px solid #485468;border-radius:6px;}"
       "QTabBar::tab:selected{background:#3b82f6;color:#ffffff;font-weight:700;}"
       "QTabBar::tab:hover:!selected{background:#374151;}"
       "QTabBar::tab:disabled{background:#1f232b;color:#6b7280;border:1px solid #394150;}"
-      "QTabBar::tab:nth-child(2),QTabBar::tab:nth-child(4),QTabBar::tab:nth-child(6){background:transparent;border:none;color:transparent;padding:0px;margin:0 6px;min-width:34px;}"
+      "QTabBar::tab:nth-child(2),QTabBar::tab:nth-child(4),QTabBar::tab:nth-child(6){background:transparent;border:none;color:transparent;padding:0px;margin:0 10px;min-width:30px;}"
       "QTabBar::tab:nth-child(2):disabled,QTabBar::tab:nth-child(4):disabled,QTabBar::tab:nth-child(6):disabled{background:transparent;border:none;color:transparent;}");
     auto mkArrowBtn = [this]() {
       auto* b = new QToolButton(stepTabs_);
@@ -657,7 +657,7 @@ void MainWindow::buildUI() {
       b->setIconSize(QSize(24, 24));
       b->setAutoRaise(true);
       b->setEnabled(false);
-      b->setStyleSheet("QToolButton{border:none;background:transparent;padding:0px;margin:0px;}QToolButton:disabled{border:none;background:transparent;}");
+      b->setStyleSheet("QToolButton{border:none;background:#1f232b;padding:0px;margin:0px;}QToolButton:disabled{border:none;background:#1f232b;}");
       return b;
     };
     stepTabs_->setTabButton(1, QTabBar::LeftSide, mkArrowBtn());
@@ -1152,7 +1152,7 @@ void MainWindow::buildUI() {
     actionTabs_->addTab(tabVis, "Visual");
     if (actionTabs_->tabBar()) actionTabs_->tabBar()->hide();
 
-    connect(stepTabs_, &QTabBar::currentChanged, this, [this, leftStack](int idx){
+    connect(stepTabs_, &QTabBar::currentChanged, this, [this, leftStack, dock](int idx){
       if (isArrowTab(idx)) {
         int fallback = stepToTabIndex(std::max(0, std::min(3, tabIndexToStep(std::max(0, idx-1)))));
         if (stepTabs_ && stepTabs_->currentIndex() != fallback) stepTabs_->setCurrentIndex(fallback);
@@ -1161,6 +1161,7 @@ void MainWindow::buildUI() {
       const int stepIdx = std::max(0, std::min(3, tabIndexToStep(idx)));
       if (actionTabs_) actionTabs_->setCurrentIndex(std::max(0, std::min(stepIdx, actionTabs_->count()-1)));
       const bool visual = (stepIdx == 3);
+      if (dock) dock->setVisible(!visual);
       if (actionTabs_) actionTabs_->setVisible(!visual);
       if (log_) log_->setVisible(!visual);
       if (leftStack) leftStack->setCurrentWidget(visual ? visualDashHost_ : viewsHost_);
@@ -1456,7 +1457,6 @@ void MainWindow::onAddCamera() {
   bool ok=false;
   int camId = QInputDialog::getInt(this, "Add Camera", "Camera index:", 0, 0, 64, 1, &ok);
   if (!ok) return;
-  stepDone_[0] = true;
   if (mode_ != CAPTURE) {
     QMessageBox::information(this, "Add Camera", "Please switch to Capture tab to add camera sources.");
     return;
@@ -1512,7 +1512,6 @@ void MainWindow::onAddVideo()
     QString last = settings_.value("lastVideoDir", "").toString();
     QString path = QFileDialog::getOpenFileName(this, "Add Video", last,"Video (*.mp4 *.avi *.mov *.mkv);;All (*.*)");
     if (path.isEmpty()) return;
-    stepDone_[0] = true;
 
     if (!sources_.empty()) {
       QMessageBox::information(this, "Add Video", "Monocular mode supports only 1 source.");
@@ -1571,7 +1570,6 @@ void MainWindow::onAddImageSequence()
     QString last = settings_.value("lastImageSeqDir", "").toString();
     QString dir = QFileDialog::getExistingDirectory(this, "Add Image Sequence Folder", last);
     if (dir.isEmpty()) return;
-    stepDone_[0] = true;
 
     QDir qdir(dir);
     QFileInfoList files = qdir.entryInfoList(kImageNameFilters(), QDir::Files, QDir::Name);
@@ -1750,7 +1748,7 @@ bool MainWindow::hasAnySourceInCurrentMode() {
 
 void MainWindow::updateStepAvailability() {
   if (!stepTabs_ || stepTabs_->count() < 7) return;
-  const bool sourceDone = stepDone_[0] || hasAnySourceInCurrentMode();
+  const bool sourceDone = hasAnySourceInCurrentMode();
   stepDone_[0] = sourceDone;
   stepDone_[1] = pre_scale_line_drawn_ && pre_scale_calculated_;
   stepDone_[2] = stepDone_[2] && !meas_rows_.empty();
