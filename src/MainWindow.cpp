@@ -510,12 +510,19 @@ MainWindow::~MainWindow()
 
 void MainWindow::buildUI() {
     const QScreen* screen = QGuiApplication::primaryScreen();
-    const qreal dpiScale = screen ? std::clamp(screen->logicalDotsPerInch() / 96.0, 1.0, 2.25) : 1.0;
-    const qreal geomScale = screen ? std::clamp((qreal)screen->availableGeometry().width() / 1920.0, 0.85, 1.3) : 1.0;
-    const qreal uiScale = std::clamp(dpiScale * geomScale, 0.9, 2.4);
+    const qreal dpiScaleRaw = screen ? (screen->logicalDotsPerInch() / 96.0) : 1.0;
+    const qreal dpiScale = std::clamp(dpiScaleRaw, 0.90, 1.40);
+    const qreal geomScale = screen
+        ? std::clamp(std::sqrt((qreal)screen->availableGeometry().width() * (qreal)screen->availableGeometry().height()
+                               / (1920.0 * 1080.0)), 0.90, 1.20)
+        : 1.0;
+    const qreal uiScale = std::clamp(dpiScale * geomScale, 0.90, 1.60);
 
+    // Font scaling is intentionally gentler than control scaling:
+    // at 1920x1080 and 100% DPI this yields ~12pt.
+    const qreal fontScale = std::clamp(0.75 + 0.20 * dpiScale + 0.05 * geomScale, 0.95, 1.20);
     QFont baseFont = font();
-    baseFont.setPointSizeF(std::max(9.0, 9.5 * uiScale));
+    baseFont.setPointSizeF(12.0 * fontScale);
     setFont(baseFont);
 
     // Top title bar spans the full QMainWindow width (including dock area)
