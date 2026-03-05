@@ -34,12 +34,15 @@
 #include <QMenu>
 #include <QTextDocument>
 #include <QRegularExpression>
+#include <QStandardItemModel>
 #include <QTextStream>
 #include <functional>
 #include <algorithm>
 #include <climits>
 #include <cmath>
 #include <memory>
+#include <set>
+#include <map>
 
 static QString nowStr() {
   return QDateTime::currentDateTime().toString("hh:mm:ss");
@@ -708,6 +711,20 @@ void MainWindow::buildUI() {
     btnAddVideo_->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
     btnAddImgSeq_->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
     btnRemoveSource_->setIcon(style()->standardIcon(QStyle::SP_TrashIcon));
+    topSourceBar->addWidget(btnAddCam_);
+    topSourceBar->addWidget(btnAddVideo_);
+    topSourceBar->addWidget(btnAddImgSeq_);
+    topSourceBar->addWidget(btnRemoveSource_);
+    btnCaptureVisual_ = new QPushButton("Capture", central);
+    btnExportTableCsv_ = new QPushButton("CSV", central);
+    btnExportMp4_ = new QPushButton("MP4", central);
+    btnToggleTable_ = new QPushButton("Table On/Off", central);
+    btnTileLayout_ = new QPushButton("Tile", central);
+    topSourceBar->addWidget(btnCaptureVisual_);
+    topSourceBar->addWidget(btnExportTableCsv_);
+    topSourceBar->addWidget(btnExportMp4_);
+    topSourceBar->addWidget(btnToggleTable_);
+    topSourceBar->addWidget(btnTileLayout_);
     topSourceBar->addStretch(1);
     v->addLayout(topSourceBar);
 
@@ -785,8 +802,8 @@ void MainWindow::buildUI() {
     if (cbPerimMetric_) cbPerimMetric_->setCurrentIndex(4);
     if (cbCircMetric_) cbCircMetric_->setCurrentIndex(7);
     leftMeasureTable_ = new QTableWidget(visualDashHost_);
-    leftMeasureTable_->setColumnCount(9);
-    leftMeasureTable_->setHorizontalHeaderLabels({"Disp","Speed","Accel","Area","Perimeter","Major","Minor","Circularity","Scale(mm/px)"});
+    leftMeasureTable_->setColumnCount(10);
+    leftMeasureTable_->setHorizontalHeaderLabels({"ID","Frame","Disp","Speed","Accel","Area","Perimeter","Major","Minor","Circularity"});
     leftMeasureTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     leftMeasureTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     leftMeasureTable_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -797,21 +814,39 @@ void MainWindow::buildUI() {
     visSep->setFrameShadow(QFrame::Plain);
     visSep->setStyleSheet("color:#475569;background:#475569;");
     QHBoxLayout* visActions = new QHBoxLayout();
-    btnCaptureVisual_ = new QPushButton("Capture Window", visualDashHost_);
-    btnExportTableCsv_ = new QPushButton("Export CSV", visualDashHost_);
-    btnExportMp4_ = new QPushButton("Export MP4", visualDashHost_);
+    cbTargetFilter_ = new QComboBox(visualDashHost_);
+    cbTargetFilter_->setMinimumWidth(220);
+    cbTargetFilter_->setEditable(false);
+    cbTargetFilter_->addItem("All Targets");
+    if (auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model())) {
+      if (auto* item = model->item(0)) item->setFlags(Qt::ItemIsEnabled);
+      connect(model, &QStandardItemModel::itemChanged, this, [this](QStandardItem*){ updateLeftVisualDashboard(); });
+    }
+    connect(cbTargetFilter_, &QComboBox::currentTextChanged, this, [this](const QString&){ updateLeftVisualDashboard(); });
     connect(btnCaptureVisual_, &QPushButton::clicked, this, &MainWindow::onCaptureVisualSnapshot);
     connect(btnExportTableCsv_, &QPushButton::clicked, this, &MainWindow::onExportTableCsv);
     connect(btnExportMp4_, &QPushButton::clicked, this, &MainWindow::onExportVisualMp4);
-    visActions->addWidget(btnCaptureVisual_);
-    visActions->addWidget(btnExportTableCsv_);
-    visActions->addWidget(btnExportMp4_);
+    connect(btnToggleTable_, &QPushButton::clicked, this, [this](){ if (leftMeasureTable_) leftMeasureTable_->setVisible(!leftMeasureTable_->isVisible()); });
+    connect(btnTileLayout_, &QPushButton::clicked, this, [this](){ if (visualDashGrid_) { visualDashGrid_->setRowStretch(0,1); visualDashGrid_->setRowStretch(1,1); visualDashGrid_->setRowStretch(4,2);} if (leftMeasureTable_) leftMeasureTable_->setVisible(true); });
+    visActions->addWidget(new QLabel("Targets", visualDashHost_));
+    visActions->addWidget(cbTargetFilter_);
     visActions->addStretch(1);
     QWidget* visActionHost = new QWidget(visualDashHost_);
     visActionHost->setLayout(visActions);
     visualDashGrid_->addWidget(visActionHost,2,0,1,3);
     visualDashGrid_->addWidget(visSep,3,0,1,3);
     visualDashGrid_->addWidget(leftMeasureTable_,4,0,1,3);
+    connect(leftMeasureTable_, &QTableWidget::itemSelectionChanged, this, [this](){
+      if (!leftMeasureTable_) return;
+      auto sels = leftMeasureTable_->selectedItems();
+      if (sels.isEmpty()) { selected_target_id_ = -1; selected_target_frame_ = -1; updateLeftVisualDashboard(); return; }
+      int r = sels.first()->row();
+      auto* idIt = leftMeasureTable_->item(r,0);
+      auto* frIt = leftMeasureTable_->item(r,1);
+      selected_target_id_ = idIt ? idIt->text().toInt() : -1;
+      selected_target_frame_ = frIt ? frIt->text().toInt() : -1;
+      updateLeftVisualDashboard();
+    });
 
     leftStack->addWidget(viewsHost_);
     leftStack->addWidget(visualDashHost_);
@@ -1666,6 +1701,9 @@ void MainWindow::onRemoveSource() {
 
   // Source removal must reset all Visual/ObjectDefine measurement outputs.
   meas_rows_.clear();
+  target_meas_rows_.clear();
+  selected_target_id_ = -1;
+  selected_target_frame_ = -1;
   pre_scale_line_drawn_ = false;
   pre_scale_calculated_ = false;
   stepDone_[1] = false;
@@ -3371,9 +3409,15 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource(bool showProgress) {
   }
 
   meas_rows_.clear();
+  target_meas_rows_.clear();
   last_meas_key_ = std::numeric_limits<qint64>::min();
   last_ctr_ = cv::Point2f(0,0);
   last_speed_ = 0.0;
+
+  std::unordered_map<int, cv::Point2f> id_last_ctr;
+  std::unordered_map<int, double> id_last_speed;
+  std::unordered_map<int, cv::Point2f> id_prev_centroids;
+  int id_next = 1;
 
   const int64_t savedPlayFrame = play_frame_;
   if (play_end_frame_ < totalFrames) play_end_frame_ = totalFrames;
@@ -3387,6 +3431,43 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource(bool showProgress) {
     }
     if (frames[i].empty()) continue;
     cv::Mat f = applyPreprocess(frames[i]);
+    auto contoursAll = detectBinaryContours(f);
+    std::unordered_map<int, cv::Point2f> id_curr_centroids;
+    const float maxDist = 60.0f;
+    for (const auto& c : contoursAll) {
+      if (c.empty()) continue;
+      cv::Moments mm = cv::moments(c);
+      if (std::abs(mm.m00) < 1e-9) continue;
+      cv::Point2f ctr((float)(mm.m10/mm.m00), (float)(mm.m01/mm.m00));
+      int bestId = -1; float bestD = maxDist;
+      for (const auto& kv : id_prev_centroids) {
+        float d = cv::norm(ctr - kv.second);
+        if (d < bestD) { bestD = d; bestId = kv.first; }
+      }
+      if (bestId < 0) bestId = id_next++;
+      id_curr_centroids[bestId] = ctr;
+      const double scale = (mm_per_pixel_ > 0.0) ? mm_per_pixel_ : 1.0;
+      MeasureRow row;
+      row.key = i;
+      row.area = std::abs(cv::contourArea(c)) * scale * scale;
+      row.perim = cv::arcLength(c, true) * scale;
+      cv::RotatedRect rr = cv::minAreaRect(c);
+      row.major = std::max(rr.size.width, rr.size.height) * scale;
+      row.minor = std::min(rr.size.width, rr.size.height) * scale;
+      row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
+      auto itPrev = id_last_ctr.find(bestId);
+      if (itPrev == id_last_ctr.end()) { row.disp = 0.0; row.speed = 0.0; row.accel = 0.0; }
+      else {
+        row.disp = cv::norm(ctr - itPrev->second) * scale;
+        row.speed = row.disp;
+        row.accel = row.speed - id_last_speed[bestId];
+      }
+      id_last_ctr[bestId] = ctr;
+      id_last_speed[bestId] = row.speed;
+      target_meas_rows_.push_back(TargetMeasureRow{bestId, row});
+    }
+    id_prev_centroids = id_curr_centroids;
+
     play_frame_ = i;
     updateMeasurementFromFrame(f);
   }
@@ -3410,30 +3491,15 @@ void MainWindow::updateLeftVisualDashboard() {
   if (totalFrames <= 0) totalFrames = (int)meas_rows_.size();
   if (totalFrames > 0) curIdx = std::max(0, std::min((int)play_frame_, totalFrames - 1));
 
-  QVector<double> disp(totalFrames, std::numeric_limits<double>::quiet_NaN());
-  QVector<double> speed(totalFrames, std::numeric_limits<double>::quiet_NaN());
-  QVector<double> accel(totalFrames, std::numeric_limits<double>::quiet_NaN());
-  QVector<double> area(totalFrames, std::numeric_limits<double>::quiet_NaN());
-  QVector<double> perim(totalFrames, std::numeric_limits<double>::quiet_NaN());
-  QVector<double> major(totalFrames, std::numeric_limits<double>::quiet_NaN());
-  QVector<double> minor(totalFrames, std::numeric_limits<double>::quiet_NaN());
-  QVector<double> circ(totalFrames, std::numeric_limits<double>::quiet_NaN());
-
-  for (const auto& r : meas_rows_) {
-    if (r.key < 0 || r.key >= totalFrames) continue;
-    int i = (int)r.key;
-    disp[i]=r.disp; speed[i]=r.speed; accel[i]=r.accel; area[i]=r.area; perim[i]=r.perim; major[i]=r.major; minor[i]=r.minor; circ[i]=r.circ;
-  }
-
-  auto metricValues = [&](int idx)->QVector<double> {
-    if (idx == 1) return speed;
-    if (idx == 2) return accel;
-    if (idx == 3) return area;
-    if (idx == 4) return perim;
-    if (idx == 5) return major;
-    if (idx == 6) return minor;
-    if (idx == 7) return circ;
-    return disp;
+  auto metricOf = [&](const MeasureRow& r, int idx)->double {
+    if (idx == 1) return r.speed;
+    if (idx == 2) return r.accel;
+    if (idx == 3) return r.area;
+    if (idx == 4) return r.perim;
+    if (idx == 5) return r.major;
+    if (idx == 6) return r.minor;
+    if (idx == 7) return r.circ;
+    return r.disp;
   };
   auto metricLabel = [&](int idx)->QString {
     if (idx == 1) return QString("Speed (%1/frame)").arg(lenU);
@@ -3446,62 +3512,139 @@ void MainWindow::updateLeftVisualDashboard() {
     return QString("Displacement (%1)").arg(lenU);
   };
 
-  auto fill=[&](QCustomPlot* p, const QVector<double>& vals, const QString& yLabel){
+  std::set<int> ids;
+  for (const auto& tr : target_meas_rows_) ids.insert(tr.id);
+  if (ids.empty() && !meas_rows_.empty()) ids.insert(0);
+
+  if (cbTargetFilter_) {
+    auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model());
+    if (model) {
+      std::map<int, Qt::CheckState> old;
+      for (int i=1;i<model->rowCount();++i) {
+        auto* it = model->item(i);
+        if (!it) continue;
+        bool ok=false;
+        int id = it->data(Qt::UserRole).toInt(&ok);
+        if (ok) old[id] = (Qt::CheckState)it->checkState();
+      }
+      model->blockSignals(true);
+      while (model->rowCount() > 1) model->removeRow(1);
+      for (int id : ids) {
+        auto* it = new QStandardItem(QString("ID %1").arg(id));
+        it->setData(id, Qt::UserRole);
+        it->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        it->setCheckState(old.count(id) ? old[id] : Qt::Checked);
+        model->appendRow(it);
+      }
+      model->blockSignals(false);
+    }
+  }
+
+  std::set<int> showIds;
+  if (cbTargetFilter_) {
+    if (auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model())) {
+      for (int i=1;i<model->rowCount();++i) {
+        auto* it = model->item(i);
+        if (it && it->checkState() == Qt::Checked) showIds.insert(it->data(Qt::UserRole).toInt());
+      }
+    }
+  }
+  if (showIds.empty()) showIds = ids;
+
+  auto fill=[&](QCustomPlot* p, int metricIdx, const QString& yLabel){
     if(!p) return;
-    QVector<double> x(vals.size());
     double yMin = 0.0, yMax = 1.0;
     bool has=false;
-    for(int i=0;i<vals.size();++i){
-      x[i]=i;
-      if (std::isfinite(vals[i])) {
-        if(!has){ yMin=yMax=vals[i]; has=true; }
-        else { yMin=std::min(yMin, vals[i]); yMax=std::max(yMax, vals[i]); }
+    p->clearGraphs();
+    int gi = 0;
+    for (int id : showIds) {
+      QVector<double> x, y;
+      if (!target_meas_rows_.empty()) {
+        for (const auto& tr : target_meas_rows_) {
+          if (tr.id != id) continue;
+          x.push_back((double)tr.m.key);
+          double v = metricOf(tr.m, metricIdx);
+          y.push_back(v);
+          if (std::isfinite(v)) {
+            if (!has) { yMin = yMax = v; has = true; }
+            else { yMin = std::min(yMin, v); yMax = std::max(yMax, v); }
+          }
+        }
+      } else {
+        for (const auto& r : meas_rows_) {
+          x.push_back((double)r.key);
+          double v = metricOf(r, metricIdx);
+          y.push_back(v);
+          if (std::isfinite(v)) {
+            if (!has) { yMin = yMax = v; has = true; }
+            else { yMin = std::min(yMin, v); yMax = std::max(yMax, v); }
+          }
+        }
       }
+      p->addGraph();
+      QColor c = QColor::fromHsv((id*57)%360, 180, 230);
+      p->graph(gi)->setPen(QPen(c, 2.0));
+      p->graph(gi)->setData(x, y);
+      gi++;
     }
     if(!has){ yMin=0.0; yMax=1.0; }
     if(std::abs(yMax-yMin) < 1e-9){ yMin-=1.0; yMax+=1.0; }
-    if(p->graphCount()<2){ while(p->graphCount()<2) p->addGraph(); p->graph(1)->setPen(QPen(QColor(239,68,68),1.6)); }
-    p->graph(0)->setData(x, vals);
-    p->graph(1)->setData({}, {});
+    p->addGraph();
+    p->graph(gi)->setPen(QPen(QColor(239,68,68),1.6));
+    p->graph(gi)->setData({}, {});
     if (curIdx >= 0) {
-      QVector<double> cx(2), cy(2); cx[0]=curIdx; cx[1]=curIdx; cy[0]=yMin; cy[1]=yMax; p->graph(1)->setData(cx,cy);
+      QVector<double> cx(2), cy(2); cx[0]=curIdx; cx[1]=curIdx; cy[0]=yMin; cy[1]=yMax; p->graph(gi)->setData(cx,cy);
+    }
+    if (selected_target_id_ >= 0 && selected_target_frame_ >= 0) {
+      p->addGraph();
+      p->graph(gi+1)->setLineStyle(QCPGraph::lsNone);
+      p->graph(gi+1)->setScatterStyle(QCPScatterStyle(QCPScatterStyle::ssDisc, QColor(255,200,0), QColor(255,230,0), 9));
+      for (const auto& tr : target_meas_rows_) {
+        if (tr.id == selected_target_id_ && tr.m.key == selected_target_frame_) {
+          p->graph(gi+1)->setData(QVector<double>{(double)selected_target_frame_}, QVector<double>{metricOf(tr.m, metricIdx)});
+          break;
+        }
+      }
     }
     p->xAxis->setLabel("Frame");
     p->yAxis->setLabel(yLabel);
-    p->xAxis->setRange(0, std::max(1, vals.size()-1));
+    p->xAxis->setRange(0, std::max(1, totalFrames-1));
     p->yAxis->setRange(yMin, yMax);
     p->replot();
   };
 
-  fill(leftDispPlot_, metricValues(cbDispMetric_ ? cbDispMetric_->currentIndex() : 0), metricLabel(cbDispMetric_ ? cbDispMetric_->currentIndex() : 0));
-  fill(leftSpeedPlot_, metricValues(cbSpeedMetric_ ? cbSpeedMetric_->currentIndex() : 1), metricLabel(cbSpeedMetric_ ? cbSpeedMetric_->currentIndex() : 1));
-  fill(leftAreaPlot_, metricValues(cbAreaMetric_ ? cbAreaMetric_->currentIndex() : 3), metricLabel(cbAreaMetric_ ? cbAreaMetric_->currentIndex() : 3));
-  fill(leftPerimPlot_, metricValues(cbPerimMetric_ ? cbPerimMetric_->currentIndex() : 4), metricLabel(cbPerimMetric_ ? cbPerimMetric_->currentIndex() : 4));
-  fill(leftCircPlot_, metricValues(cbCircMetric_ ? cbCircMetric_->currentIndex() : 7), metricLabel(cbCircMetric_ ? cbCircMetric_->currentIndex() : 7));
+  fill(leftDispPlot_, cbDispMetric_ ? cbDispMetric_->currentIndex() : 0, metricLabel(cbDispMetric_ ? cbDispMetric_->currentIndex() : 0));
+  fill(leftSpeedPlot_, cbSpeedMetric_ ? cbSpeedMetric_->currentIndex() : 1, metricLabel(cbSpeedMetric_ ? cbSpeedMetric_->currentIndex() : 1));
+  fill(leftAreaPlot_, cbAreaMetric_ ? cbAreaMetric_->currentIndex() : 3, metricLabel(cbAreaMetric_ ? cbAreaMetric_->currentIndex() : 3));
+  fill(leftPerimPlot_, cbPerimMetric_ ? cbPerimMetric_->currentIndex() : 4, metricLabel(cbPerimMetric_ ? cbPerimMetric_->currentIndex() : 4));
+  fill(leftCircPlot_, cbCircMetric_ ? cbCircMetric_->currentIndex() : 7, metricLabel(cbCircMetric_ ? cbCircMetric_->currentIndex() : 7));
 
   if (leftMeasureTable_) {
-    leftMeasureTable_->setHorizontalHeaderLabels({
+    leftMeasureTable_->setHorizontalHeaderLabels({"ID","Frame",
       QString("Disp (%1)").arg(lenU), QString("Speed (%1/frame)").arg(lenU), QString("Accel (%1/frame²)").arg(lenU),
-      QString("Area (%1)").arg(areaU), QString("Perimeter (%1)").arg(lenU), QString("Major (%1)").arg(lenU), QString("Minor (%1)").arg(lenU),
-      "Circularity (-)", "Scale (mm/px)"
-    });
-    leftMeasureTable_->setRowCount(totalFrames);
-    auto setNum=[&](int r,int c,double v){ leftMeasureTable_->setItem(r,c,new QTableWidgetItem(std::isfinite(v)?QString::number(v,'f',4):"-")); };
-    for (int i=0;i<totalFrames;++i) {
-      const MeasureRow* rp = nullptr;
-      for (const auto& r : meas_rows_) if (r.key == i) { rp = &r; break; }
-      if (rp) {
-        const double sc=(mm_per_pixel_>0.0?mm_per_pixel_:1.0);
-        setNum(i,0,rp->disp); setNum(i,1,rp->speed); setNum(i,2,rp->accel); setNum(i,3,rp->area); setNum(i,4,rp->perim); setNum(i,5,rp->major); setNum(i,6,rp->minor); setNum(i,7,rp->circ); setNum(i,8,sc);
-      } else {
-        for (int c=0;c<8;++c) setNum(i,c,std::numeric_limits<double>::quiet_NaN());
-        setNum(i,8,(mm_per_pixel_>0.0?mm_per_pixel_:1.0));
-      }
+      QString("Area (%1)").arg(areaU), QString("Perimeter (%1)").arg(lenU), QString("Major (%1)").arg(lenU), QString("Minor (%1)").arg(lenU), "Circularity (-)"});
+    std::vector<TargetMeasureRow> rows = target_meas_rows_;
+    if (rows.empty()) {
+      for (const auto& r : meas_rows_) rows.push_back(TargetMeasureRow{0, r});
     }
-    leftMeasureTable_->clearSelection();
-    if (curIdx >= 0 && curIdx < leftMeasureTable_->rowCount()) {
-      leftMeasureTable_->selectRow(curIdx);
-      if (leftMeasureTable_->item(curIdx, 0)) leftMeasureTable_->scrollToItem(leftMeasureTable_->item(curIdx,0), QAbstractItemView::PositionAtCenter);
+    std::sort(rows.begin(), rows.end(), [](const TargetMeasureRow& a, const TargetMeasureRow& b){
+      if (a.m.key != b.m.key) return a.m.key < b.m.key;
+      return a.id < b.id;
+    });
+    leftMeasureTable_->setRowCount((int)rows.size());
+    auto setTxt=[&](int r,int c,const QString& v){ leftMeasureTable_->setItem(r,c,new QTableWidgetItem(v)); };
+    for (int i=0;i<(int)rows.size();++i) {
+      const auto& t = rows[i];
+      setTxt(i,0,QString::number(t.id));
+      setTxt(i,1,QString::number(t.m.key));
+      setTxt(i,2,QString::number(t.m.disp,'f',4));
+      setTxt(i,3,QString::number(t.m.speed,'f',4));
+      setTxt(i,4,QString::number(t.m.accel,'f',4));
+      setTxt(i,5,QString::number(t.m.area,'f',4));
+      setTxt(i,6,QString::number(t.m.perim,'f',4));
+      setTxt(i,7,QString::number(t.m.major,'f',4));
+      setTxt(i,8,QString::number(t.m.minor,'f',4));
+      setTxt(i,9,QString::number(t.m.circ,'f',4));
     }
   }
 }
@@ -3543,14 +3686,14 @@ void MainWindow::onExportTableCsv() {
     auto* hi = leftMeasureTable_->horizontalHeaderItem(c);
     headers << (hi ? hi->text() : QString("Col%1").arg(c));
   }
-  ts << "Frame," << headers.join(',') << "\n";
+  ts << headers.join(',') << "\n";
   for (int r=0;r<leftMeasureTable_->rowCount();++r) {
-    ts << r;
     for (int c=0;c<leftMeasureTable_->columnCount();++c) {
       auto* it = leftMeasureTable_->item(r,c);
       QString v = it ? it->text() : "";
       if (v.contains(',')) v = QString("\"") + v + "\"";
-      ts << ',' << v;
+      if (c > 0) ts << ',';
+      ts << v;
     }
     ts << "\n";
   }

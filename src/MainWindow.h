@@ -438,7 +438,9 @@ private:
   std::unordered_map<int, cv::Point2f> tracked_centroids_;
   std::unordered_map<int, std::vector<cv::Point>> tracked_contours_;
   struct MeasureRow { double disp=0, speed=0, accel=0, area=0, perim=0, major=0, minor=0, circ=0; qint64 key=0; };
+  struct TargetMeasureRow { int id=-1; MeasureRow m; };
   std::vector<MeasureRow> meas_rows_;
+  std::vector<TargetMeasureRow> target_meas_rows_;
   qint64 last_meas_key_ = std::numeric_limits<qint64>::min();
   cv::Point2f last_ctr_{0,0};
   double last_speed_ = 0.0;
@@ -469,10 +471,15 @@ private:
   QComboBox* cbAreaMetric_=nullptr;
   QComboBox* cbPerimMetric_=nullptr;
   QComboBox* cbCircMetric_=nullptr;
+  QComboBox* cbTargetFilter_=nullptr;
   QPushButton* btnCaptureVisual_=nullptr;
   QPushButton* btnExportTableCsv_=nullptr;
   QPushButton* btnExportMp4_=nullptr;
+  QPushButton* btnToggleTable_=nullptr;
+  QPushButton* btnTileLayout_=nullptr;
   QTableWidget* leftMeasureTable_=nullptr;
+  int selected_target_id_ = -1;
+  int selected_target_frame_ = -1;
 
   // Timer (UI refresh)
   QTimer timer_;
