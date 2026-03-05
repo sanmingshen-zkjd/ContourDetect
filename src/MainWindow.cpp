@@ -3028,7 +3028,10 @@ void MainWindow::updateMeasurementFromFrame(const cv::Mat& preprocessedFrame) {
   double major = std::max(rr.size.width, rr.size.height) * scale;
   double minor = std::min(rr.size.width, rr.size.height) * scale;
   double circ = (perim > 1e-9) ? (4.0 * std::acos(-1.0) * area / (perim * perim)) : 0.0;
-  qint64 key = (play_end_frame_ > 0 ? play_frame_ : last_capture_ts_ms_);
+  qint64 key = last_capture_ts_ms_;
+  if ((progressSlider_ && progressSlider_->maximum() > 0) || play_end_frame_ > 0) {
+    key = std::max<qint64>(0, play_frame_);
+  }
   if (key == last_meas_key_) return;
   MeasureRow row;
   row.key = key;
@@ -3129,6 +3132,11 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource() {
     QMutexLocker srcLock(&sources_mutex_);
     for (int i=0;i<(int)sources_.size();++i) {
       if (!sources_[i].is_cam && sources_[i].mode_owner==(int)mode_) { srcIdx = i; break; }
+    }
+    if (srcIdx < 0) {
+      for (int i=0;i<(int)sources_.size();++i) {
+        if (!sources_[i].is_cam) { srcIdx = i; break; }
+      }
     }
   }
   if (srcIdx < 0) return;
