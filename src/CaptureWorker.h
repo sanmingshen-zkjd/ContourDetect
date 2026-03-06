@@ -8,6 +8,7 @@
 #include "MainWindow.h" // for InputSource
 #include "Types.h"
 #include <QMutex>
+#include <cmath>
 
 
 class CaptureWorker : public QObject {
@@ -123,7 +124,14 @@ private slots:
 
           const int64_t expectedPos = sync_mode_
             ? std::max<int64_t>(0, cur_frame_)
-            : std::max<int64_t>(0, (int64_t)std::llround(s.cap.get(cv::CAP_PROP_POS_FRAMES)));
+            : std::max<int64_t>(0, (int64_t)s.seq_idx);
+
+          if (!sync_mode_ && !s.is_cam && s.cap.isOpened()) {
+            double capPos = s.cap.get(cv::CAP_PROP_POS_FRAMES);
+            if (std::isfinite(capPos) && std::llround(capPos) != expectedPos) {
+              s.cap.set(cv::CAP_PROP_POS_FRAMES, (double)expectedPos);
+            }
+          }
 
           if (!s.cap.read(f) || f.empty()) {
             // Some containers/codecs can return empty frames after seek/start.
@@ -141,6 +149,10 @@ private slots:
                 }
               }
             }
+          }
+          if (!f.empty()) {
+            if (sync_mode_) s.seq_idx = (int)(std::max<int64_t>(0, cur_frame_) + 1);
+            else if (!s.is_cam) s.seq_idx = (int)(expectedPos + 1);
           }
         }
 

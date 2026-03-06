@@ -39,6 +39,7 @@
 #include <QTextStream>
 #include <functional>
 #include <algorithm>
+#include <array>
 #include <climits>
 #include <cmath>
 #include <memory>
@@ -560,7 +561,7 @@ MainWindow::MainWindow(const std::vector<InputSource>& sources,
     last_frames_.resize(std::max(0,num_cams_));
     buildUI();
     connect(&timer_, &QTimer::timeout, this, &MainWindow::onTick);
-    timer_.start(33);
+    timer_.start(std::max(1, (int)std::lround(1000.0 / std::max(1.0, play_fps_))));
 
     // Start capture/solve threads
     captureWorker_ = new CaptureWorker(&sources_, &source_enabled_, &last_frames_, &sources_mutex_, 33);
@@ -1033,7 +1034,6 @@ void MainWindow::buildUI() {
     QWidget* tabCal = new QWidget(actionTabs_);
     QVBoxLayout* calv = new QVBoxLayout(tabCal);
 
-    calv->addWidget(new QLabel("Step 1: Channel", tabCal));
     QGroupBox* gbColor = new QGroupBox("Color", tabCal);
     QVBoxLayout* colorLayout = new QVBoxLayout(gbColor);
     cbPreColor_ = new QComboBox(gbColor);
@@ -1043,7 +1043,6 @@ void MainWindow::buildUI() {
     colorLayout->addWidget(cbPreColor_);
     gbColor->setLayout(colorLayout);
 
-    calv->addWidget(new QLabel("Step 2: B&C", tabCal));
     QGroupBox* gbBC = new QGroupBox("Brightness / Contrast", tabCal);
     QGridLayout* bcLayout = new QGridLayout(gbBC);
     QLabel* lblB = new QLabel("Brightness", gbBC);
@@ -1073,18 +1072,18 @@ void MainWindow::buildUI() {
     bcLayout->addWidget(lblC, 1, 0);
     bcLayout->addWidget(slContrast_, 1, 1);
     bcLayout->addWidget(spContrast_, 1, 2);
+    btnPreAuto_ = new QPushButton("Auto", gbBC);
+    bcLayout->addWidget(btnPreAuto_, 2, 2, Qt::AlignRight);
     bcLayout->setHorizontalSpacing(10);
     bcLayout->setColumnStretch(1, 1);
     gbBC->setLayout(bcLayout);
 
-    btnPreAuto_ = new QPushButton("Auto", tabCal);
     lblPreprocessHint_ = new QLabel("Apply color mode + brightness/contrast to the live view.", tabCal);
     lblCaptured_ = new QLabel("Captured: 0", tabCal);
     lblScaleInfo_ = new QLabel("Scale: not calibrated", tabCal);
 
     calv->addWidget(gbColor);
     calv->addWidget(gbBC);
-    calv->addWidget(btnPreAuto_);
     calv->addWidget(lblPreprocessHint_);
 
     calv->addWidget(new QLabel("Step 3: Scale Calibration", tabCal));
@@ -2357,15 +2356,19 @@ void MainWindow::onAnalyzeParticles() {
   InputSource& src = sources_[srcIdx];
   const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
 
-  QProgressDialog progress("Analyzing all frames...", "", 0, totalFrames, this);
-  progress.setWindowModality(Qt::WindowModal);
-  progress.setCancelButton(nullptr);
+  QProgressDialog progress("Analyzing all frames...", "Cancel", 0, totalFrames, this);
+  progress.setWindowModality(Qt::ApplicationModal);
   progress.setMinimumDuration(0);
+  progress.setAutoClose(false);
+  progress.setAutoReset(false);
 
+  int processedFrames = 0;
+  bool canceled = false;
   for (int i=0;i<totalFrames;++i) {
     progress.setValue(i);
     progress.setLabelText(QString("Analyze Particles... %1/%2").arg(i+1).arg(totalFrames));
     qApp->processEvents();
+    if (progress.wasCanceled()) { canceled = true; break; }
 
     cv::Mat f;
     if (!src.is_image_seq) {
@@ -2395,9 +2398,10 @@ void MainWindow::onAnalyzeParticles() {
       analyzed_measures_by_frame_[i].push_back(AnalyzedContourMeasure{c, row});
       target_meas_rows_.push_back(TargetMeasureRow{-1, row});
     }
+    processedFrames = i + 1;
   }
 
-  progress.setValue(totalFrames);
+  progress.setValue(processedFrames);
   if ((int)play_frame_ >= 0 && (int)play_frame_ < (int)analyzed_contours_by_frame_.size()) {
     analyzed_contours_ = analyzed_contours_by_frame_[(int)play_frame_];
   }
@@ -2408,7 +2412,7 @@ void MainWindow::onAnalyzeParticles() {
   updateHistogramPlot();
   updateLeftVisualDashboard();
   onTick();
-  logLine(QString("Analyze Particles: processed %1 frames.").arg(totalFrames));
+  logLine(QString("Analyze Particles: processed %1/%2 frames%3.").arg(processedFrames).arg(totalFrames).arg(canceled ? " (canceled)" : ""));
 }
 
 void MainWindow::onToggleTrackBinary() {
@@ -2557,6 +2561,49 @@ void MainWindow::onToggleTrackBinary() {
   }
 
   if (!newTrackedRows.empty()) {
+    // Apply tiered smoothing:
+    // 1st-order geometry metrics (disp/area/perim/major/minor/circ): median(3)
+    // 2nd-order speed: EMA(alpha=0.35)
+    // 3rd-order acceleration: EMA(alpha=0.20)
+    std::unordered_map<int, std::vector<size_t>> idToIdx;
+    for (size_t k=0;k<newTrackedRows.size();++k) idToIdx[newTrackedRows[k].id].push_back(k);
+    auto median3 = [](double a, double b, double c)->double {
+      std::array<double,3> v{a,b,c};
+      std::sort(v.begin(), v.end());
+      return v[1];
+    };
+    for (auto& kv : idToIdx) {
+      auto& idxs = kv.second;
+      if (idxs.empty()) continue;
+      auto medFilter = [&](auto getter, auto setter) {
+        if (idxs.size() < 3) return;
+        std::vector<double> src(idxs.size()), out(idxs.size());
+        for (size_t t=0;t<idxs.size();++t) src[t] = getter(newTrackedRows[idxs[t]].m);
+        out = src;
+        for (size_t t=1;t+1<idxs.size();++t) out[t] = median3(src[t-1], src[t], src[t+1]);
+        for (size_t t=0;t<idxs.size();++t) setter(newTrackedRows[idxs[t]].m, out[t]);
+      };
+      medFilter([](const MeasureRow& r){ return r.disp; }, [](MeasureRow& r,double v){ r.disp=v; });
+      medFilter([](const MeasureRow& r){ return r.area; }, [](MeasureRow& r,double v){ r.area=v; });
+      medFilter([](const MeasureRow& r){ return r.perim; }, [](MeasureRow& r,double v){ r.perim=v; });
+      medFilter([](const MeasureRow& r){ return r.major; }, [](MeasureRow& r,double v){ r.major=v; });
+      medFilter([](const MeasureRow& r){ return r.minor; }, [](MeasureRow& r,double v){ r.minor=v; });
+      medFilter([](const MeasureRow& r){ return r.circ; }, [](MeasureRow& r,double v){ r.circ=v; });
+
+      const double alphaSpeed = 0.35;
+      for (size_t t=1;t<idxs.size();++t) {
+        auto& cur = newTrackedRows[idxs[t]].m;
+        const auto& prev = newTrackedRows[idxs[t-1]].m;
+        cur.speed = alphaSpeed * cur.speed + (1.0 - alphaSpeed) * prev.speed;
+      }
+      const double alphaAccel = 0.20;
+      for (size_t t=1;t<idxs.size();++t) {
+        auto& cur = newTrackedRows[idxs[t]].m;
+        const auto& prev = newTrackedRows[idxs[t-1]].m;
+        cur.accel = alphaAccel * cur.accel + (1.0 - alphaAccel) * prev.accel;
+      }
+    }
+
     target_meas_rows_ = std::move(newTrackedRows);
     tracked_contours_by_frame_ = std::move(newTrackedContours);
   }
@@ -3598,7 +3645,8 @@ void MainWindow::onFramesFromWorker(FramePack frames, qint64 capture_ts_ms) {
         break;
       }
       if (!s.cap.isOpened()) continue;
-      framePos = std::max<int64_t>(0, (int64_t)std::llround(s.cap.get(cv::CAP_PROP_POS_FRAMES)) - 1);
+      if (s.seq_idx > 0) framePos = std::max<int64_t>(0, (int64_t)s.seq_idx - 1);
+      else framePos = std::max<int64_t>(0, (int64_t)std::llround(s.cap.get(cv::CAP_PROP_POS_FRAMES)) - 1);
       double fc = s.cap.get(cv::CAP_PROP_FRAME_COUNT);
       if (frameEnd <= 0 && fc > 0) frameEnd = (int64_t)fc;
       break;
@@ -4518,7 +4566,9 @@ void MainWindow::stepAllVideos(int delta) {
           if (cnt > 0) target = std::min<int64_t>(target, std::max<int64_t>(0, (int64_t)std::llround(cnt)-1));
         }
         src.cap.set(cv::CAP_PROP_POS_FRAMES, (double)target);
+        src.seq_idx = (int)target;
         src.cap.read(f);
+        if (!f.empty()) src.seq_idx = (int)target + 1;
       }
       if (!f.empty()) {
         // If Detect-All generated a visualized frame for this source/frame, reuse it
@@ -4596,6 +4646,7 @@ void MainWindow::onProgressSliderReleased() {
       }
       if (!src.cap.isOpened()) continue;
       src.cap.set(cv::CAP_PROP_POS_FRAMES, (double)target);
+      src.seq_idx = target;
     }
   }
   play_frame_ = target;
@@ -4652,6 +4703,7 @@ void MainWindow::onPlayAll() {
         if (!src.seq_files.isEmpty()) src.seq_idx = std::max(0, std::min((int)play_frame_, (int)src.seq_files.size()-1));
       } else if (src.cap.isOpened()) {
         src.cap.set(cv::CAP_PROP_POS_FRAMES, (double)std::max<int64_t>(0, play_frame_));
+        src.seq_idx = (int)std::max<int64_t>(0, play_frame_);
       }
     }
   }
@@ -4666,7 +4718,7 @@ void MainWindow::onPlayAll() {
   //    lblPlayState_->setText("State: PLAY (SYNC)");
 
   updatePlaybackParams();
-  timer_.start(33);
+  timer_.start(std::max(1, (int)std::lround(1000.0 / std::max(1.0, play_fps_))));
   QMetaObject::invokeMethod(captureWorker_, "start", Qt::QueuedConnection);
 }
 
