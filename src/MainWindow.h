@@ -234,6 +234,9 @@ private:
   void updateHistogramPlot();
   void refreshRegionTable();
   void updateLeftVisualDashboard();
+  double metricValueForHist(const MeasureRow& r, const QString& metric) const;
+  bool passesConfirmedHistogramRules(const MeasureRow& r) const;
+  void configureHistogramEditorsForMetric(const QString& metric);
   void rebuildMeasurementSeriesFromCurrentSource(bool showProgress=false);
   void savePlotAsBmp(QCustomPlot* plot, const QString& nameHint);
   void onExportTableCsv();
@@ -418,6 +421,7 @@ private:
   QDoubleSpinBox* spHistMin_=nullptr;
   QDoubleSpinBox* spHistMax_=nullptr;
   QCustomPlot* plotHistogram_=nullptr;
+  QPushButton* btnHistApply_=nullptr;
   QPushButton* btnAddVisChart_=nullptr;
   QVBoxLayout* visChartsLayout_=nullptr;
   struct VisChartConfig {
@@ -499,6 +503,7 @@ private:
   QComboBox* cbPerimMetric_=nullptr;
   QComboBox* cbCircMetric_=nullptr;
   QComboBox* cbTargetFilter_=nullptr;
+  QComboBox* cbXAxisMode_=nullptr;
   QPushButton* btnCaptureVisual_=nullptr;
   QPushButton* btnExportTableCsv_=nullptr;
   QPushButton* btnExportMp4_=nullptr;
@@ -506,8 +511,14 @@ private:
   QPushButton* btnTileLayout_=nullptr;
   QTableWidget* leftMeasureTable_=nullptr;
   int selected_target_id_ = -1;
+  QSpinBox* spSmoothMedianWindow_=nullptr;
+  QDoubleSpinBox* spSmoothAlphaSpeed_=nullptr;
+  QDoubleSpinBox* spSmoothAlphaAccel_=nullptr;
   int selected_target_frame_ = -1;
 
   // Timer (UI refresh)
+  std::map<QString, std::pair<double,double>> confirmed_hist_rules_;
+  bool suppress_histogram_updates_ = false;
+
   QTimer timer_;
 };

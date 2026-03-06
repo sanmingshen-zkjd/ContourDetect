@@ -814,6 +814,11 @@ void MainWindow::buildUI() {
     }
     topSourceBar->addWidget(new QLabel("Targets", central));
     topSourceBar->addWidget(cbTargetFilter_);
+    cbXAxisMode_ = new QComboBox(central);
+    cbXAxisMode_->addItems({"Time (s)", "Frame"});
+    cbXAxisMode_->setCurrentIndex(0);
+    topSourceBar->addWidget(new QLabel("X", central));
+    topSourceBar->addWidget(cbXAxisMode_);
     btnCaptureVisual_ = new QPushButton("Snap To BMP", central);
     btnExportTableCsv_ = new QPushButton("Export To CSV", central);
     btnExportMp4_ = new QPushButton("Export All To MP4", central);
@@ -824,6 +829,7 @@ void MainWindow::buildUI() {
     btnExportTableCsv_->setVisible(false);
     btnExportMp4_->setVisible(false);
     if (cbTargetFilter_) cbTargetFilter_->setVisible(false);
+    if (cbXAxisMode_) cbXAxisMode_->setVisible(false);
     v->addLayout(topSourceBar);
 
     QFrame* topSep = new QFrame(central);
@@ -927,6 +933,8 @@ void MainWindow::buildUI() {
       selected_target_frame_ = frIt ? frIt->text().toInt() : -1;
       updateLeftVisualDashboard();
     });
+
+    if (cbXAxisMode_) connect(cbXAxisMode_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); updateLeftVisualDashboard(); });
 
     leftStack->addWidget(viewsHost_);
     leftStack->addWidget(visualDashHost_);
@@ -1073,7 +1081,8 @@ void MainWindow::buildUI() {
     bcLayout->addWidget(slContrast_, 1, 1);
     bcLayout->addWidget(spContrast_, 1, 2);
     btnPreAuto_ = new QPushButton("Auto", gbBC);
-    bcLayout->addWidget(btnPreAuto_, 2, 2, Qt::AlignRight);
+    btnPreAuto_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    bcLayout->addWidget(btnPreAuto_, 2, 1, 1, 2);
     bcLayout->setHorizontalSpacing(10);
     bcLayout->setColumnStretch(1, 1);
     gbBC->setLayout(bcLayout);
@@ -1283,6 +1292,26 @@ void MainWindow::buildUI() {
     bp->addWidget(btnUndoBinaryOp_, 0, 2);
     bp->addWidget(lblBinaryOps_, 1, 0, 1, 4);
     bp->addWidget(btnAnalyzeParticles_, 2, 0, 1, 4);
+    bp->addWidget(new QLabel("Median Window", gbBinaryProc), 3, 0);
+    spSmoothMedianWindow_ = new QSpinBox(gbBinaryProc);
+    spSmoothMedianWindow_->setRange(3, 11);
+    spSmoothMedianWindow_->setSingleStep(2);
+    spSmoothMedianWindow_->setValue(3);
+    bp->addWidget(spSmoothMedianWindow_, 3, 1);
+    bp->addWidget(new QLabel("Speed α", gbBinaryProc), 3, 2);
+    spSmoothAlphaSpeed_ = new QDoubleSpinBox(gbBinaryProc);
+    spSmoothAlphaSpeed_->setRange(0.01, 1.0);
+    spSmoothAlphaSpeed_->setSingleStep(0.05);
+    spSmoothAlphaSpeed_->setDecimals(2);
+    spSmoothAlphaSpeed_->setValue(0.35);
+    bp->addWidget(spSmoothAlphaSpeed_, 3, 3);
+    bp->addWidget(new QLabel("Accel α", gbBinaryProc), 4, 2);
+    spSmoothAlphaAccel_ = new QDoubleSpinBox(gbBinaryProc);
+    spSmoothAlphaAccel_->setRange(0.01, 1.0);
+    spSmoothAlphaAccel_->setSingleStep(0.05);
+    spSmoothAlphaAccel_->setDecimals(2);
+    spSmoothAlphaAccel_->setValue(0.20);
+    bp->addWidget(spSmoothAlphaAccel_, 4, 3);
     gbBinaryProc->setLayout(bp);
     trkMainLayout->addWidget(gbBinaryProc);
 
@@ -1294,6 +1323,7 @@ void MainWindow::buildUI() {
     spHistMax_ = new QDoubleSpinBox(gbHist);
     spHistMin_->setRange(-1e9, 1e9); spHistMax_->setRange(-1e9, 1e9);
     spHistMin_->setValue(0.0); spHistMax_->setValue(1e6);
+    configureHistogramEditorsForMetric("Area");
     plotHistogram_ = new QCustomPlot(gbHist);
     plotHistogram_->setMinimumHeight(180);
     plotHistogram_->addGraph();
@@ -1304,8 +1334,10 @@ void MainWindow::buildUI() {
     hg->addWidget(new QLabel("Max", gbHist), 0, 4);
     hg->addWidget(spHistMax_, 0, 5);
     QPushButton* btnHistReset = new QPushButton("Reset", gbHist);
+    btnHistApply_ = new QPushButton("Apply", gbHist);
     hg->addWidget(btnHistReset, 0, 6);
-    hg->addWidget(plotHistogram_, 1, 0, 1, 7);
+    hg->addWidget(btnHistApply_, 0, 7);
+    hg->addWidget(plotHistogram_, 1, 0, 1, 8);
     gbHist->setLayout(hg);
     trkMainLayout->addWidget(gbHist);
     trkMainLayout->addWidget(btnTrackBinary_);
@@ -1332,14 +1364,12 @@ void MainWindow::buildUI() {
     connect(spLocalK_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
     auto resetHistogramRange = [this]() {
       if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
-      auto pick = [&](const MeasureRow& r)->double {
-        const QString m = cbHistMetric_->currentText();
-        if (m == "Perimeter") return r.perim;
-        if (m == "Circularity") return r.circ;
-        if (m == "MajorAxis") return r.major;
-        if (m == "MinorAxis") return r.minor;
-        return r.area;
-      };
+      const QString metric = cbHistMetric_->currentText();
+      if (confirmed_hist_rules_.count(metric)) {
+        QMessageBox::information(this, "Histogram", "Current metric has been applied and cannot be reset.");
+        return;
+      }
+      auto pick = [&](const MeasureRow& r)->double { return metricValueForHist(r, metric); };
       std::vector<double> vals;
       for (const auto& fs : analyzed_measures_by_frame_) for (const auto& am : fs) vals.push_back(pick(am.m));
       if (vals.empty()) {
@@ -1348,19 +1378,37 @@ void MainWindow::buildUI() {
       }
       vals.erase(std::remove_if(vals.begin(), vals.end(), [](double v){ return !std::isfinite(v); }), vals.end());
       double lo = 0.0, hi = 1.0;
-      const QString m = cbHistMetric_->currentText();
-      if (m == "Circularity") { lo = 0.0; hi = 1.0; }
+      if (metric == "Circularity") { lo = 0.0; hi = 1.0; }
       else if (!vals.empty()) { auto mm = std::minmax_element(vals.begin(), vals.end()); lo = *mm.first; hi = *mm.second; if (hi<=lo) hi = lo + 1.0; }
       QSignalBlocker b1(spHistMin_); QSignalBlocker b2(spHistMax_);
       spHistMin_->setValue(lo); spHistMax_->setValue(hi);
+      configureHistogramEditorsForMetric(metric);
       updateHistogramPlot(); updateLeftVisualDashboard(); onTick();
     };
     connect(cbHistMetric_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, resetHistogramRange](int){
-      resetHistogramRange();
+      if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
+      const QString metric = cbHistMetric_->currentText();
+      configureHistogramEditorsForMetric(metric);
+      auto it = confirmed_hist_rules_.find(metric);
+      if (it != confirmed_hist_rules_.end()) {
+        QSignalBlocker b1(spHistMin_); QSignalBlocker b2(spHistMax_);
+        spHistMin_->setValue(it->second.first);
+        spHistMax_->setValue(it->second.second);
+        updateHistogramPlot();
+      } else {
+        resetHistogramRange();
+      }
     });
-    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); updateLeftVisualDashboard(); onTick(); });
-    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); updateLeftVisualDashboard(); onTick(); });
+    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
+    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
     connect(btnHistReset, &QPushButton::clicked, this, [resetHistogramRange](){ resetHistogramRange(); });
+    if (btnHistApply_) connect(btnHistApply_, &QPushButton::clicked, this, [this](){
+      if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
+      confirmed_hist_rules_[cbHistMetric_->currentText()] = {spHistMin_->value(), spHistMax_->value()};
+      updateLeftVisualDashboard();
+      onTick();
+      logLine(QString("Applied histogram rule: %1 [%2, %3]").arg(cbHistMetric_->currentText()).arg(spHistMin_->value()).arg(spHistMax_->value()));
+    });
 
 
     actionTabs_->addTab(tabCap, "Source");
@@ -1387,6 +1435,7 @@ void MainWindow::buildUI() {
       if (btnExportTableCsv_) btnExportTableCsv_->setVisible(visual);
       if (btnExportMp4_) btnExportMp4_->setVisible(visual);
       if (cbTargetFilter_) cbTargetFilter_->setVisible(visual);
+      if (cbXAxisMode_) cbXAxisMode_->setVisible(visual);
       const bool preprocess = (stepIdx == 1);
       for (auto* sv : sourceViews_) if (sv) sv->setAnnotationsVisible(preprocess);
       if (stepIdx == 0) onModeCapture();
@@ -2356,8 +2405,10 @@ void MainWindow::onAnalyzeParticles() {
   InputSource& src = sources_[srcIdx];
   const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
 
+  suppress_histogram_updates_ = true;
   QProgressDialog progress("Analyzing all frames...", "Cancel", 0, totalFrames, this);
-  progress.setWindowModality(Qt::ApplicationModal);
+  progress.setWindowModality(Qt::NonModal);
+  progress.show();
   progress.setMinimumDuration(0);
   progress.setAutoClose(false);
   progress.setAutoReset(false);
@@ -2402,6 +2453,7 @@ void MainWindow::onAnalyzeParticles() {
   }
 
   progress.setValue(processedFrames);
+  suppress_histogram_updates_ = false;
   if ((int)play_frame_ >= 0 && (int)play_frame_ < (int)analyzed_contours_by_frame_.size()) {
     analyzed_contours_ = analyzed_contours_by_frame_[(int)play_frame_];
   }
@@ -2485,18 +2537,6 @@ void MainWindow::onToggleTrackBinary() {
     std::vector<cv::Point2f> currCtrs;
     std::vector<int> validIdx;
     std::vector<MeasureRow> preRows;
-    const QString metric = cbHistMetric_ ? cbHistMetric_->currentText() : "Area";
-    const double loTh = spHistMin_ ? spHistMin_->value() : -1e9;
-    const double hiTh = spHistMax_ ? spHistMax_->value() : 1e9;
-    auto metricValue = [&](const MeasureRow& r)->double {
-      if (metric == "Perimeter") return r.perim;
-      if (metric == "Circularity") return r.circ;
-      if (metric == "Speed") return r.speed;
-      if (metric == "Displacement") return r.disp;
-      if (metric == "MajorAxis") return r.major;
-      if (metric == "MinorAxis") return r.minor;
-      return r.area;
-    };
     for (int ci=0; ci<(int)analyzed_contours_by_frame_[i].size(); ++ci) {
       const auto& c = analyzed_contours_by_frame_[i][ci];
       if (c.empty()) continue;
@@ -2510,8 +2550,7 @@ void MainWindow::onToggleTrackBinary() {
       mr.major = std::max(rr.size.width, rr.size.height) * scale;
       mr.minor = std::min(rr.size.width, rr.size.height) * scale;
       mr.circ = (mr.perim > 1e-9) ? (4.0 * std::acos(-1.0) * mr.area / (mr.perim * mr.perim)) : 0.0;
-      double mv = metricValue(mr);
-      if (mv < loTh || mv > hiTh) continue;
+      if (!passesConfirmedHistogramRules(mr)) continue;
       currCtrs.push_back(cv::Point2f((float)(m.m10/m.m00), (float)(m.m01/m.m00)));
       validIdx.push_back(ci);
       preRows.push_back(mr);
@@ -2562,25 +2601,32 @@ void MainWindow::onToggleTrackBinary() {
 
   if (!newTrackedRows.empty()) {
     // Apply tiered smoothing:
-    // 1st-order geometry metrics (disp/area/perim/major/minor/circ): median(3)
-    // 2nd-order speed: EMA(alpha=0.35)
-    // 3rd-order acceleration: EMA(alpha=0.20)
+    // 1st-order geometry metrics: median(window)
+    // 2nd-order speed: EMA(alpha_speed)
+    // 3rd-order acceleration: EMA(alpha_accel)
     std::unordered_map<int, std::vector<size_t>> idToIdx;
     for (size_t k=0;k<newTrackedRows.size();++k) idToIdx[newTrackedRows[k].id].push_back(k);
-    auto median3 = [](double a, double b, double c)->double {
-      std::array<double,3> v{a,b,c};
-      std::sort(v.begin(), v.end());
-      return v[1];
-    };
+    int medWindow = spSmoothMedianWindow_ ? spSmoothMedianWindow_->value() : 3;
+    if (medWindow < 3) medWindow = 3;
+    if ((medWindow % 2) == 0) medWindow += 1;
+    const int halfWin = medWindow / 2;
     for (auto& kv : idToIdx) {
       auto& idxs = kv.second;
       if (idxs.empty()) continue;
       auto medFilter = [&](auto getter, auto setter) {
-        if (idxs.size() < 3) return;
+        if ((int)idxs.size() < medWindow) return;
         std::vector<double> src(idxs.size()), out(idxs.size());
         for (size_t t=0;t<idxs.size();++t) src[t] = getter(newTrackedRows[idxs[t]].m);
         out = src;
-        for (size_t t=1;t+1<idxs.size();++t) out[t] = median3(src[t-1], src[t], src[t+1]);
+        for (size_t t=0;t<idxs.size();++t) {
+          const int l = std::max<int>(0, (int)t - halfWin);
+          const int r = std::min<int>((int)idxs.size() - 1, (int)t + halfWin);
+          std::vector<double> win;
+          win.reserve((size_t)(r - l + 1));
+          for (int j=l;j<=r;++j) win.push_back(src[(size_t)j]);
+          std::nth_element(win.begin(), win.begin() + (win.size()/2), win.end());
+          out[t] = win[win.size()/2];
+        }
         for (size_t t=0;t<idxs.size();++t) setter(newTrackedRows[idxs[t]].m, out[t]);
       };
       medFilter([](const MeasureRow& r){ return r.disp; }, [](MeasureRow& r,double v){ r.disp=v; });
@@ -2590,13 +2636,13 @@ void MainWindow::onToggleTrackBinary() {
       medFilter([](const MeasureRow& r){ return r.minor; }, [](MeasureRow& r,double v){ r.minor=v; });
       medFilter([](const MeasureRow& r){ return r.circ; }, [](MeasureRow& r,double v){ r.circ=v; });
 
-      const double alphaSpeed = 0.35;
+      const double alphaSpeed = spSmoothAlphaSpeed_ ? spSmoothAlphaSpeed_->value() : 0.35;
       for (size_t t=1;t<idxs.size();++t) {
         auto& cur = newTrackedRows[idxs[t]].m;
         const auto& prev = newTrackedRows[idxs[t-1]].m;
         cur.speed = alphaSpeed * cur.speed + (1.0 - alphaSpeed) * prev.speed;
       }
-      const double alphaAccel = 0.20;
+      const double alphaAccel = spSmoothAlphaAccel_ ? spSmoothAlphaAccel_->value() : 0.20;
       for (size_t t=1;t<idxs.size();++t) {
         auto& cur = newTrackedRows[idxs[t]].m;
         const auto& prev = newTrackedRows[idxs[t-1]].m;
@@ -3091,7 +3137,7 @@ void MainWindow::onTick() {
   // repeatedly accumulating visual detections on static frames.
 
   auto contourMetricPass = [&](const std::vector<cv::Point>& c)->bool {
-    if (!cbHistMetric_ || !spHistMin_ || !spHistMax_ || c.empty()) return true;
+    if (c.empty()) return true;
     const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
     MeasureRow r;
     r.area = std::abs(cv::contourArea(c)) * scale * scale;
@@ -3100,13 +3146,7 @@ void MainWindow::onTick() {
     r.major = std::max(rr.size.width, rr.size.height) * scale;
     r.minor = std::min(rr.size.width, rr.size.height) * scale;
     r.circ = (r.perim > 1e-9) ? (4.0 * std::acos(-1.0) * r.area / (r.perim * r.perim)) : 0.0;
-    QString n = cbHistMetric_->currentText();
-    double v = r.area;
-    if (n == "Perimeter") v = r.perim;
-    else if (n == "Circularity") v = r.circ;
-    else if (n == "MajorAxis") v = r.major;
-    else if (n == "MinorAxis") v = r.minor;
-    return v >= spHistMin_->value() && v <= spHistMax_->value();
+    return passesConfirmedHistogramRules(r);
   };
   int frameIdx = std::max(0, (int)play_frame_);
   if (track_binary_enabled_ && frameIdx < (int)tracked_contours_by_frame_.size()) {
@@ -3818,17 +3858,46 @@ void MainWindow::updateMeasurementFromFrame(const cv::Mat& preprocessedFrame) {
   meas_rows_.push_back(row);
 }
 
+
+double MainWindow::metricValueForHist(const MeasureRow& r, const QString& metric) const {
+  if (metric == "Perimeter") return r.perim;
+  if (metric == "Circularity") return r.circ;
+  if (metric == "MajorAxis" || metric == "Major Axis") return r.major;
+  if (metric == "MinorAxis" || metric == "Minor Axis") return r.minor;
+  if (metric == "Speed") return r.speed;
+  if (metric == "Displacement") return r.disp;
+  if (metric == "Acceleration") return r.accel;
+  return r.area;
+}
+
+bool MainWindow::passesConfirmedHistogramRules(const MeasureRow& r) const {
+  for (const auto& kv : confirmed_hist_rules_) {
+    const double v = metricValueForHist(r, kv.first);
+    if (!std::isfinite(v)) return false;
+    if (v < kv.second.first || v > kv.second.second) return false;
+  }
+  return true;
+}
+
+void MainWindow::configureHistogramEditorsForMetric(const QString& metric) {
+  if (!spHistMin_ || !spHistMax_) return;
+  if (metric == "Circularity") {
+    spHistMin_->setDecimals(3); spHistMax_->setDecimals(3);
+    spHistMin_->setSingleStep(0.01); spHistMax_->setSingleStep(0.01);
+    spHistMin_->setRange(0.0, 1.0); spHistMax_->setRange(0.0, 1.0);
+  } else {
+    spHistMin_->setDecimals(4); spHistMax_->setDecimals(4);
+    spHistMin_->setSingleStep(0.1); spHistMax_->setSingleStep(0.1);
+    spHistMin_->setRange(-1e9, 1e9); spHistMax_->setRange(-1e9, 1e9);
+  }
+}
+
 void MainWindow::updateHistogramPlot() {
+  if (suppress_histogram_updates_) return;
   if (!plotHistogram_ || !cbHistMetric_) return;
 
-  auto pick = [&](const MeasureRow& r)->double {
-    const QString m = cbHistMetric_->currentText();
-    if (m == "Perimeter") return r.perim;
-    if (m == "Circularity") return r.circ;
-    if (m == "MajorAxis") return r.major;
-    if (m == "MinorAxis") return r.minor;
-    return r.area;
-  };
+  const QString metric = cbHistMetric_->currentText();
+  auto pick = [&](const MeasureRow& r)->double { return metricValueForHist(r, metric); };
 
   std::vector<double> vals;
   for (const auto& fs : analyzed_measures_by_frame_) for (const auto& am : fs) vals.push_back(pick(am.m));
@@ -3847,7 +3916,7 @@ void MainWindow::updateHistogramPlot() {
   // Histogram bars/range are fixed by data distribution; Min/Max only move guide lines.
   double dataLo = vals.front();
   double dataHi = vals.back();
-  if (cbHistMetric_->currentText() == "Circularity") { dataLo = 0.0; dataHi = 1.0; }
+  if (metric == "Circularity") { dataLo = 0.0; dataHi = 1.0; }
   if (dataHi <= dataLo) dataHi = dataLo + 1.0;
 
   double lo = spHistMin_ ? spHistMin_->value() : dataLo;
@@ -3886,7 +3955,6 @@ void MainWindow::updateHistogramPlot() {
   addVLine(lo, QColor(244,63,94));
   addVLine(hi, QColor(16,185,129));
 
-  const QString metric = cbHistMetric_->currentText();
   plotHistogram_->xAxis->setLabel(metric);
   plotHistogram_->yAxis->setLabel("Count");
   plotHistogram_->xAxis->setRange(dataLo, dataHi);
@@ -3897,14 +3965,17 @@ void MainWindow::updateHistogramPlot() {
 }
 
 void MainWindow::refreshTrajectoryPlot() {
+  const bool useTimeAxis = !cbXAxisMode_ || cbXAxisMode_->currentIndex() == 0;
+  const double fps = std::max(1.0, play_fps_);
+  auto xFromKey = [&](qint64 key)->double { return useTimeAxis ? ((double)key / fps) : (double)key; };
   auto fillPlot = [&](QCustomPlot* p, auto getter, const QString& yLabel) {
     if (!p) return;
     const int n = (int)meas_rows_.size();
     QVector<double> x(n), y(n);
-    for (int i=0;i<n;++i) { x[i]=i; y[i]=getter(meas_rows_[i]); }
+    for (int i=0;i<n;++i) { x[i]=xFromKey(meas_rows_[i].key); y[i]=getter(meas_rows_[i]); }
     if (p->graphCount() == 0) p->addGraph();
     p->graph(0)->setData(x, y);
-    p->xAxis->setLabel("frame");
+    p->xAxis->setLabel(useTimeAxis ? "Time (s)" : "Frame");
     p->yAxis->setLabel(yLabel);
     p->rescaleAxes(true);
     p->replot();
@@ -4081,6 +4152,9 @@ void MainWindow::updateLeftVisualDashboard() {
   int totalFrames = progressSlider_ ? (progressSlider_->maximum() + 1) : ((play_end_frame_ > 0) ? (int)play_end_frame_ : (int)meas_rows_.size());
   if (totalFrames <= 0) totalFrames = (int)meas_rows_.size();
   if (totalFrames > 0) curIdx = std::max(0, std::min((int)play_frame_, totalFrames - 1));
+  const bool useTimeAxis = !cbXAxisMode_ || cbXAxisMode_->currentIndex() == 0;
+  const double fpsAxis = std::max(1.0, play_fps_);
+  auto xFromKey = [&](qint64 key)->double { return useTimeAxis ? ((double)key / fpsAxis) : (double)key; };
 
   auto metricOf = [&](const MeasureRow& r, int idx)->double {
     if (idx == 1) return r.speed;
@@ -4092,23 +4166,8 @@ void MainWindow::updateLeftVisualDashboard() {
     if (idx == 7) return r.circ;
     return r.disp;
   };
-  auto metricValueByName = [&](const MeasureRow& r, const QString& name)->double {
-    if (name == "Speed") return r.speed;
-    if (name == "Acceleration") return r.accel;
-    if (name == "Area") return r.area;
-    if (name == "Perimeter") return r.perim;
-    if (name == "Major Axis") return r.major;
-    if (name == "Minor Axis") return r.minor;
-    if (name == "Circularity") return r.circ;
-    return r.disp;
-  };
   auto passHistThreshold = [&](const MeasureRow& r)->bool {
-    if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return true;
-    QString n = cbHistMetric_->currentText();
-    if (n == "MajorAxis") n = "Major Axis";
-    if (n == "MinorAxis") n = "Minor Axis";
-    const double v = metricValueByName(r, n);
-    return v >= spHistMin_->value() && v <= spHistMax_->value();
+    return passesConfirmedHistogramRules(r);
   };
 
   auto metricLabel = [&](int idx)->QString {
@@ -4188,7 +4247,7 @@ void MainWindow::updateLeftVisualDashboard() {
       if (!target_meas_rows_.empty()) {
         for (const auto& tr : target_meas_rows_) {
           if (tr.id != id || !passHistThreshold(tr.m)) continue;
-          x.push_back((double)tr.m.key);
+          x.push_back(xFromKey(tr.m.key));
           double v = metricOf(tr.m, metricIdx);
           y.push_back(v);
           if (std::isfinite(v)) {
@@ -4199,7 +4258,7 @@ void MainWindow::updateLeftVisualDashboard() {
       } else {
         for (const auto& r : meas_rows_) {
           if (!passHistThreshold(r)) continue;
-          x.push_back((double)r.key);
+          x.push_back(xFromKey(r.key));
           double v = metricOf(r, metricIdx);
           y.push_back(v);
           if (std::isfinite(v)) {
@@ -4220,7 +4279,7 @@ void MainWindow::updateLeftVisualDashboard() {
     p->graph(gi)->setPen(QPen(QColor(239,68,68),1.6));
     p->graph(gi)->setData({}, {});
     if (curIdx >= 0) {
-      QVector<double> cx(2), cy(2); cx[0]=curIdx; cx[1]=curIdx; cy[0]=yMin; cy[1]=yMax; p->graph(gi)->setData(cx,cy);
+      QVector<double> cx(2), cy(2); const double xcur = xFromKey(curIdx); cx[0]=xcur; cx[1]=xcur; cy[0]=yMin; cy[1]=yMax; p->graph(gi)->setData(cx,cy);
     }
     if (selected_target_id_ >= 0 && selected_target_frame_ >= 0) {
       p->addGraph();
@@ -4228,14 +4287,14 @@ void MainWindow::updateLeftVisualDashboard() {
       p->graph(gi+1)->setScatterStyle(QCPScatterStyle(QCPScatterStyle::ssDisc, QColor(255,200,0), QColor(255,230,0), 9));
       for (const auto& tr : target_meas_rows_) {
         if (tr.id == selected_target_id_ && tr.m.key == selected_target_frame_) {
-          p->graph(gi+1)->setData(QVector<double>{(double)selected_target_frame_}, QVector<double>{metricOf(tr.m, metricIdx)});
+          p->graph(gi+1)->setData(QVector<double>{xFromKey(selected_target_frame_)}, QVector<double>{metricOf(tr.m, metricIdx)});
           break;
         }
       }
     }
-    p->xAxis->setLabel("Frame");
+    p->xAxis->setLabel(useTimeAxis ? "Time (s)" : "Frame");
     p->yAxis->setLabel(yLabel);
-    p->xAxis->setRange(0, std::max(1, totalFrames-1));
+    p->xAxis->setRange(0, useTimeAxis ? std::max(1.0, (double)std::max(1, totalFrames-1) / fpsAxis) : (double)std::max(1, totalFrames-1));
     p->yAxis->setRange(yMin, yMax);
     p->replot();
   };
