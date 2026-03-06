@@ -2,6 +2,8 @@
 #include <QObject>
 #include <QTimer>
 #include <QDateTime>
+#include <QFile>
+#include <QByteArray>
 #include <opencv2/opencv.hpp>
 #include "MainWindow.h" // for InputSource
 #include "Types.h"
@@ -64,6 +66,16 @@ public slots:
 
 signals:
   void framesReady(FramePack frames, qint64 capture_ts_ms);
+private:
+  static cv::Mat imreadUnicodePathCW(const QString& filePath, int flags=cv::IMREAD_COLOR) {
+    QFile f(filePath);
+    if (!f.open(QIODevice::ReadOnly)) return cv::Mat();
+    QByteArray bytes = f.readAll();
+    if (bytes.isEmpty()) return cv::Mat();
+    std::vector<uchar> buf(bytes.begin(), bytes.end());
+    return cv::imdecode(buf, flags);
+  }
+
 private slots:
   void tick() {
     if (!running_) return;
@@ -95,7 +107,7 @@ private slots:
           }
           int idx = sync_mode_ ? (int)cur_frame_ : s.seq_idx;
           idx = std::max(0, std::min(idx, (int)s.seq_files.size() - 1));
-          f = cv::imread(s.seq_files[idx].toStdString(), cv::IMREAD_COLOR);
+          f = imreadUnicodePathCW(s.seq_files[idx], cv::IMREAD_COLOR);
           s.seq_idx = idx;
           if (!sync_mode_ && s.seq_idx < (int)s.seq_files.size() - 1) s.seq_idx++;
         } else {
