@@ -516,7 +516,9 @@ private:
   QComboBox* cbAreaMetric_=nullptr;
   QComboBox* cbPerimMetric_=nullptr;
   QComboBox* cbCircMetric_=nullptr;
+  QLabel* lblTargetFilter_=nullptr;
   QComboBox* cbTargetFilter_=nullptr;
+  QLabel* lblXAxisMode_=nullptr;
   QComboBox* cbXAxisMode_=nullptr;
   QPushButton* btnCaptureVisual_=nullptr;
   QPushButton* btnExportTableCsv_=nullptr;

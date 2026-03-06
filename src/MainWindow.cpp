@@ -885,12 +885,14 @@ void MainWindow::buildUI() {
         updateLeftVisualDashboard();
       });
     }
-    topSourceBar->addWidget(new QLabel("Targets", central));
+    lblTargetFilter_ = new QLabel("Targets", central);
+    topSourceBar->addWidget(lblTargetFilter_);
     topSourceBar->addWidget(cbTargetFilter_);
     cbXAxisMode_ = new QComboBox(central);
     cbXAxisMode_->addItems({"Time (s)", "Frame"});
     cbXAxisMode_->setCurrentIndex(0);
-    topSourceBar->addWidget(new QLabel("X", central));
+    lblXAxisMode_ = new QLabel("X", central);
+    topSourceBar->addWidget(lblXAxisMode_);
     topSourceBar->addWidget(cbXAxisMode_);
     btnCaptureVisual_ = new QPushButton("Snap To BMP", central);
     btnExportTableCsv_ = new QPushButton("Export To CSV", central);
@@ -929,7 +931,9 @@ void MainWindow::buildUI() {
     btnCaptureVisual_->setVisible(false);
     btnExportTableCsv_->setVisible(false);
     btnExportMp4_->setVisible(false);
+    if (lblTargetFilter_) lblTargetFilter_->setVisible(false);
     if (cbTargetFilter_) cbTargetFilter_->setVisible(false);
+    if (lblXAxisMode_) lblXAxisMode_->setVisible(false);
     if (cbXAxisMode_) cbXAxisMode_->setVisible(false);
     if (smoothCtl) smoothCtl->setVisible(false);
     v->addLayout(topSourceBar);
@@ -1399,7 +1403,7 @@ void MainWindow::buildUI() {
 
     QGroupBox* gbDetect = new QGroupBox("3.Detect & Filter", tabObj);
     QGridLayout* hg = new QGridLayout(gbDetect);
-    hg->setHorizontalSpacing(6);
+    hg->setHorizontalSpacing(8);
     hg->setVerticalSpacing(6);
     cbHistMetric_ = new QComboBox(gbDetect);
     cbHistMetric_->addItems({"Area","Perimeter","Circularity","MajorAxis","MinorAxis"});
@@ -1411,27 +1415,29 @@ void MainWindow::buildUI() {
     spHistMax_->setMinimumWidth(180);
     configureHistogramEditorsForMetric("Area");
     plotHistogram_ = new QCustomPlot(gbDetect);
-    plotHistogram_->setMinimumHeight(120);
+    plotHistogram_->setMinimumHeight(180);
     plotHistogram_->addGraph();
     QPushButton* btnHistReset = new QPushButton("Reset", gbDetect);
     btnHistApply_ = new QPushButton("Apply", gbDetect);
 
-    hg->addWidget(btnAnalyzeParticles_, 0, 0, 1, 2);
-    hg->addWidget(new QLabel("Metric", gbDetect), 0, 2);
-    hg->addWidget(cbHistMetric_, 0, 3);
-    hg->addWidget(btnHistReset, 0, 4);
-    hg->addWidget(btnHistApply_, 0, 5);
+    hg->addWidget(btnAnalyzeParticles_, 0, 0, 1, 6);
+    hg->addWidget(new QLabel("Metric", gbDetect), 1, 0);
+    hg->addWidget(cbHistMetric_, 1, 1, 1, 2);
+    hg->addWidget(btnHistReset, 1, 3);
+    hg->addWidget(btnHistApply_, 1, 4);
 
-    hg->addWidget(plotHistogram_, 1, 0, 1, 6);
-    hg->addWidget(new QLabel("Min", gbDetect), 2, 0);
-    hg->addWidget(spHistMin_, 2, 1);
-    hg->addWidget(new QLabel("Max", gbDetect), 2, 2);
-    hg->addWidget(spHistMax_, 2, 3);
+    hg->addWidget(plotHistogram_, 2, 0, 1, 6);
+    hg->addWidget(new QLabel("Min", gbDetect), 3, 0);
+    hg->addWidget(spHistMin_, 3, 1);
+    hg->addWidget(new QLabel("Max", gbDetect), 3, 3);
+    hg->addWidget(spHistMax_, 3, 4);
+    hg->setColumnMinimumWidth(2, 12);
+    hg->setColumnMinimumWidth(5, 12);
     hg->setColumnStretch(5, 1);
     gbDetect->setLayout(hg);
     trkMainLayout->addWidget(gbDetect);
 
-    QGroupBox* gbPair = new QGroupBox("5.Pair", tabObj);
+    QGroupBox* gbPair = new QGroupBox("4.Pair", tabObj);
     QVBoxLayout* pairLay = new QVBoxLayout(gbPair);
     pairLay->addWidget(btnTrackBinary_);
     gbPair->setLayout(pairLay);
@@ -1529,7 +1535,9 @@ void MainWindow::buildUI() {
       if (btnCaptureVisual_) btnCaptureVisual_->setVisible(visual);
       if (btnExportTableCsv_) btnExportTableCsv_->setVisible(visual);
       if (btnExportMp4_) btnExportMp4_->setVisible(visual);
+      if (lblTargetFilter_) lblTargetFilter_->setVisible(visual);
       if (cbTargetFilter_) cbTargetFilter_->setVisible(visual);
+      if (lblXAxisMode_) lblXAxisMode_->setVisible(visual);
       if (cbXAxisMode_) cbXAxisMode_->setVisible(visual);
       if (smoothCtl) smoothCtl->setVisible(visual);
       const bool preprocess = (stepIdx == 1);
