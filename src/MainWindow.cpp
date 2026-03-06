@@ -1247,11 +1247,13 @@ void MainWindow::buildUI() {
     tblRegions_->setColumnCount(4);
     tblRegions_->setHorizontalHeaderLabels({"Type","Points","Edit","Delete"});
     tblRegions_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    tblRegions_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    tblRegions_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Interactive);
     tblRegions_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     tblRegions_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     tblRegions_->setSelectionBehavior(QAbstractItemView::SelectRows);
     tblRegions_->setSelectionMode(QAbstractItemView::SingleSelection);
+    tblRegions_->setColumnWidth(1, 120);
+    tblRegions_->setMinimumHeight(170);
     tblRegions_->setStyleSheet("QTableWidget{background:#1f2937;color:#e5e7eb;gridline-color:#4b5563;selection-background-color:#2563eb;selection-color:#ffffff;}QHeaderView::section{background:#334155;color:#f8fafc;border:1px solid #475569;padding:5px;font-weight:600;}");
     rv->addLayout(rBtns);
     rv->addWidget(tblRegions_);
@@ -1291,7 +1293,7 @@ void MainWindow::buildUI() {
     visScrollArea->setWidget(visContainer);
     trkVisRoot->addWidget(visScrollArea);
 
-    QGroupBox* gbThresh = new QGroupBox("Threshold", tabObj);
+    QGroupBox* gbThresh = new QGroupBox("1.Threshold", tabObj);
     QGridLayout* tg = new QGridLayout(gbThresh);
 
     cbThreshType_ = new QComboBox(gbThresh);
@@ -1368,20 +1370,17 @@ void MainWindow::buildUI() {
 
     trkMainLayout->addWidget(gbThresh);
 
-    QHBoxLayout* prevTitle = new QHBoxLayout();
-    prevTitle->addWidget(new QLabel("Binary Preview", tabObj));
-    prevTitle->addStretch(1);
-    prevTitle->addWidget(chkInvertBinary_);
-    trkMainLayout->addLayout(prevTitle);
-    lblBinaryPreview_ = new QLabel(tabObj);
+    lblBinaryPreview_ = new QLabel(gbThresh);
     lblBinaryPreview_->setFixedSize(420, 240);
     lblBinaryPreview_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     lblBinaryPreview_->setAlignment(Qt::AlignCenter);
     lblBinaryPreview_->setStyleSheet("background:#111;border:1px solid #3a4250;color:#9aa7b8;");
     lblBinaryPreview_->setText("No binary preview");
-    trkMainLayout->addWidget(lblBinaryPreview_);
+    tg->addWidget(new QLabel("Binary Preview", gbThresh), 5, 0);
+    tg->addWidget(chkInvertBinary_, 5, 3);
+    tg->addWidget(lblBinaryPreview_, 6, 0, 1, 4);
 
-    QGroupBox* gbBinaryProc = new QGroupBox("Process(Binary)", tabObj);
+    QGroupBox* gbBinaryProc = new QGroupBox("2.Process(Binary)", tabObj);
     QGridLayout* bp = new QGridLayout(gbBinaryProc);
     cbBinaryOp_ = new QComboBox(gbBinaryProc);
     for (const QString& op : {"Erode","Dilate","Open","Close","Fill Holes","Watershed","Skeletonize","Outline","Clear Border"}) cbBinaryOp_->addItem(op);
@@ -1395,11 +1394,16 @@ void MainWindow::buildUI() {
     bp->addWidget(cbBinaryOp_, 0, 1);
     bp->addWidget(btnUndoBinaryOp_, 0, 2);
     bp->addWidget(lblBinaryOps_, 1, 0, 1, 4);
-    bp->addWidget(btnAnalyzeParticles_, 2, 0, 1, 4);
     gbBinaryProc->setLayout(bp);
     trkMainLayout->addWidget(gbBinaryProc);
 
-    QGroupBox* gbHist = new QGroupBox("Statistics Histogram", tabObj);
+    QGroupBox* gbDetect = new QGroupBox("3.Detect", tabObj);
+    QVBoxLayout* detLay = new QVBoxLayout(gbDetect);
+    detLay->addWidget(btnAnalyzeParticles_);
+    gbDetect->setLayout(detLay);
+    trkMainLayout->addWidget(gbDetect);
+
+    QGroupBox* gbHist = new QGroupBox("4.Statistics Histogram", tabObj);
     QGridLayout* hg = new QGridLayout(gbHist);
     cbHistMetric_ = new QComboBox(gbHist);
     cbHistMetric_->addItems({"Area","Perimeter","Circularity","MajorAxis","MinorAxis"});
@@ -1407,26 +1411,31 @@ void MainWindow::buildUI() {
     spHistMax_ = new QDoubleSpinBox(gbHist);
     spHistMin_->setRange(-1e9, 1e9); spHistMax_->setRange(-1e9, 1e9);
     spHistMin_->setValue(0.0); spHistMax_->setValue(1e6);
-    spHistMin_->setMinimumWidth(140);
-    spHistMax_->setMinimumWidth(140);
+    spHistMin_->setMinimumWidth(180);
+    spHistMax_->setMinimumWidth(180);
     configureHistogramEditorsForMetric("Area");
     plotHistogram_ = new QCustomPlot(gbHist);
     plotHistogram_->setMinimumHeight(180);
     plotHistogram_->addGraph();
     hg->addWidget(new QLabel("Metric", gbHist), 0, 0);
-    hg->addWidget(cbHistMetric_, 0, 1, 1, 3);
+    hg->addWidget(cbHistMetric_, 0, 1, 1, 2);
     QPushButton* btnHistReset = new QPushButton("Reset", gbHist);
     btnHistApply_ = new QPushButton("Apply", gbHist);
+    hg->addWidget(btnHistReset, 0, 3);
+    hg->addWidget(btnHistApply_, 0, 4);
     hg->addWidget(plotHistogram_, 1, 0, 1, 8);
     hg->addWidget(new QLabel("Min", gbHist), 2, 0);
-    hg->addWidget(spHistMin_, 2, 1);
-    hg->addWidget(new QLabel("Max", gbHist), 2, 2);
-    hg->addWidget(spHistMax_, 2, 3);
-    hg->addWidget(btnHistReset, 2, 4);
-    hg->addWidget(btnHistApply_, 2, 5);
+    hg->addWidget(spHistMin_, 2, 1, 1, 2);
+    hg->addWidget(new QLabel("Max", gbHist), 2, 3);
+    hg->addWidget(spHistMax_, 2, 4, 1, 2);
     gbHist->setLayout(hg);
     trkMainLayout->addWidget(gbHist);
-    trkMainLayout->addWidget(btnTrackBinary_);
+
+    QGroupBox* gbPair = new QGroupBox("5.Pair", tabObj);
+    QVBoxLayout* pairLay = new QVBoxLayout(gbPair);
+    pairLay->addWidget(btnTrackBinary_);
+    gbPair->setLayout(pairLay);
+    trkMainLayout->addWidget(gbPair);
     trkMainLayout->addStretch(1);
 
 
