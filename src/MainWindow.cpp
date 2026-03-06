@@ -1290,7 +1290,7 @@ void MainWindow::buildUI() {
     QGroupBox* gbHist = new QGroupBox("Statistics Histogram", tabObj);
     QGridLayout* hg = new QGridLayout(gbHist);
     cbHistMetric_ = new QComboBox(gbHist);
-    cbHistMetric_->addItems({"Area","Perimeter","Circularity","Speed","Displacement","MajorAxis","MinorAxis"});
+    cbHistMetric_->addItems({"Area","Perimeter","Circularity","MajorAxis","MinorAxis"});
     spHistMin_ = new QDoubleSpinBox(gbHist);
     spHistMax_ = new QDoubleSpinBox(gbHist);
     spHistMin_->setRange(-1e9, 1e9); spHistMax_->setRange(-1e9, 1e9);
@@ -1304,7 +1304,9 @@ void MainWindow::buildUI() {
     hg->addWidget(spHistMin_, 0, 3);
     hg->addWidget(new QLabel("Max", gbHist), 0, 4);
     hg->addWidget(spHistMax_, 0, 5);
-    hg->addWidget(plotHistogram_, 1, 0, 1, 6);
+    QPushButton* btnHistReset = new QPushButton("Reset", gbHist);
+    hg->addWidget(btnHistReset, 0, 6);
+    hg->addWidget(plotHistogram_, 1, 0, 1, 7);
     gbHist->setLayout(hg);
     trkMainLayout->addWidget(gbHist);
     trkMainLayout->addWidget(btnTrackBinary_);
@@ -1329,39 +1331,37 @@ void MainWindow::buildUI() {
     connect(spObjectThresh_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ object_thresh_manual_ = true; if (slObjectThresh_ && slObjectThresh_->value()!=v) slObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
     connect(spLocalBlockSize_, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
     connect(spLocalK_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
-    connect(cbHistMetric_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){
-      if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) { updateHistogramPlot(); return; }
+    auto resetHistogramRange = [this]() {
+      if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
       auto pick = [&](const MeasureRow& r)->double {
         const QString m = cbHistMetric_->currentText();
         if (m == "Perimeter") return r.perim;
         if (m == "Circularity") return r.circ;
-        if (m == "Speed") return r.speed;
-        if (m == "Displacement") return r.disp;
         if (m == "MajorAxis") return r.major;
         if (m == "MinorAxis") return r.minor;
         return r.area;
       };
       std::vector<double> vals;
-      vals.reserve(std::max(target_meas_rows_.size(), meas_rows_.size()));
-      if (!target_meas_rows_.empty()) { for (const auto& t : target_meas_rows_) vals.push_back(pick(t.m)); }
-      else { for (const auto& r : meas_rows_) vals.push_back(pick(r)); }
+      for (const auto& fs : analyzed_measures_by_frame_) for (const auto& am : fs) vals.push_back(pick(am.m));
+      if (vals.empty()) {
+        if (!target_meas_rows_.empty()) for (const auto& t : target_meas_rows_) vals.push_back(pick(t.m));
+        else for (const auto& r : meas_rows_) vals.push_back(pick(r));
+      }
       vals.erase(std::remove_if(vals.begin(), vals.end(), [](double v){ return !std::isfinite(v); }), vals.end());
       double lo = 0.0, hi = 1.0;
       const QString m = cbHistMetric_->currentText();
       if (m == "Circularity") { lo = 0.0; hi = 1.0; }
-      else if (!vals.empty()) {
-        auto mm = std::minmax_element(vals.begin(), vals.end());
-        lo = *mm.first; hi = *mm.second;
-        if (hi <= lo) hi = lo + 1.0;
-      }
-      QSignalBlocker b1(spHistMin_);
-      QSignalBlocker b2(spHistMax_);
-      spHistMin_->setValue(lo);
-      spHistMax_->setValue(hi);
-      updateHistogramPlot();
+      else if (!vals.empty()) { auto mm = std::minmax_element(vals.begin(), vals.end()); lo = *mm.first; hi = *mm.second; if (hi<=lo) hi = lo + 1.0; }
+      QSignalBlocker b1(spHistMin_); QSignalBlocker b2(spHistMax_);
+      spHistMin_->setValue(lo); spHistMax_->setValue(hi);
+      updateHistogramPlot(); updateLeftVisualDashboard(); onTick();
+    };
+    connect(cbHistMetric_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, resetHistogramRange](int){
+      resetHistogramRange();
     });
-    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
-    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
+    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); updateLeftVisualDashboard(); onTick(); });
+    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); updateLeftVisualDashboard(); onTick(); });
+    connect(btnHistReset, &QPushButton::clicked, this, [resetHistogramRange](){ resetHistogramRange(); });
 
 
     actionTabs_->addTab(tabCap, "Source");
@@ -1890,6 +1890,7 @@ void MainWindow::onRemoveSource() {
   // Source removal must reset all Visual/ObjectDefine measurement outputs.
   meas_rows_.clear();
   target_meas_rows_.clear();
+  analyzed_measures_by_frame_.clear();
   selected_target_id_ = -1;
   selected_target_frame_ = -1;
   pre_scale_line_drawn_ = false;
@@ -2338,6 +2339,7 @@ void MainWindow::onAnalyzeParticles() {
 
   analyzed_contours_.clear();
   analyzed_contours_by_frame_.assign(totalFrames, {});
+  analyzed_measures_by_frame_.assign(totalFrames, {});
   tracked_contours_by_frame_.clear();
   target_meas_rows_.clear();
   meas_rows_.clear();
@@ -2390,6 +2392,7 @@ void MainWindow::onAnalyzeParticles() {
       row.major = std::max(rr.size.width, rr.size.height) * scale;
       row.minor = std::min(rr.size.width, rr.size.height) * scale;
       row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
+      analyzed_measures_by_frame_[i].push_back(AnalyzedContourMeasure{c, row});
       target_meas_rows_.push_back(TargetMeasureRow{-1, row});
     }
   }
@@ -3774,19 +3777,20 @@ void MainWindow::updateHistogramPlot() {
     const QString m = cbHistMetric_->currentText();
     if (m == "Perimeter") return r.perim;
     if (m == "Circularity") return r.circ;
-    if (m == "Speed") return r.speed;
-    if (m == "Displacement") return r.disp;
     if (m == "MajorAxis") return r.major;
     if (m == "MinorAxis") return r.minor;
     return r.area;
   };
 
   std::vector<double> vals;
-  vals.reserve(std::max(target_meas_rows_.size(), meas_rows_.size()));
-  if (!target_meas_rows_.empty()) {
-    for (const auto& t : target_meas_rows_) vals.push_back(pick(t.m));
-  } else {
-    for (const auto& r : meas_rows_) vals.push_back(pick(r));
+  for (const auto& fs : analyzed_measures_by_frame_) for (const auto& am : fs) vals.push_back(pick(am.m));
+  if (vals.empty()) {
+    vals.reserve(std::max(target_meas_rows_.size(), meas_rows_.size()));
+    if (!target_meas_rows_.empty()) {
+      for (const auto& t : target_meas_rows_) vals.push_back(pick(t.m));
+    } else {
+      for (const auto& r : meas_rows_) vals.push_back(pick(r));
+    }
   }
   vals.erase(std::remove_if(vals.begin(), vals.end(), [](double v){ return !std::isfinite(v); }), vals.end());
   if (vals.empty()) { plotHistogram_->clearPlottables(); plotHistogram_->clearItems(); plotHistogram_->replot(); return; }
@@ -3947,6 +3951,7 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource(bool showProgress) {
 
   meas_rows_.clear();
   target_meas_rows_.clear();
+  analyzed_measures_by_frame_.clear();
   last_meas_key_ = std::numeric_limits<qint64>::min();
   last_ctr_ = cv::Point2f(0,0);
   last_speed_ = 0.0;
