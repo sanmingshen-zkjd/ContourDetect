@@ -1144,7 +1144,7 @@ void MainWindow::buildUI() {
     QWidget* tabCal = new QWidget(actionTabs_);
     QVBoxLayout* calv = new QVBoxLayout(tabCal);
 
-    QGroupBox* gbColor = new QGroupBox("Color", tabCal);
+    QGroupBox* gbColor = new QGroupBox("1.Color", tabCal);
     QVBoxLayout* colorLayout = new QVBoxLayout(gbColor);
     cbPreColor_ = new QComboBox(gbColor);
     cbPreColor_->addItem("Black & White");
@@ -1153,7 +1153,7 @@ void MainWindow::buildUI() {
     colorLayout->addWidget(cbPreColor_);
     gbColor->setLayout(colorLayout);
 
-    QGroupBox* gbBC = new QGroupBox("Brightness / Contrast", tabCal);
+    QGroupBox* gbBC = new QGroupBox("2.Brightness/Contrast", tabCal);
     QGridLayout* bcLayout = new QGridLayout(gbBC);
     QLabel* lblB = new QLabel("Brightness", gbBC);
     QLabel* lblC = new QLabel("Contrast", gbBC);
@@ -1189,28 +1189,28 @@ void MainWindow::buildUI() {
     bcLayout->setColumnStretch(1, 1);
     gbBC->setLayout(bcLayout);
 
-    lblPreprocessHint_ = new QLabel("Apply color mode + brightness/contrast to the live view.", tabCal);
-    lblCaptured_ = new QLabel("Captured: 0", tabCal);
+    lblPreprocessHint_ = nullptr;
+    lblCaptured_ = nullptr;
     lblScaleInfo_ = new QLabel("Scale: not calibrated", tabCal);
 
     calv->addWidget(gbColor);
     calv->addWidget(gbBC);
-    calv->addWidget(lblPreprocessHint_);
-
-    calv->addWidget(new QLabel("Step 3: Scale Calibration", tabCal));
+    
+    QGroupBox* gbCalib = new QGroupBox("3.Calibration", tabCal);
+    QVBoxLayout* calibLay = new QVBoxLayout(gbCalib);
     QHBoxLayout* scaleCtl = new QHBoxLayout();
-    btnStartScaleLine_ = new QPushButton("Draw Scale Line", tabCal);
-    btnDeleteScaleLine_ = new QPushButton("Delete Scale Line", tabCal);
-    chkShowLines_ = new QCheckBox("Show Lines", tabCal);
+    btnStartScaleLine_ = new QPushButton("Draw Scale Line", gbCalib);
+    btnDeleteScaleLine_ = new QPushButton("Delete Scale Line", gbCalib);
+    chkShowLines_ = new QCheckBox("Show Lines", gbCalib);
     chkShowLines_->setChecked(false);
     chkShowLines_->setVisible(false);
     scaleCtl->addWidget(btnStartScaleLine_);
     scaleCtl->addWidget(btnDeleteScaleLine_);
     scaleCtl->addWidget(chkShowLines_);
     scaleCtl->addStretch(1);
-    calv->addLayout(scaleCtl);
+    calibLay->addLayout(scaleCtl);
 
-    gbLineProps_ = new QGroupBox("Line Properties", tabCal);
+    gbLineProps_ = new QGroupBox("Line Properties", gbCalib);
     QGridLayout* lp = new QGridLayout(gbLineProps_);
     cbLineColor_ = new QComboBox(gbLineProps_);
     cbLineColor_->addItem("Cyan", QColor(80,220,255));
@@ -1230,12 +1230,13 @@ void MainWindow::buildUI() {
     lp->addWidget(editPhysicalMm_, 2, 1);
     lp->addWidget(btnCalcScale_, 3, 0, 1, 2);
     gbLineProps_->setLayout(lp);
-    gbLineProps_->setVisible(false);
+    gbLineProps_->setVisible(true);
 
-    calv->addWidget(gbLineProps_);
-    calv->addWidget(lblScaleInfo_);
-    calv->addWidget(lblCaptured_);
-    QGroupBox* gbRegion = new QGroupBox("Regions", tabCal);
+    calibLay->addWidget(gbLineProps_);
+    calibLay->addWidget(lblScaleInfo_);
+    gbCalib->setLayout(calibLay);
+    calv->addWidget(gbCalib);
+    QGroupBox* gbRegion = new QGroupBox("4.Regions", tabCal);
     QVBoxLayout* rv = new QVBoxLayout(gbRegion);
     QHBoxLayout* rBtns = new QHBoxLayout();
     btnAddMaskRegion_ = new QPushButton("Add Mask Region", gbRegion);
@@ -1406,6 +1407,8 @@ void MainWindow::buildUI() {
     spHistMax_ = new QDoubleSpinBox(gbHist);
     spHistMin_->setRange(-1e9, 1e9); spHistMax_->setRange(-1e9, 1e9);
     spHistMin_->setValue(0.0); spHistMax_->setValue(1e6);
+    spHistMin_->setMinimumWidth(140);
+    spHistMax_->setMinimumWidth(140);
     configureHistogramEditorsForMetric("Area");
     plotHistogram_ = new QCustomPlot(gbHist);
     plotHistogram_->setMinimumHeight(180);
@@ -1414,13 +1417,13 @@ void MainWindow::buildUI() {
     hg->addWidget(cbHistMetric_, 0, 1, 1, 3);
     QPushButton* btnHistReset = new QPushButton("Reset", gbHist);
     btnHistApply_ = new QPushButton("Apply", gbHist);
-    hg->addWidget(btnHistApply_, 0, 7);
     hg->addWidget(plotHistogram_, 1, 0, 1, 8);
     hg->addWidget(new QLabel("Min", gbHist), 2, 0);
     hg->addWidget(spHistMin_, 2, 1);
     hg->addWidget(new QLabel("Max", gbHist), 2, 2);
     hg->addWidget(spHistMax_, 2, 3);
     hg->addWidget(btnHistReset, 2, 4);
+    hg->addWidget(btnHistApply_, 2, 5);
     gbHist->setLayout(hg);
     trkMainLayout->addWidget(gbHist);
     trkMainLayout->addWidget(btnTrackBinary_);
@@ -2763,8 +2766,8 @@ void MainWindow::refreshRegionTable() {
 
     auto* btnEdit = new QPushButton("Modify", tblRegions_);
     auto* btnDel = new QPushButton("Delete", tblRegions_);
-    btnEdit->setFixedSize(64, 24);
-    btnDel->setFixedSize(64, 24);
+    btnEdit->setFixedSize(56, 20);
+    btnDel->setFixedSize(56, 20);
     btnEdit->setProperty("row", i);
     btnDel->setProperty("row", i);
     connect(btnEdit, &QPushButton::clicked, this, [this, btnEdit]() {
@@ -2786,6 +2789,7 @@ void MainWindow::refreshRegionTable() {
     });
     tblRegions_->setCellWidget(i, 2, btnEdit);
     tblRegions_->setCellWidget(i, 3, btnDel);
+    tblRegions_->setRowHeight(i, 22);
   }
 }
 
