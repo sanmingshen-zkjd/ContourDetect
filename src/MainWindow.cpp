@@ -1338,8 +1338,8 @@ void MainWindow::buildUI() {
     QLabel* lblLocalBlock = new QLabel("Local block size", gbThresh);
     QLabel* lblLocalK = new QLabel("Local k/C", gbThresh);
     tg->addWidget(lblGlobalMethod, 1, 0);
-    cbGlobalMethod_->setMinimumWidth(170);
-    cbLocalMethod_->setMinimumWidth(170);
+    cbGlobalMethod_->setMinimumWidth(130);
+    cbLocalMethod_->setMinimumWidth(130);
     tg->addWidget(cbGlobalMethod_, 1, 1);
     tg->setColumnMinimumWidth(2, 36);
     btnTryAllGlobal_ = new QPushButton("Try All", gbThresh);
@@ -1411,12 +1411,27 @@ void MainWindow::buildUI() {
     spHistMax_ = new QDoubleSpinBox(gbDetect);
     spHistMin_->setRange(-1e9, 1e9); spHistMax_->setRange(-1e9, 1e9);
     spHistMin_->setValue(0.0); spHistMax_->setValue(1e6);
-    spHistMin_->setMinimumWidth(180);
-    spHistMax_->setMinimumWidth(180);
+    spHistMin_->setMinimumWidth(100);
+    spHistMax_->setMinimumWidth(100);
     configureHistogramEditorsForMetric("Area");
     plotHistogram_ = new QCustomPlot(gbDetect);
     plotHistogram_->setMinimumHeight(180);
-    plotHistogram_->addGraph();
+    plotHistogram_->setBackground(QBrush(QColor(17,24,39)));
+    plotHistogram_->xAxis->setBasePen(QPen(QColor(148,163,184)));
+    plotHistogram_->yAxis->setBasePen(QPen(QColor(148,163,184)));
+    plotHistogram_->xAxis->setTickPen(QPen(QColor(148,163,184)));
+    plotHistogram_->yAxis->setTickPen(QPen(QColor(148,163,184)));
+    plotHistogram_->xAxis->setSubTickPen(QPen(QColor(100,116,139)));
+    plotHistogram_->yAxis->setSubTickPen(QPen(QColor(100,116,139)));
+    plotHistogram_->xAxis->setTickLabelColor(QColor(226,232,240));
+    plotHistogram_->yAxis->setTickLabelColor(QColor(226,232,240));
+    plotHistogram_->xAxis->setLabelColor(QColor(226,232,240));
+    plotHistogram_->yAxis->setLabelColor(QColor(226,232,240));
+    plotHistogram_->xAxis->grid()->setPen(QPen(QColor(51,65,85), 1, Qt::DotLine));
+    plotHistogram_->yAxis->grid()->setPen(QPen(QColor(51,65,85), 1, Qt::DotLine));
+    plotHistogram_->xAxis->grid()->setSubGridVisible(false);
+    plotHistogram_->yAxis->grid()->setSubGridVisible(false);
+    plotHistogram_->legend->setVisible(false);
     QPushButton* btnHistReset = new QPushButton("Reset", gbDetect);
     btnHistApply_ = new QPushButton("Apply", gbDetect);
 
@@ -1493,8 +1508,14 @@ void MainWindow::buildUI() {
       auto it = confirmed_hist_rules_.find(metric);
       if (it != confirmed_hist_rules_.end()) {
         QSignalBlocker b1(spHistMin_); QSignalBlocker b2(spHistMax_);
-        spHistMin_->setValue(it->second.first);
-        spHistMax_->setValue(it->second.second);
+        double lo = it->second.first;
+        double hi = it->second.second;
+        if (lo > hi) std::swap(lo, hi);
+        lo = std::max(spHistMin_->minimum(), std::min(spHistMin_->maximum(), lo));
+        hi = std::max(spHistMax_->minimum(), std::min(spHistMax_->maximum(), hi));
+        if (lo > hi) lo = hi;
+        spHistMin_->setValue(lo);
+        spHistMax_->setValue(hi);
         updateHistogramPlot();
       } else {
         resetHistogramRange();
@@ -4084,6 +4105,12 @@ void MainWindow::updateHistogramPlot() {
 
   const int bins = 10;
   const double span = dataHi - dataLo;
+  if (!std::isfinite(span) || span <= 0.0) {
+    plotHistogram_->clearPlottables();
+    plotHistogram_->clearItems();
+    plotHistogram_->replot();
+    return;
+  }
   const double binW = span / bins;
   QVector<double> x(bins), y(bins);
   for (int i=0;i<bins;++i) {
@@ -4091,7 +4118,9 @@ void MainWindow::updateHistogramPlot() {
     y[i] = 0.0;
   }
   for (double v : vals) {
+    if (!std::isfinite(v)) continue;
     int b = std::min(bins-1, std::max(0, (int)((v-dataLo)/span*bins)));
+    if (b < 0 || b >= bins) continue;
     y[b] += 1.0;
   }
 
