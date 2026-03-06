@@ -112,12 +112,35 @@ private slots:
           if (!sync_mode_ && s.seq_idx < (int)s.seq_files.size() - 1) s.seq_idx++;
         } else {
           if (!s.cap.isOpened()) {
-            frames.push_back(cv::Mat());
-            continue;
+            if (!s.is_cam && !s.video_path.isEmpty()) {
+              s.cap.open(s.video_path.toStdString());
+            }
+            if (!s.cap.isOpened()) {
+              frames.push_back(cv::Mat());
+              continue;
+            }
           }
-          if (!s.cap.read(f) && !s.is_cam && sync_mode_) {
-            // In sync mode we avoid per-frame random seeks (causes decode stalls/jitter).
-            // If read fails at end, fallback logic below keeps last good frame.
+
+          const int64_t expectedPos = sync_mode_
+            ? std::max<int64_t>(0, cur_frame_)
+            : std::max<int64_t>(0, (int64_t)std::llround(s.cap.get(cv::CAP_PROP_POS_FRAMES)));
+
+          if (!s.cap.read(f) || f.empty()) {
+            // Some containers/codecs can return empty frames after seek/start.
+            // Retry by re-seeking once, then reopen+seek as a final fallback.
+            if (!s.is_cam) {
+              s.cap.set(cv::CAP_PROP_POS_FRAMES, (double)expectedPos);
+              if (!s.cap.read(f) || f.empty()) {
+                if (!s.video_path.isEmpty()) {
+                  s.cap.release();
+                  s.cap.open(s.video_path.toStdString());
+                  if (s.cap.isOpened()) {
+                    s.cap.set(cv::CAP_PROP_POS_FRAMES, (double)expectedPos);
+                    s.cap.read(f);
+                  }
+                }
+              }
+            }
           }
         }
 
