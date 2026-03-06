@@ -127,6 +127,10 @@ private:
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
+  struct MeasureRow { double disp=0, speed=0, accel=0, area=0, perim=0, major=0, minor=0, circ=0; qint64 key=0; };
+  struct TargetMeasureRow { int id=-1; MeasureRow m; };
+
+public:
   MainWindow(const std::vector<InputSource>& sources,
              int board_w, int board_h, double square_m,
              QWidget* parent=nullptr);
@@ -470,8 +474,6 @@ private:
   int next_track_id_ = 1;
   std::unordered_map<int, cv::Point2f> tracked_centroids_;
   std::unordered_map<int, std::vector<cv::Point>> tracked_contours_;
-  struct MeasureRow { double disp=0, speed=0, accel=0, area=0, perim=0, major=0, minor=0, circ=0; qint64 key=0; };
-  struct TargetMeasureRow { int id=-1; MeasureRow m; };
   std::vector<MeasureRow> meas_rows_;
   std::vector<TargetMeasureRow> target_meas_rows_;
   qint64 last_meas_key_ = std::numeric_limits<qint64>::min();
