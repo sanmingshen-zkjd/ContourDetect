@@ -4643,9 +4643,17 @@ void MainWindow::onPlayAll() {
 
   {
     QMutexLocker srcLock(&sources_mutex_);
-    // Enable all video sources for playback
-    for (int i=0;i<(int)sources_.size();++i) if (!sources_[i].is_cam && sources_[i].mode_owner==(int)mode_) source_enabled_[i]=true;
-
+    // Enable all non-camera sources for playback and align their cursor to current play frame.
+    for (int i=0;i<(int)sources_.size();++i) {
+      auto& src = sources_[i];
+      if (src.is_cam || src.mode_owner!=(int)mode_) continue;
+      source_enabled_[i] = true;
+      if (src.is_image_seq) {
+        if (!src.seq_files.isEmpty()) src.seq_idx = std::max(0, std::min((int)play_frame_, (int)src.seq_files.size()-1));
+      } else if (src.cap.isOpened()) {
+        src.cap.set(cv::CAP_PROP_POS_FRAMES, (double)std::max<int64_t>(0, play_frame_));
+      }
+    }
   }
   playback_running_ = true;
   if (btnPlayAll_) {
