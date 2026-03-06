@@ -1496,9 +1496,12 @@ void MainWindow::buildUI() {
       double lo = 0.0, hi = 1.0;
       if (metric == "Circularity") { lo = 0.0; hi = 1.0; }
       else if (!vals.empty()) { auto mm = std::minmax_element(vals.begin(), vals.end()); lo = *mm.first; hi = *mm.second; if (hi<=lo) hi = lo + 1.0; }
+      configureHistogramEditorsForMetric(metric);
+      lo = std::max(spHistMin_->minimum(), std::min(spHistMin_->maximum(), lo));
+      hi = std::max(spHistMax_->minimum(), std::min(spHistMax_->maximum(), hi));
+      if (lo > hi) lo = hi;
       QSignalBlocker b1(spHistMin_); QSignalBlocker b2(spHistMax_);
       spHistMin_->setValue(lo); spHistMax_->setValue(hi);
-      configureHistogramEditorsForMetric(metric);
       updateHistogramPlot(); updateLeftVisualDashboard(); onTick();
     };
     connect(cbHistMetric_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, resetHistogramRange](int){
