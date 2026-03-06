@@ -81,7 +81,9 @@ public:
   void setLineDoubleClickCallback(const std::function<void(double)>& cb);
   void setLineValueEditedCallback(const std::function<void(double,double)>& cb);
   void setPolygonFinishedCallback(const std::function<void(const QPolygonF&)>& cb);
-  void setRegionPolygons(const std::vector<QPolygonF>& includePolys, const std::vector<QPolygonF>& excludePolys);
+  void setRegionPolygons(const std::vector<QPolygonF>& polygons, const std::vector<bool>& includes, int highlightedIndex=-1);
+  void setRegionEditIndex(int index);
+  void setRegionEditedCallback(const std::function<void(int, const QPolygonF&)>& cb);
   void applySelectedLineStyle(const QString& name, const QColor& color, int width);
   void setAnnotationsVisible(bool visible);
   void clearAllLines();
@@ -93,6 +95,7 @@ protected:
   void mousePressEvent(QMouseEvent* e) override;
   void mouseMoveEvent(QMouseEvent* e) override;
   void mouseDoubleClickEvent(QMouseEvent* e) override;
+  void mouseReleaseEvent(QMouseEvent* e) override;
   void resizeEvent(QResizeEvent* e) override;
 
 private:
@@ -109,10 +112,16 @@ private:
   QPolygonF polygonPoints_;
   QGraphicsPolygonItem* previewPolygon_ = nullptr;
   std::vector<QGraphicsPolygonItem*> regionPolygonItems_;
+  std::vector<QGraphicsEllipseItem*> regionEditHandles_;
+  int editingRegionIndex_ = -1;
+  int highlightedRegionIndex_ = -1;
+  bool draggingRegionHandle_ = false;
+  int draggingHandleIndex_ = -1;
   std::function<void(double)> onLineCreated_;
   std::function<void(double)> onLineDoubleClick_;
   std::function<void(double,double)> onLineValueEdited_;
   std::function<void(const QPolygonF&)> onPolygonFinished_;
+  std::function<void(int, const QPolygonF&)> onRegionEdited_;
 };
 
 class MainWindow : public QMainWindow {
@@ -185,6 +194,7 @@ private slots:
   void onAddMaskRegion();
   void onAddDetectRegion();
   void onDeleteRegion();
+  void onRegionTableSelectionChanged();
   void onSelectBinaryOp();
   void onUndoBinaryOp();
   void onAnalyzeParticles();
@@ -233,6 +243,7 @@ private:
   void updateMeasurementFromFrame(const cv::Mat& preprocessedFrame);
   void updateHistogramPlot();
   void refreshRegionTable();
+  void refreshRegionOverlays(int highlightedIndex=-1, int editingIndex=-1);
   void updateLeftVisualDashboard();
   double metricValueForHist(const MeasureRow& r, const QString& metric) const;
   bool passesConfirmedHistogramRules(const MeasureRow& r) const;
@@ -471,6 +482,7 @@ private:
   std::vector<RegionSpec> regions_;
   int next_region_id_ = 1;
   int drawing_region_type_ = 0; // 0 none, 1 include, 2 exclude
+  int editing_region_index_ = -1;
   std::vector<std::vector<std::vector<cv::Point>>> analyzed_contours_by_frame_;
   struct AnalyzedContourMeasure { std::vector<cv::Point> contour; MeasureRow m; };
   std::vector<std::vector<AnalyzedContourMeasure>> analyzed_measures_by_frame_;

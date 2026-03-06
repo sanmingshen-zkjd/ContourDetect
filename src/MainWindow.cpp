@@ -337,17 +337,46 @@ void ImageViewer::setLineDoubleClickCallback(const std::function<void(double)>& 
 void ImageViewer::setLineValueEditedCallback(const std::function<void(double,double)>& cb) { onLineValueEdited_ = cb; }
 void ImageViewer::setPolygonFinishedCallback(const std::function<void(const QPolygonF&)>& cb) { onPolygonFinished_ = cb; }
 
-void ImageViewer::setRegionPolygons(const std::vector<QPolygonF>& includePolys, const std::vector<QPolygonF>& excludePolys) {
+void ImageViewer::setRegionPolygons(const std::vector<QPolygonF>& polygons, const std::vector<bool>& includes, int highlightedIndex) {
   for (auto* it : regionPolygonItems_) { if (it) { scene_.removeItem(it); delete it; } }
   regionPolygonItems_.clear();
-  auto addPoly=[this](const QPolygonF& p, const QColor& c){
-    if (p.size() < 3) return;
-    auto* it = scene_.addPolygon(p, QPen(c, 2, Qt::DashLine), QBrush(QColor(c.red(), c.green(), c.blue(), 40)));
+  for (auto* h : regionEditHandles_) { if (h) { scene_.removeItem(h); delete h; } }
+  regionEditHandles_.clear();
+  highlightedRegionIndex_ = highlightedIndex;
+
+  const int n = std::min((int)polygons.size(), (int)includes.size());
+  for (int i=0;i<n;++i) {
+    const auto& p = polygons[(size_t)i];
+    if (p.size() < 3) continue;
+    const QColor c = includes[(size_t)i] ? QColor(34,197,94) : QColor(239,68,68);
+    const bool hi = (i == highlightedRegionIndex_);
+    auto* it = scene_.addPolygon(p,
+      QPen(hi ? QColor(250,204,21) : c, hi ? 3 : 2, Qt::DashLine),
+      QBrush(QColor(c.red(), c.green(), c.blue(), hi ? 70 : 40)));
     it->setZValue(3);
     regionPolygonItems_.push_back(it);
-  };
-  for (const auto& p : includePolys) addPoly(p, QColor(34,197,94));
-  for (const auto& p : excludePolys) addPoly(p, QColor(239,68,68));
+  }
+
+  if (editingRegionIndex_ >= 0 && editingRegionIndex_ < (int)regionPolygonItems_.size()) {
+    auto* editPoly = regionPolygonItems_[(size_t)editingRegionIndex_];
+    if (editPoly) {
+      const QPolygonF poly = editPoly->polygon();
+      for (int i=0;i<poly.size();++i) {
+        auto* h = scene_.addEllipse(-5,-5,10,10, QPen(QColor(250,204,21), 2), QBrush(QColor(250,204,21)));
+        h->setZValue(6);
+        h->setPos(poly[i]);
+        regionEditHandles_.push_back(h);
+      }
+    }
+  }
+}
+
+void ImageViewer::setRegionEditIndex(int index) {
+  editingRegionIndex_ = index;
+}
+
+void ImageViewer::setRegionEditedCallback(const std::function<void(int, const QPolygonF&)>& cb) {
+  onRegionEdited_ = cb;
 }
 
 void ImageViewer::applySelectedLineStyle(const QString& name, const QColor& color, int width) {
@@ -417,6 +446,19 @@ void ImageViewer::wheelEvent(QWheelEvent* e) {
 }
 
 void ImageViewer::mousePressEvent(QMouseEvent* e) {
+  if (editingRegionIndex_ >= 0 && e->button() == Qt::LeftButton) {
+    QPointF sp = mapToScene(e->pos());
+    for (int i=0;i<(int)regionEditHandles_.size();++i) {
+      auto* h = regionEditHandles_[(size_t)i];
+      if (!h) continue;
+      if (QLineF(h->scenePos(), sp).length() <= 10.0) {
+        draggingRegionHandle_ = true;
+        draggingHandleIndex_ = i;
+        e->accept();
+        return;
+      }
+    }
+  }
   if (toolMode_ == PanTool) {
     QGraphicsView::mousePressEvent(e);
     return;
@@ -496,7 +538,38 @@ void ImageViewer::mouseMoveEvent(QMouseEvent* e) {
     previewPolygon_->setPolygon(tmp);
     return;
   }
+  if (draggingRegionHandle_ && editingRegionIndex_ >= 0 && draggingHandleIndex_ >= 0 && editingRegionIndex_ < (int)regionPolygonItems_.size()) {
+    QPointF p = mapToScene(e->pos());
+    auto* polyItem = regionPolygonItems_[(size_t)editingRegionIndex_];
+    if (polyItem) {
+      QPolygonF poly = polyItem->polygon();
+      if (draggingHandleIndex_ < poly.size()) {
+        poly[draggingHandleIndex_] = p;
+        polyItem->setPolygon(poly);
+        if (draggingHandleIndex_ < (int)regionEditHandles_.size() && regionEditHandles_[(size_t)draggingHandleIndex_]) {
+          regionEditHandles_[(size_t)draggingHandleIndex_]->setPos(p);
+        }
+      }
+    }
+    e->accept();
+    return;
+  }
   QGraphicsView::mouseMoveEvent(e);
+}
+
+
+void ImageViewer::mouseReleaseEvent(QMouseEvent* e) {
+  if (draggingRegionHandle_ && e->button() == Qt::LeftButton) {
+    draggingRegionHandle_ = false;
+    if (editingRegionIndex_ >= 0 && editingRegionIndex_ < (int)regionPolygonItems_.size() && onRegionEdited_) {
+      auto* p = regionPolygonItems_[(size_t)editingRegionIndex_];
+      if (p) onRegionEdited_(editingRegionIndex_, p->polygon());
+    }
+    draggingHandleIndex_ = -1;
+    e->accept();
+    return;
+  }
+  QGraphicsView::mouseReleaseEvent(e);
 }
 
 
@@ -1143,12 +1216,15 @@ void MainWindow::buildUI() {
     rBtns->addWidget(btnAddDetectRegion_);
     rBtns->addWidget(btnDeleteRegion_);
     tblRegions_ = new QTableWidget(gbRegion);
-    tblRegions_->setColumnCount(2);
-    tblRegions_->setHorizontalHeaderLabels({"Type","Points"});
+    tblRegions_->setColumnCount(4);
+    tblRegions_->setHorizontalHeaderLabels({"Type","Points","Edit","Delete"});
     tblRegions_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     tblRegions_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    tblRegions_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    tblRegions_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     tblRegions_->setSelectionBehavior(QAbstractItemView::SelectRows);
     tblRegions_->setSelectionMode(QAbstractItemView::SingleSelection);
+    tblRegions_->setStyleSheet("QTableWidget{background:#1f2937;color:#e5e7eb;gridline-color:#4b5563;selection-background-color:#2563eb;selection-color:#ffffff;}QHeaderView::section{background:#334155;color:#f8fafc;border:1px solid #475569;padding:5px;font-weight:600;}");
     rv->addLayout(rBtns);
     rv->addWidget(tblRegions_);
     gbRegion->setLayout(rv);
@@ -1173,6 +1249,7 @@ void MainWindow::buildUI() {
     connect(btnAddMaskRegion_, &QPushButton::clicked, this, &MainWindow::onAddMaskRegion);
     connect(btnAddDetectRegion_, &QPushButton::clicked, this, &MainWindow::onAddDetectRegion);
     connect(btnDeleteRegion_, &QPushButton::clicked, this, &MainWindow::onDeleteRegion);
+    connect(tblRegions_, &QTableWidget::itemSelectionChanged, this, &MainWindow::onRegionTableSelectionChanged);
 
     // ObjectDefine + Visual pages
     QWidget* tabObj = new QWidget(actionTabs_);
@@ -1653,15 +1730,20 @@ void MainWindow::rebuildSourceViews() {
       rs.poly = poly;
       regions_.push_back(rs);
       refreshRegionTable();
-      std::vector<QPolygonF> inc, exc;
-      for (const auto& r : regions_) (r.include ? inc : exc).push_back(r.poly);
-      for (auto* sv : sourceViews_) if (sv) sv->setRegionPolygons(inc, exc);
+      refreshRegionOverlays((int)regions_.size()-1, -1);
       drawing_region_type_ = 0;
       logLine(rs.include ? "Added detect region." : "Added mask region.");
     });
-    std::vector<QPolygonF> inc, exc;
-    for (const auto& r : regions_) (r.include ? inc : exc).push_back(r.poly);
-    v->setRegionPolygons(inc, exc);
+    std::vector<QPolygonF> polys; std::vector<bool> includes;
+    for (const auto& r : regions_) { polys.push_back(r.poly); includes.push_back(r.include); }
+    v->setRegionEditedCallback([this](int idx, const QPolygonF& poly){
+      if (idx < 0 || idx >= (int)regions_.size()) return;
+      regions_[(size_t)idx].poly = poly;
+      refreshRegionTable();
+      refreshRegionOverlays(idx, idx);
+    });
+    v->setRegionEditIndex(editing_region_index_);
+    v->setRegionPolygons(polys, includes, tblRegions_ ? tblRegions_->currentRow() : -1);
     v->setAnnotationsVisible(chkShowLines_ ? chkShowLines_->isChecked() : false);
     //connect(panBtn, &QToolButton::clicked, this, [v, panBtn, pointBtn, lineBtn]() {
     //  panBtn->setChecked(true); pointBtn->setChecked(false); lineBtn->setChecked(false);
@@ -2670,17 +2752,60 @@ void MainWindow::refreshRegionTable() {
     const auto& r = regions_[i];
     tblRegions_->setItem(i, 0, new QTableWidgetItem(r.include ? "Detect" : "Mask"));
     tblRegions_->setItem(i, 1, new QTableWidgetItem(QString("%1 pts").arg(r.poly.size())));
+
+    auto* btnEdit = new QPushButton("Modify", tblRegions_);
+    auto* btnDel = new QPushButton("Delete", tblRegions_);
+    btnEdit->setProperty("row", i);
+    btnDel->setProperty("row", i);
+    connect(btnEdit, &QPushButton::clicked, this, [this, btnEdit]() {
+      int row = btnEdit->property("row").toInt();
+      if (row < 0 || row >= (int)regions_.size()) return;
+      editing_region_index_ = row;
+      if (tblRegions_) tblRegions_->selectRow(row);
+      refreshRegionOverlays(row, row);
+      logLine(QString("Modify region %1: drag polygon vertices in player.").arg(row));
+    });
+    connect(btnDel, &QPushButton::clicked, this, [this, btnDel]() {
+      int row = btnDel->property("row").toInt();
+      if (row < 0 || row >= (int)regions_.size()) return;
+      regions_.erase(regions_.begin() + row);
+      if (editing_region_index_ == row) editing_region_index_ = -1;
+      else if (editing_region_index_ > row) editing_region_index_--;
+      refreshRegionTable();
+      refreshRegionOverlays(tblRegions_ ? tblRegions_->currentRow() : -1, editing_region_index_);
+    });
+    tblRegions_->setCellWidget(i, 2, btnEdit);
+    tblRegions_->setCellWidget(i, 3, btnDel);
   }
+}
+
+void MainWindow::refreshRegionOverlays(int highlightedIndex, int editingIndex) {
+  std::vector<QPolygonF> polys; std::vector<bool> includes;
+  polys.reserve(regions_.size()); includes.reserve(regions_.size());
+  for (const auto& r : regions_) { polys.push_back(r.poly); includes.push_back(r.include); }
+  for (auto* sv : sourceViews_) {
+    if (!sv) continue;
+    sv->setRegionEditIndex(editingIndex);
+    sv->setRegionPolygons(polys, includes, highlightedIndex);
+  }
+}
+
+void MainWindow::onRegionTableSelectionChanged() {
+  if (!tblRegions_) return;
+  int r = tblRegions_->currentRow();
+  refreshRegionOverlays(r, editing_region_index_);
 }
 
 void MainWindow::onAddMaskRegion() {
   drawing_region_type_ = 2;
+  editing_region_index_ = -1;
   for (auto* v : sourceViews_) if (v) { v->setAnnotationsVisible(true); v->setToolMode(ImageViewer::PolygonTool); }
   logLine("Draw mask polygon on left view, right click to finish.");
 }
 
 void MainWindow::onAddDetectRegion() {
   drawing_region_type_ = 1;
+  editing_region_index_ = -1;
   for (auto* v : sourceViews_) if (v) { v->setAnnotationsVisible(true); v->setToolMode(ImageViewer::PolygonTool); }
   logLine("Draw detect polygon on left view, right click to finish.");
 }
@@ -2690,10 +2815,10 @@ void MainWindow::onDeleteRegion() {
   int r = tblRegions_->currentRow();
   if (r < 0 || r >= (int)regions_.size()) return;
   regions_.erase(regions_.begin() + r);
+  if (editing_region_index_ == r) editing_region_index_ = -1;
+  else if (editing_region_index_ > r) editing_region_index_--;
   refreshRegionTable();
-  std::vector<QPolygonF> inc, exc;
-  for (const auto& it : regions_) (it.include ? inc : exc).push_back(it.poly);
-  for (auto* sv : sourceViews_) if (sv) sv->setRegionPolygons(inc, exc);
+  refreshRegionOverlays(tblRegions_->currentRow(), editing_region_index_);
   logLine("Region deleted.");
 }
 
