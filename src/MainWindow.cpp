@@ -898,11 +898,40 @@ void MainWindow::buildUI() {
     topSourceBar->addWidget(btnCaptureVisual_);
     topSourceBar->addWidget(btnExportTableCsv_);
     topSourceBar->addWidget(btnExportMp4_);
+    QWidget* smoothCtl = new QWidget(central);
+    QHBoxLayout* smoothLay = new QHBoxLayout(smoothCtl);
+    smoothLay->setContentsMargins(0,0,0,0);
+    smoothLay->setSpacing(4);
+    smoothLay->addWidget(new QLabel("Median", smoothCtl));
+    spSmoothMedianWindow_ = new QSpinBox(smoothCtl);
+    spSmoothMedianWindow_->setRange(3, 11);
+    spSmoothMedianWindow_->setSingleStep(2);
+    spSmoothMedianWindow_->setValue(3);
+    spSmoothMedianWindow_->setFixedWidth(64);
+    smoothLay->addWidget(spSmoothMedianWindow_);
+    smoothLay->addWidget(new QLabel("Speed α", smoothCtl));
+    spSmoothAlphaSpeed_ = new QDoubleSpinBox(smoothCtl);
+    spSmoothAlphaSpeed_->setRange(0.01, 1.0);
+    spSmoothAlphaSpeed_->setSingleStep(0.05);
+    spSmoothAlphaSpeed_->setDecimals(2);
+    spSmoothAlphaSpeed_->setValue(0.35);
+    spSmoothAlphaSpeed_->setFixedWidth(72);
+    smoothLay->addWidget(spSmoothAlphaSpeed_);
+    smoothLay->addWidget(new QLabel("Accel α", smoothCtl));
+    spSmoothAlphaAccel_ = new QDoubleSpinBox(smoothCtl);
+    spSmoothAlphaAccel_->setRange(0.01, 1.0);
+    spSmoothAlphaAccel_->setSingleStep(0.05);
+    spSmoothAlphaAccel_->setDecimals(2);
+    spSmoothAlphaAccel_->setValue(0.20);
+    spSmoothAlphaAccel_->setFixedWidth(72);
+    smoothLay->addWidget(spSmoothAlphaAccel_);
+    topSourceBar->addWidget(smoothCtl);
     btnCaptureVisual_->setVisible(false);
     btnExportTableCsv_->setVisible(false);
     btnExportMp4_->setVisible(false);
     if (cbTargetFilter_) cbTargetFilter_->setVisible(false);
     if (cbXAxisMode_) cbXAxisMode_->setVisible(false);
+    if (smoothCtl) smoothCtl->setVisible(false);
     v->addLayout(topSourceBar);
 
     QFrame* topSep = new QFrame(central);
@@ -1211,10 +1240,8 @@ void MainWindow::buildUI() {
     QHBoxLayout* rBtns = new QHBoxLayout();
     btnAddMaskRegion_ = new QPushButton("Add Mask Region", gbRegion);
     btnAddDetectRegion_ = new QPushButton("Add Detect Region", gbRegion);
-    btnDeleteRegion_ = new QPushButton("Delete Region", gbRegion);
     rBtns->addWidget(btnAddMaskRegion_);
     rBtns->addWidget(btnAddDetectRegion_);
-    rBtns->addWidget(btnDeleteRegion_);
     tblRegions_ = new QTableWidget(gbRegion);
     tblRegions_->setColumnCount(4);
     tblRegions_->setHorizontalHeaderLabels({"Type","Points","Edit","Delete"});
@@ -1248,7 +1275,6 @@ void MainWindow::buildUI() {
     connect(chkShowLines_, &QCheckBox::toggled, this, [this](bool on){ for (auto* v: sourceViews_) if (v) v->setAnnotationsVisible(on); });
     connect(btnAddMaskRegion_, &QPushButton::clicked, this, &MainWindow::onAddMaskRegion);
     connect(btnAddDetectRegion_, &QPushButton::clicked, this, &MainWindow::onAddDetectRegion);
-    connect(btnDeleteRegion_, &QPushButton::clicked, this, &MainWindow::onDeleteRegion);
     connect(tblRegions_, &QTableWidget::itemSelectionChanged, this, &MainWindow::onRegionTableSelectionChanged);
 
     // ObjectDefine + Visual pages
@@ -1369,26 +1395,6 @@ void MainWindow::buildUI() {
     bp->addWidget(btnUndoBinaryOp_, 0, 2);
     bp->addWidget(lblBinaryOps_, 1, 0, 1, 4);
     bp->addWidget(btnAnalyzeParticles_, 2, 0, 1, 4);
-    bp->addWidget(new QLabel("Median Window", gbBinaryProc), 3, 0);
-    spSmoothMedianWindow_ = new QSpinBox(gbBinaryProc);
-    spSmoothMedianWindow_->setRange(3, 11);
-    spSmoothMedianWindow_->setSingleStep(2);
-    spSmoothMedianWindow_->setValue(3);
-    bp->addWidget(spSmoothMedianWindow_, 3, 1);
-    bp->addWidget(new QLabel("Speed α", gbBinaryProc), 3, 2);
-    spSmoothAlphaSpeed_ = new QDoubleSpinBox(gbBinaryProc);
-    spSmoothAlphaSpeed_->setRange(0.01, 1.0);
-    spSmoothAlphaSpeed_->setSingleStep(0.05);
-    spSmoothAlphaSpeed_->setDecimals(2);
-    spSmoothAlphaSpeed_->setValue(0.35);
-    bp->addWidget(spSmoothAlphaSpeed_, 3, 3);
-    bp->addWidget(new QLabel("Accel α", gbBinaryProc), 4, 2);
-    spSmoothAlphaAccel_ = new QDoubleSpinBox(gbBinaryProc);
-    spSmoothAlphaAccel_->setRange(0.01, 1.0);
-    spSmoothAlphaAccel_->setSingleStep(0.05);
-    spSmoothAlphaAccel_->setDecimals(2);
-    spSmoothAlphaAccel_->setValue(0.20);
-    bp->addWidget(spSmoothAlphaAccel_, 4, 3);
     gbBinaryProc->setLayout(bp);
     trkMainLayout->addWidget(gbBinaryProc);
 
@@ -1405,16 +1411,16 @@ void MainWindow::buildUI() {
     plotHistogram_->setMinimumHeight(180);
     plotHistogram_->addGraph();
     hg->addWidget(new QLabel("Metric", gbHist), 0, 0);
-    hg->addWidget(cbHistMetric_, 0, 1);
-    hg->addWidget(new QLabel("Min", gbHist), 0, 2);
-    hg->addWidget(spHistMin_, 0, 3);
-    hg->addWidget(new QLabel("Max", gbHist), 0, 4);
-    hg->addWidget(spHistMax_, 0, 5);
+    hg->addWidget(cbHistMetric_, 0, 1, 1, 3);
     QPushButton* btnHistReset = new QPushButton("Reset", gbHist);
     btnHistApply_ = new QPushButton("Apply", gbHist);
-    hg->addWidget(btnHistReset, 0, 6);
     hg->addWidget(btnHistApply_, 0, 7);
     hg->addWidget(plotHistogram_, 1, 0, 1, 8);
+    hg->addWidget(new QLabel("Min", gbHist), 2, 0);
+    hg->addWidget(spHistMin_, 2, 1);
+    hg->addWidget(new QLabel("Max", gbHist), 2, 2);
+    hg->addWidget(spHistMax_, 2, 3);
+    hg->addWidget(btnHistReset, 2, 4);
     gbHist->setLayout(hg);
     trkMainLayout->addWidget(gbHist);
     trkMainLayout->addWidget(btnTrackBinary_);
@@ -1476,8 +1482,8 @@ void MainWindow::buildUI() {
         resetHistogramRange();
       }
     });
-    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
-    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); });
+    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); updateLeftVisualDashboard(); onTick(); });
+    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); updateLeftVisualDashboard(); onTick(); });
     connect(btnHistReset, &QPushButton::clicked, this, [resetHistogramRange](){ resetHistogramRange(); });
     if (btnHistApply_) connect(btnHistApply_, &QPushButton::clicked, this, [this](){
       if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
@@ -1494,7 +1500,7 @@ void MainWindow::buildUI() {
     actionTabs_->addTab(tabVis, "Visual");
     if (actionTabs_->tabBar()) actionTabs_->tabBar()->hide();
 
-    connect(stepTabs_, &QTabBar::currentChanged, this, [this, leftStack, dock, root](int idx){
+    connect(stepTabs_, &QTabBar::currentChanged, this, [this, leftStack, dock, root, smoothCtl](int idx){
       const QSize keepSize = this->size();
       if (isArrowTab(idx)) {
         int fallback = stepToTabIndex(std::max(0, std::min(3, tabIndexToStep(std::max(0, idx-1)))));
@@ -1513,6 +1519,7 @@ void MainWindow::buildUI() {
       if (btnExportMp4_) btnExportMp4_->setVisible(visual);
       if (cbTargetFilter_) cbTargetFilter_->setVisible(visual);
       if (cbXAxisMode_) cbXAxisMode_->setVisible(visual);
+      if (smoothCtl) smoothCtl->setVisible(visual);
       const bool preprocess = (stepIdx == 1);
       for (auto* sv : sourceViews_) if (sv) sv->setAnnotationsVisible(preprocess);
       if (stepIdx == 0) onModeCapture();
@@ -2743,6 +2750,7 @@ void MainWindow::onToggleTrackBinary() {
   updateHistogramPlot();
   onTick();
   logLine("Track completed using Hungarian association on analyzed contours.");
+  QMessageBox::information(this, "Track", "Track completed.");
 }
 
 void MainWindow::refreshRegionTable() {
@@ -2755,6 +2763,8 @@ void MainWindow::refreshRegionTable() {
 
     auto* btnEdit = new QPushButton("Modify", tblRegions_);
     auto* btnDel = new QPushButton("Delete", tblRegions_);
+    btnEdit->setFixedSize(64, 24);
+    btnDel->setFixedSize(64, 24);
     btnEdit->setProperty("row", i);
     btnDel->setProperty("row", i);
     connect(btnEdit, &QPushButton::clicked, this, [this, btnEdit]() {
@@ -3086,10 +3096,8 @@ void MainWindow::onPreprocessAuto() {
 void MainWindow::updateScaleStatus(double pxLen) {
   if (!lblScaleInfo_) return;
   if (mm_per_pixel_ > 0.0) {
-    lblScaleInfo_->setText(QString("Scale: %1 mm/px (line: %2 px, %3 mm)")
-                           .arg(mm_per_pixel_,0,'f',9)
-                           .arg(pxLen,0,'f',2)
-                           .arg(pxLen * mm_per_pixel_,0,'f',4));
+    lblScaleInfo_->setText(QString("<b><span style=\"color:#facc15;\">Scale: %1 mm/px</span></b>")
+                           .arg(mm_per_pixel_,0,'f',9));
   } else {
     lblScaleInfo_->setText(QString("Scale: line length %1 px (double click line to set real distance)").arg(pxLen,0,'f',2));
   }
@@ -4001,6 +4009,11 @@ bool MainWindow::passesConfirmedHistogramRules(const MeasureRow& r) const {
     if (!std::isfinite(v)) return false;
     if (v < kv.second.first || v > kv.second.second) return false;
   }
+  if (cbHistMetric_ && spHistMin_ && spHistMax_) {
+    const double v = metricValueForHist(r, cbHistMetric_->currentText());
+    if (!std::isfinite(v)) return false;
+    if (v < spHistMin_->value() || v > spHistMax_->value()) return false;
+  }
   return true;
 }
 
@@ -4445,9 +4458,12 @@ void MainWindow::updateLeftVisualDashboard() {
     int rr = 0;
     leftMeasureTable_->setRowCount((int)rows.size());
     auto setTxt=[&](int r,int c,const QString& v){ leftMeasureTable_->setItem(r,c,new QTableWidgetItem(v)); };
+    qint64 lastFrameShown = std::numeric_limits<qint64>::min();
     for (int i=0;i<(int)rows.size();++i) {
       const auto& t = rows[i];
       if (!showIds.count(t.id) || !passHistThreshold(t.m)) continue;
+      if (t.m.key == lastFrameShown) continue; // one row per frame when multiple targets exist
+      lastFrameShown = t.m.key;
       setTxt(rr,0,QString::number(t.m.key));
       setTxt(rr,1,QString::number(t.id));
       setTxt(rr,2,QString::number(t.m.disp,'f',4));
@@ -4461,6 +4477,20 @@ void MainWindow::updateLeftVisualDashboard() {
       rr++;
     }
     leftMeasureTable_->setRowCount(rr);
+    int pickRow = -1;
+    for (int r=0; r<leftMeasureTable_->rowCount(); ++r) {
+      auto* frIt = leftMeasureTable_->item(r,0);
+      if (frIt && frIt->text().toLongLong() == play_frame_) { pickRow = r; break; }
+    }
+    if (pickRow >= 0) {
+      QSignalBlocker b(leftMeasureTable_);
+      leftMeasureTable_->selectRow(pickRow);
+      leftMeasureTable_->scrollToItem(leftMeasureTable_->item(pickRow,0), QAbstractItemView::PositionAtCenter);
+      auto* frIt = leftMeasureTable_->item(pickRow,0);
+      auto* idIt = leftMeasureTable_->item(pickRow,1);
+      selected_target_frame_ = frIt ? frIt->text().toInt() : -1;
+      selected_target_id_ = idIt ? idIt->text().toInt() : -1;
+    }
   }
 }
 
