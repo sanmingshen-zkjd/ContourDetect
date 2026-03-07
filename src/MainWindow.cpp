@@ -1517,7 +1517,7 @@ void MainWindow::buildUI() {
       onTick();
     };
 
-    auto applyHistogramCommitted = [this]() {
+    auto applyHistogramCommitted = [this, resetHistogramRange]() {
       if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
       const QString metric = cbHistMetric_->currentText();
       const double lo = spHistMin_->value();
