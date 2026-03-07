@@ -19,6 +19,7 @@
 #include <QStatusBar>
 #include <QGroupBox>
 #include <QGridLayout>
+#include <QVBoxLayout>
 #include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -28,6 +29,8 @@
 #include <QGraphicsScene>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsLineItem>
+#include <QGraphicsPolygonItem>
+#include <QPolygonF>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QResizeEvent>
@@ -38,6 +41,9 @@
 #include <QLineEdit>
 #include <QStringList>
 #include <QVector>
+#include <QColor>
+#include <functional>
+#include <limits>
 
 #include <opencv2/opencv.hpp>
 #include "Core.h"
@@ -63,7 +69,7 @@ class QCustomPlot;
 
 class ImageViewer : public QGraphicsView {
 public:
-  enum ToolMode { PanTool=0, PointTool=1, LineTool=2 };
+  enum ToolMode { PanTool=0, PointTool=1, LineTool=2, PolygonTool=3 };
   explicit ImageViewer(QWidget* parent=nullptr);
   void setImage(const QImage& img);
   void setToolMode(ToolMode mode);
@@ -71,11 +77,25 @@ public:
   void zoomOut();
   void resetView();
   void clearAnnotations();
+  void setLineCreatedCallback(const std::function<void(double)>& cb);
+  void setLineDoubleClickCallback(const std::function<void(double)>& cb);
+  void setLineValueEditedCallback(const std::function<void(double,double)>& cb);
+  void setPolygonFinishedCallback(const std::function<void(const QPolygonF&)>& cb);
+  void setRegionPolygons(const std::vector<QPolygonF>& polygons, const std::vector<bool>& includes, int highlightedIndex=-1);
+  void setRegionEditIndex(int index);
+  void setRegionEditedCallback(const std::function<void(int, const QPolygonF&)>& cb);
+  void applySelectedLineStyle(const QString& name, const QColor& color, int width);
+  void setAnnotationsVisible(bool visible);
+  void clearAllLines();
+  double selectedLineLength() const;
+  double anyLineLength() const;
 
 protected:
   void wheelEvent(QWheelEvent* e) override;
   void mousePressEvent(QMouseEvent* e) override;
   void mouseMoveEvent(QMouseEvent* e) override;
+  void mouseDoubleClickEvent(QMouseEvent* e) override;
+  void mouseReleaseEvent(QMouseEvent* e) override;
   void resizeEvent(QResizeEvent* e) override;
 
 private:
@@ -88,10 +108,28 @@ private:
   bool lineDrawing_ = false;
   QPointF lineStart_;
   QGraphicsLineItem* previewLine_ = nullptr;
+  bool polygonDrawing_ = false;
+  QPolygonF polygonPoints_;
+  QGraphicsPolygonItem* previewPolygon_ = nullptr;
+  std::vector<QGraphicsPolygonItem*> regionPolygonItems_;
+  std::vector<QGraphicsEllipseItem*> regionEditHandles_;
+  int editingRegionIndex_ = -1;
+  int highlightedRegionIndex_ = -1;
+  bool draggingRegionHandle_ = false;
+  int draggingHandleIndex_ = -1;
+  std::function<void(double)> onLineCreated_;
+  std::function<void(double)> onLineDoubleClick_;
+  std::function<void(double,double)> onLineValueEdited_;
+  std::function<void(const QPolygonF&)> onPolygonFinished_;
+  std::function<void(int, const QPolygonF&)> onRegionEdited_;
 };
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
+public:
+  struct MeasureRow { double disp=0, speed=0, accel=0, area=0, perim=0, major=0, minor=0, circ=0; qint64 key=0; };
+  struct TargetMeasureRow { int id=-1; MeasureRow m; };
+
 public:
   MainWindow(const std::vector<InputSource>& sources,
              int board_w, int board_h, double square_m,
@@ -149,6 +187,23 @@ private slots:
   void onModeTracking();
   void onModeCapture();
   void onModeTabChanged(int idx);
+  void onPreprocessParamsChanged();
+  void onPreprocessAuto();
+  void onObjectThresholdParamsChanged();
+  void onStartScaleLine();
+  void onDeleteScaleLine();
+  void onApplyScaleFromInput();
+  void onTryAllGlobalMethods();
+  void onTryAllLocalMethods();
+  void onShowBinaryPreviewPopup();
+  void onAddMaskRegion();
+  void onAddDetectRegion();
+  void onDeleteRegion();
+  void onRegionTableSelectionChanged();
+  void onSelectBinaryOp();
+  void onUndoBinaryOp();
+  void onAnalyzeParticles();
+  void onToggleTrackBinary();
 
 private:
   void buildUI();
@@ -180,8 +235,30 @@ private:
   void overlayTracking(std::vector<cv::Mat>& vis, const std::vector<cv::Mat>& frames);
 
   void updateStatus();
+  void updateStepAvailability();
+  bool hasAnySourceInCurrentMode();
+  cv::Mat applyPreprocess(const cv::Mat& src) const;
+  void updateScaleStatus(double pxLen);
+  cv::Mat makeObjectBinaryMask(const cv::Mat& src, int* outGlobalThreshold=nullptr) const;
+  cv::Mat applyBinaryProcessOps(const cv::Mat& binMask) const;
+  cv::Mat makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalThreshold=nullptr) const;
+  std::vector<std::vector<cv::Point>> detectBinaryContours(const cv::Mat& src, int* outGlobalThreshold=nullptr) const;
   bool runCalibrationOnPairs(const std::vector<int>& pairIndices, bool updateTable);
   void refreshTrajectoryPlot();
+  void updateMeasurementFromFrame(const cv::Mat& preprocessedFrame);
+  void updateHistogramPlot();
+  void refreshRegionTable();
+  void refreshRegionOverlays(int highlightedIndex=-1, int editingIndex=-1);
+  void updateLeftVisualDashboard();
+  void fitAllVisualPlots();
+  double metricValueForHist(const MeasureRow& r, const QString& metric) const;
+  bool passesConfirmedHistogramRules(const MeasureRow& r) const;
+  void configureHistogramEditorsForMetric(const QString& metric);
+  void rebuildMeasurementSeriesFromCurrentSource(bool showProgress=false);
+  void savePlotAsBmp(QCustomPlot* plot, const QString& nameHint);
+  void onExportTableCsv();
+  void onCaptureVisualSnapshot();
+  void onExportVisualMp4();
   void onAddVisualizationChart();
   void onVisualizationPlotContextMenu(const QPoint& pos);
   bool chooseVisualizationDataTypes(QVector<int>& components, QString& labelOut);
@@ -255,6 +332,8 @@ private:
   QToolButton* btnStopAll_=nullptr;
   QToolButton* btnStepPrev_=nullptr;
   QToolButton* btnStepNext_=nullptr;
+  QDoubleSpinBox* spSourceFps_=nullptr;
+  QLabel* lblSourcePath_=nullptr;
 
   QToolButton* btnToolPan_=nullptr;
   QToolButton* btnToolPoint_=nullptr;
@@ -271,6 +350,10 @@ private:
   //QCheckBox* chkSyncPlay_=nullptr;
   //QLabel* lblPlayState_=nullptr;
   QTabBar* sideModeTabs_=nullptr;
+  QTabBar* stepTabs_=nullptr;
+  bool stepDone_[4] = {false, false, false, false};
+  bool pre_scale_line_drawn_ = false;
+  bool pre_scale_calculated_ = false;
   QToolButton* btnFileMenu_=nullptr;
   QTabWidget* actionTabs_=nullptr;
 
@@ -289,6 +372,49 @@ private:
   QTableWidget* calibErrorTable_=nullptr;
   QLabel* lblCaptured_=nullptr;
 
+  // Preprocess tab
+  QComboBox* cbPreColor_=nullptr;
+  QSlider* slBrightness_=nullptr;
+  QSlider* slContrast_=nullptr;
+  QSpinBox* spBrightness_=nullptr;
+  QSpinBox* spContrast_=nullptr;
+  QComboBox* cbLineColor_=nullptr;
+  QSpinBox* spLineWidth_=nullptr;
+  QPushButton* btnStartScaleLine_=nullptr;
+  QCheckBox* chkShowLines_=nullptr;
+  QPushButton* btnDeleteScaleLine_=nullptr;
+  QLineEdit* editPhysicalMm_=nullptr;
+  QPushButton* btnCalcScale_=nullptr;
+  QGroupBox* gbLineProps_=nullptr;
+  QLabel* lblPreprocessHint_=nullptr;
+  QPushButton* btnPreAuto_=nullptr;
+  QLabel* lblScaleInfo_=nullptr;
+  QPushButton* btnAddMaskRegion_=nullptr;
+  QPushButton* btnAddDetectRegion_=nullptr;
+  QPushButton* btnDeleteRegion_=nullptr;
+  QTableWidget* tblRegions_=nullptr;
+
+  // ObjectDefine tab
+  QComboBox* cbThreshType_=nullptr;
+  QComboBox* cbGlobalMethod_=nullptr;
+  QComboBox* cbLocalMethod_=nullptr;
+  QSlider* slObjectThresh_=nullptr;
+  QSpinBox* spObjectThresh_=nullptr;
+  QCheckBox* chkInvertBinary_=nullptr;
+  QPushButton* btnBinaryPreviewPopup_=nullptr;
+  QSpinBox* spLocalBlockSize_=nullptr;
+  QDoubleSpinBox* spLocalK_=nullptr;
+  QLabel* lblBinaryPreview_=nullptr;
+  QDialog* binaryPreviewDialog_=nullptr;
+  QLabel* lblBinaryPreviewPopup_=nullptr;
+  QPushButton* btnTryAllGlobal_=nullptr;
+  QPushButton* btnTryAllLocal_=nullptr;
+  QComboBox* cbBinaryOp_=nullptr;
+  QPushButton* btnUndoBinaryOp_=nullptr;
+  QPushButton* btnAnalyzeParticles_=nullptr;
+  QPushButton* btnTrackBinary_=nullptr;
+  QLabel* lblBinaryOps_=nullptr;
+
   // Tracking tab
   QPushButton* btnLoadTag_=nullptr;
   QPushButton* btnExportTraj_=nullptr;
@@ -304,8 +430,19 @@ private:
   QPushButton* btnDetectAll_=nullptr;
   QLabel* lblPose_=nullptr;
   QLabel* lblInliers_=nullptr;
+  QLabel* visImageLabel_=nullptr;
   QCustomPlot* lblTrajPosPlot_=nullptr;
   QCustomPlot* lblTrajAngPlot_=nullptr;
+  QCustomPlot* plotArea_=nullptr;
+  QCustomPlot* plotPerimeter_=nullptr;
+  QCustomPlot* plotCircularity_=nullptr;
+  QCustomPlot* plotAccel_=nullptr;
+  QTableWidget* tblMeasurements_=nullptr;
+  QComboBox* cbHistMetric_=nullptr;
+  QDoubleSpinBox* spHistMin_=nullptr;
+  QDoubleSpinBox* spHistMax_=nullptr;
+  QCustomPlot* plotHistogram_=nullptr;
+  QPushButton* btnHistApply_=nullptr;
   QPushButton* btnAddVisChart_=nullptr;
   QVBoxLayout* visChartsLayout_=nullptr;
   struct VisChartConfig {
@@ -335,6 +472,30 @@ private:
   double play_fps_=30.0;
   int ui_frame_skip_=0;
   int ui_overlay_div_=4; // run heavy overlay every N UI ticks
+  double mm_per_pixel_ = 0.0;
+  bool object_thresh_manual_ = false;
+  std::vector<QString> binary_ops_pipeline_;
+  std::vector<std::vector<cv::Point>> analyzed_contours_;
+  bool track_binary_enabled_ = false;
+  int next_track_id_ = 1;
+  std::unordered_map<int, cv::Point2f> tracked_centroids_;
+  std::unordered_map<int, std::vector<cv::Point>> tracked_contours_;
+  std::vector<MeasureRow> meas_rows_;
+  std::vector<TargetMeasureRow> target_meas_rows_;
+  qint64 last_meas_key_ = std::numeric_limits<qint64>::min();
+  cv::Point2f last_ctr_{0,0};
+  double last_speed_ = 0.0;
+  bool measurements_frozen_ = false;
+  struct RegionSpec { int id=0; bool include=true; QPolygonF poly; };
+  std::vector<RegionSpec> regions_;
+  int next_region_id_ = 1;
+  int drawing_region_type_ = 0; // 0 none, 1 include, 2 exclude
+  int editing_region_index_ = -1;
+  std::vector<std::vector<std::vector<cv::Point>>> analyzed_contours_by_frame_;
+  struct AnalyzedContourMeasure { std::vector<cv::Point> contour; MeasureRow m; bool enabled=true; };
+  std::vector<std::vector<AnalyzedContourMeasure>> analyzed_measures_by_frame_;
+  struct TrackedContour { int id=-1; std::vector<cv::Point> contour; cv::Point2f centroid{0,0}; };
+  std::vector<std::vector<TrackedContour>> tracked_contours_by_frame_;
 
   struct CalibrationPair {
     int frame_id = -1;
@@ -348,6 +509,42 @@ private:
   // Tracking detect-all overlay cache: source index -> frame index -> visualized frame
   std::unordered_map<int, std::unordered_map<int64_t, cv::Mat>> detect_overlay_cache_;
 
+  QWidget* visualDashHost_=nullptr;
+  QGridLayout* visualDashGrid_=nullptr;
+  QLabel* leftVisImage_=nullptr;
+  QCustomPlot* leftDispPlot_=nullptr;
+  QCustomPlot* leftSpeedPlot_=nullptr;
+  QCustomPlot* leftAreaPlot_=nullptr;
+  QCustomPlot* leftPerimPlot_=nullptr;
+  QCustomPlot* leftCircPlot_=nullptr;
+  QComboBox* cbDispMetric_=nullptr;
+  QComboBox* cbSpeedMetric_=nullptr;
+  QComboBox* cbAreaMetric_=nullptr;
+  QComboBox* cbPerimMetric_=nullptr;
+  QComboBox* cbCircMetric_=nullptr;
+  QLabel* lblTargetFilter_=nullptr;
+  QComboBox* cbTargetFilter_=nullptr;
+  bool updating_left_visual_dashboard_=false;
+  bool left_visual_refresh_queued_=false;
+  QLabel* lblXAxisMode_=nullptr;
+  QComboBox* cbXAxisMode_=nullptr;
+  QPushButton* btnCaptureVisual_=nullptr;
+  QPushButton* btnExportTableCsv_=nullptr;
+  QPushButton* btnExportMp4_=nullptr;
+  QPushButton* btnFitAllPlots_=nullptr;
+  QPushButton* btnToggleTable_=nullptr;
+  QPushButton* btnTileLayout_=nullptr;
+  QTableWidget* leftMeasureTable_=nullptr;
+  int selected_target_id_ = -1;
+  QSpinBox* spSmoothMedianWindow_=nullptr;
+  QDoubleSpinBox* spSmoothAlphaSpeed_=nullptr;
+  QDoubleSpinBox* spSmoothAlphaAccel_=nullptr;
+  int selected_target_frame_ = -1;
+  bool pending_visual_fit_ = false;
+
   // Timer (UI refresh)
+  std::map<QString, std::pair<double,double>> confirmed_hist_rules_;
+  bool suppress_histogram_updates_ = false;
+
   QTimer timer_;
 };
