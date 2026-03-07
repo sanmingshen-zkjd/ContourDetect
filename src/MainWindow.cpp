@@ -1433,13 +1433,11 @@ void MainWindow::buildUI() {
     plotHistogram_->yAxis->grid()->setSubGridVisible(false);
     plotHistogram_->legend->setVisible(false);
     QPushButton* btnHistReset = new QPushButton("Reset", gbDetect);
-    btnHistApply_ = new QPushButton("Apply", gbDetect);
 
     hg->addWidget(btnAnalyzeParticles_, 0, 0, 1, 6);
     hg->addWidget(new QLabel("Metric", gbDetect), 1, 0);
     hg->addWidget(cbHistMetric_, 1, 1, 1, 2);
     hg->addWidget(btnHistReset, 1, 3);
-    hg->addWidget(btnHistApply_, 1, 4);
 
     hg->addWidget(plotHistogram_, 2, 0, 1, 6);
     hg->addWidget(new QLabel("Min", gbDetect), 3, 0);
@@ -1481,10 +1479,6 @@ void MainWindow::buildUI() {
     auto resetHistogramRange = [this]() {
       if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
       const QString metric = cbHistMetric_->currentText();
-      if (confirmed_hist_rules_.count(metric)) {
-        QMessageBox::information(this, "Histogram", "Current metric has been applied and cannot be reset.");
-        return;
-      }
       auto pick = [&](const MeasureRow& r)->double { return metricValueForHist(r, metric); };
       std::vector<double> vals;
       for (const auto& fs : analyzed_measures_by_frame_) {
@@ -1511,34 +1505,14 @@ void MainWindow::buildUI() {
     };
     connect(cbHistMetric_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, resetHistogramRange](int){
       if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
-      const QString metric = cbHistMetric_->currentText();
-      QSignalBlocker blockMin(spHistMin_);
-      QSignalBlocker blockMax(spHistMax_);
-      configureHistogramEditorsForMetric(metric);
-      auto it = confirmed_hist_rules_.find(metric);
-      if (it != confirmed_hist_rules_.end()) {
-        double lo = it->second.first;
-        double hi = it->second.second;
-        if (lo > hi) std::swap(lo, hi);
-        lo = std::max(spHistMin_->minimum(), std::min(spHistMin_->maximum(), lo));
-        hi = std::max(spHistMax_->minimum(), std::min(spHistMax_->maximum(), hi));
-        if (lo > hi) lo = hi;
-        spHistMin_->setValue(lo);
-        spHistMax_->setValue(hi);
-        updateHistogramPlot();
-      } else {
-        resetHistogramRange();
-      }
+      resetHistogramRange();
     });
-    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); updateLeftVisualDashboard(); onTick(); });
-    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ updateHistogramPlot(); updateLeftVisualDashboard(); onTick(); });
-    connect(btnHistReset, &QPushButton::clicked, this, [resetHistogramRange](){ resetHistogramRange(); });
-    if (btnHistApply_) connect(btnHistApply_, &QPushButton::clicked, this, [this](){
+
+    auto applyHistogramFilterImmediately = [this]() {
       if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
       const QString metric = cbHistMetric_->currentText();
       const double lo = spHistMin_->value();
       const double hi = spHistMax_->value();
-      confirmed_hist_rules_[metric] = {lo, hi};
 
       for (auto& frameMeasures : analyzed_measures_by_frame_) {
         for (auto& am : frameMeasures) {
@@ -1548,10 +1522,7 @@ void MainWindow::buildUI() {
         }
       }
 
-      if (!tracked_contours_by_frame_.empty()) {
-        tracked_contours_by_frame_.clear();
-      }
-
+      tracked_contours_by_frame_.clear();
       target_meas_rows_.clear();
       for (const auto& frameMeasures : analyzed_measures_by_frame_) {
         for (const auto& am : frameMeasures) {
@@ -1563,8 +1534,12 @@ void MainWindow::buildUI() {
       updateHistogramPlot();
       updateLeftVisualDashboard();
       onTick();
-      logLine(QString("Applied histogram rule: %1 [%2, %3]").arg(metric).arg(lo).arg(hi));
-    });
+      logLine(QString("Applied histogram filter directly: %1 [%2, %3]").arg(metric).arg(lo).arg(hi));
+    };
+
+    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this, applyHistogramFilterImmediately](double){ applyHistogramFilterImmediately(); });
+    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this, applyHistogramFilterImmediately](double){ applyHistogramFilterImmediately(); });
+    connect(btnHistReset, &QPushButton::clicked, this, [resetHistogramRange](){ resetHistogramRange(); });
 
 
     actionTabs_->addTab(tabCap, "Source");
