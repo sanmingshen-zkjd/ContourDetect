@@ -436,6 +436,7 @@ private:
   QDoubleSpinBox* spHistMin_=nullptr;
   QDoubleSpinBox* spHistMax_=nullptr;
   QCustomPlot* plotHistogram_=nullptr;
+  QPushButton* btnHistApply_=nullptr;
   QPushButton* btnAddVisChart_=nullptr;
   QVBoxLayout* visChartsLayout_=nullptr;
   struct VisChartConfig {

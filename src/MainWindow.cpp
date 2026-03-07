@@ -1433,11 +1433,13 @@ void MainWindow::buildUI() {
     plotHistogram_->yAxis->grid()->setSubGridVisible(false);
     plotHistogram_->legend->setVisible(false);
     QPushButton* btnHistReset = new QPushButton("Reset", gbDetect);
+    btnHistApply_ = new QPushButton("Apply", gbDetect);
 
     hg->addWidget(btnAnalyzeParticles_, 0, 0, 1, 6);
     hg->addWidget(new QLabel("Metric", gbDetect), 1, 0);
     hg->addWidget(cbHistMetric_, 1, 1, 1, 2);
     hg->addWidget(btnHistReset, 1, 3);
+    hg->addWidget(btnHistApply_, 1, 4);
 
     hg->addWidget(plotHistogram_, 2, 0, 1, 6);
     hg->addWidget(new QLabel("Min", gbDetect), 3, 0);
@@ -1508,11 +1510,19 @@ void MainWindow::buildUI() {
       resetHistogramRange();
     });
 
-    auto applyHistogramFilterImmediately = [this]() {
+    auto applyHistogramPreviewOnly = [this]() {
+      if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
+      updateHistogramPlot();
+      updateLeftVisualDashboard();
+      onTick();
+    };
+
+    auto applyHistogramCommitted = [this]() {
       if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
       const QString metric = cbHistMetric_->currentText();
       const double lo = spHistMin_->value();
       const double hi = spHistMax_->value();
+      confirmed_hist_rules_[metric] = {lo, hi};
 
       for (auto& frameMeasures : analyzed_measures_by_frame_) {
         for (auto& am : frameMeasures) {
@@ -1531,15 +1541,14 @@ void MainWindow::buildUI() {
         }
       }
 
-      updateHistogramPlot();
-      updateLeftVisualDashboard();
-      onTick();
-      logLine(QString("Applied histogram filter directly: %1 [%2, %3]").arg(metric).arg(lo).arg(hi));
+      resetHistogramRange();
+      logLine(QString("Applied histogram rule: %1 [%2, %3]").arg(metric).arg(lo).arg(hi));
     };
 
-    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this, applyHistogramFilterImmediately](double){ applyHistogramFilterImmediately(); });
-    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this, applyHistogramFilterImmediately](double){ applyHistogramFilterImmediately(); });
+    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this, applyHistogramPreviewOnly](double){ applyHistogramPreviewOnly(); });
+    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this, applyHistogramPreviewOnly](double){ applyHistogramPreviewOnly(); });
     connect(btnHistReset, &QPushButton::clicked, this, [resetHistogramRange](){ resetHistogramRange(); });
+    if (btnHistApply_) connect(btnHistApply_, &QPushButton::clicked, this, [this, applyHistogramCommitted](){ applyHistogramCommitted(); });
 
 
     actionTabs_->addTab(tabCap, "Source");
@@ -3315,11 +3324,32 @@ void MainWindow::onTick() {
   // Tracking overlay is triggered by the explicit Detect button to avoid
   // repeatedly accumulating visual detections on static frames.
 
+  auto previewPassForMeasure = [this](const MeasureRow& r)->bool {
+    if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return true;
+    const double v = metricValueForHist(r, cbHistMetric_->currentText());
+    if (!std::isfinite(v)) return false;
+    return (v >= spHistMin_->value() && v <= spHistMax_->value());
+  };
+
+  auto contourMetricPass = [this, &previewPassForMeasure](const std::vector<cv::Point>& c)->bool {
+    if (c.empty()) return false;
+    const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
+    MeasureRow r;
+    r.area = std::abs(cv::contourArea(c)) * scale * scale;
+    r.perim = cv::arcLength(c, true) * scale;
+    cv::RotatedRect rr = cv::minAreaRect(c);
+    r.major = std::max(rr.size.width, rr.size.height) * scale;
+    r.minor = std::min(rr.size.width, rr.size.height) * scale;
+    r.circ = (r.perim > 1e-9) ? (4.0 * std::acos(-1.0) * r.area / (r.perim * r.perim)) : 0.0;
+    return previewPassForMeasure(r);
+  };
+
   int frameIdx = std::max(0, (int)play_frame_);
   if (track_binary_enabled_ && frameIdx < (int)tracked_contours_by_frame_.size()) {
     for (auto& f : vis) {
       if (f.empty()) continue;
       for (const auto& tc : tracked_contours_by_frame_[frameIdx]) {
+        if (!contourMetricPass(tc.contour)) continue;
         cv::drawContours(f, std::vector<std::vector<cv::Point>>{tc.contour}, -1, cv::Scalar(0,255,0), 2);
         cv::putText(f, std::string("ID:")+std::to_string(tc.id), tc.centroid + cv::Point2f(3.f,-3.f),
                     cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2, cv::LINE_AA);
@@ -3329,7 +3359,9 @@ void MainWindow::onTick() {
     for (auto& f : vis) {
       if (f.empty()) continue;
       std::vector<std::vector<cv::Point>> show;
-      for (const auto& am : analyzed_measures_by_frame_[frameIdx]) if (am.enabled) show.push_back(am.contour);
+      for (const auto& am : analyzed_measures_by_frame_[frameIdx]) {
+        if (am.enabled && previewPassForMeasure(am.m)) show.push_back(am.contour);
+      }
       if (!show.empty()) cv::drawContours(f, show, -1, cv::Scalar(0,255,0), 2);
     }
   } else if (!analyzed_contours_.empty()) {
