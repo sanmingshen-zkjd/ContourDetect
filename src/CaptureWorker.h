@@ -2,10 +2,13 @@
 #include <QObject>
 #include <QTimer>
 #include <QDateTime>
+#include <QFile>
+#include <QByteArray>
 #include <opencv2/opencv.hpp>
 #include "MainWindow.h" // for InputSource
 #include "Types.h"
 #include <QMutex>
+#include <cmath>
 
 
 class CaptureWorker : public QObject {
@@ -64,6 +67,16 @@ public slots:
 
 signals:
   void framesReady(FramePack frames, qint64 capture_ts_ms);
+private:
+  static cv::Mat imreadUnicodePathCW(const QString& filePath, int flags=cv::IMREAD_COLOR) {
+    QFile f(filePath);
+    if (!f.open(QIODevice::ReadOnly)) return cv::Mat();
+    QByteArray bytes = f.readAll();
+    if (bytes.isEmpty()) return cv::Mat();
+    std::vector<uchar> buf(bytes.begin(), bytes.end());
+    return cv::imdecode(buf, flags);
+  }
+
 private slots:
   void tick() {
     if (!running_) return;
@@ -95,17 +108,51 @@ private slots:
           }
           int idx = sync_mode_ ? (int)cur_frame_ : s.seq_idx;
           idx = std::max(0, std::min(idx, (int)s.seq_files.size() - 1));
-          f = cv::imread(s.seq_files[idx].toStdString(), cv::IMREAD_COLOR);
+          f = imreadUnicodePathCW(s.seq_files[idx], cv::IMREAD_COLOR);
           s.seq_idx = idx;
           if (!sync_mode_ && s.seq_idx < (int)s.seq_files.size() - 1) s.seq_idx++;
         } else {
           if (!s.cap.isOpened()) {
-            frames.push_back(cv::Mat());
-            continue;
+            if (!s.is_cam && !s.video_path.isEmpty()) {
+              s.cap.open(s.video_path.toStdString());
+            }
+            if (!s.cap.isOpened()) {
+              frames.push_back(cv::Mat());
+              continue;
+            }
           }
-          if (!s.cap.read(f) && !s.is_cam && sync_mode_) {
-            // In sync mode we avoid per-frame random seeks (causes decode stalls/jitter).
-            // If read fails at end, fallback logic below keeps last good frame.
+
+          const int64_t expectedPos = sync_mode_
+            ? std::max<int64_t>(0, cur_frame_)
+            : std::max<int64_t>(0, (int64_t)s.seq_idx);
+
+          if (!sync_mode_ && !s.is_cam && s.cap.isOpened()) {
+            double capPos = s.cap.get(cv::CAP_PROP_POS_FRAMES);
+            if (std::isfinite(capPos) && std::llround(capPos) != expectedPos) {
+              s.cap.set(cv::CAP_PROP_POS_FRAMES, (double)expectedPos);
+            }
+          }
+
+          if (!s.cap.read(f) || f.empty()) {
+            // Some containers/codecs can return empty frames after seek/start.
+            // Retry by re-seeking once, then reopen+seek as a final fallback.
+            if (!s.is_cam) {
+              s.cap.set(cv::CAP_PROP_POS_FRAMES, (double)expectedPos);
+              if (!s.cap.read(f) || f.empty()) {
+                if (!s.video_path.isEmpty()) {
+                  s.cap.release();
+                  s.cap.open(s.video_path.toStdString());
+                  if (s.cap.isOpened()) {
+                    s.cap.set(cv::CAP_PROP_POS_FRAMES, (double)expectedPos);
+                    s.cap.read(f);
+                  }
+                }
+              }
+            }
+          }
+          if (!f.empty()) {
+            if (sync_mode_) s.seq_idx = (int)(std::max<int64_t>(0, cur_frame_) + 1);
+            else if (!s.is_cam) s.seq_idx = (int)(expectedPos + 1);
           }
         }
 
