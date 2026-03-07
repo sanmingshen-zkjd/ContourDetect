@@ -1175,9 +1175,12 @@ void MainWindow::buildUI() {
     QHBoxLayout* importRow = new QHBoxLayout();
     importRow->setContentsMargins(0,0,0,0);
     importRow->setSpacing(6);
+    btnAddVideo_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    btnAddImgSeq_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     importRow->addWidget(btnAddVideo_, 1);
     importRow->addWidget(btnAddImgSeq_, 1);
     addSrcLay->addLayout(importRow);
+    btnRemoveSource_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     addSrcLay->addWidget(btnRemoveSource_);
 
     lblSourcePath_ = new QLabel("Current source: (none)", gbAddSrc);
@@ -4525,6 +4528,8 @@ void MainWindow::updateLeftVisualDashboard() {
 
   auto fill=[&](QCustomPlot* p, int metricIdx, const QString& yLabel){
     if(!p) return;
+    const QCPRange prevX = p->xAxis->range();
+    const QCPRange prevY = p->yAxis->range();
     double yMin = 0.0, yMax = 1.0;
     bool has=false;
     p->clearGraphs();
@@ -4608,8 +4613,16 @@ void MainWindow::updateLeftVisualDashboard() {
     }
     p->xAxis->setLabel(useTimeAxis ? "Time (s)" : "Frame");
     p->yAxis->setLabel(yLabel);
-    p->xAxis->setRange(0, useTimeAxis ? std::max(1.0, (double)std::max(1, totalFrames-1) / fpsAxis) : (double)std::max(1, totalFrames-1));
-    p->yAxis->setRange(yMin, yMax);
+    const double defXUpper = useTimeAxis ? std::max(1.0, (double)std::max(1, totalFrames-1) / fpsAxis) : (double)std::max(1, totalFrames-1);
+    if (playback_running_) {
+      p->xAxis->setRange(0, defXUpper);
+      p->yAxis->setRange(yMin, yMax);
+    } else {
+      if (prevX.size() > 1e-9 && std::isfinite(prevX.lower) && std::isfinite(prevX.upper)) p->xAxis->setRange(prevX);
+      else p->xAxis->setRange(0, defXUpper);
+      if (prevY.size() > 1e-9 && std::isfinite(prevY.lower) && std::isfinite(prevY.upper)) p->yAxis->setRange(prevY);
+      else p->yAxis->setRange(yMin, yMax);
+    }
     p->replot();
   };
 
