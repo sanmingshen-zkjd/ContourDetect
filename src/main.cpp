@@ -79,6 +79,8 @@ int main(int argc, char** argv) {
       "min-height:%1px;padding:4px 8px;background:#2d333b;color:#f0f4f8;border:1px solid #4a5563;border-radius:4px;}"
       "QPushButton:hover,QToolButton:hover{background:#384150;}"
       "QPushButton:pressed,QToolButton:pressed{background:#222831;}"
+      "QDialog{min-width:720px;min-height:480px;}"
+      "QMessageBox{min-width:560px;}"
       "QTabBar::tab{padding:6px 12px;background:#2d333b;color:#e8edf2;}"
       "QTabBar::tab:selected{background:#4b6ea8;color:#ffffff;font-weight:600;}"
       "QTabBar::tab:!selected{background:#2d333b;color:#c6ced8;}"
