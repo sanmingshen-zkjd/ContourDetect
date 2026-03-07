@@ -1487,7 +1487,12 @@ void MainWindow::buildUI() {
       }
       auto pick = [&](const MeasureRow& r)->double { return metricValueForHist(r, metric); };
       std::vector<double> vals;
-      for (const auto& fs : analyzed_measures_by_frame_) for (const auto& am : fs) vals.push_back(pick(am.m));
+      for (const auto& fs : analyzed_measures_by_frame_) {
+        for (const auto& am : fs) {
+          if (!am.enabled) continue;
+          vals.push_back(pick(am.m));
+        }
+      }
       if (vals.empty()) {
         if (!target_meas_rows_.empty()) for (const auto& t : target_meas_rows_) vals.push_back(pick(t.m));
         else for (const auto& r : meas_rows_) vals.push_back(pick(r));
@@ -1530,10 +1535,35 @@ void MainWindow::buildUI() {
     connect(btnHistReset, &QPushButton::clicked, this, [resetHistogramRange](){ resetHistogramRange(); });
     if (btnHistApply_) connect(btnHistApply_, &QPushButton::clicked, this, [this](){
       if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
-      confirmed_hist_rules_[cbHistMetric_->currentText()] = {spHistMin_->value(), spHistMax_->value()};
+      const QString metric = cbHistMetric_->currentText();
+      const double lo = spHistMin_->value();
+      const double hi = spHistMax_->value();
+      confirmed_hist_rules_[metric] = {lo, hi};
+
+      for (auto& frameMeasures : analyzed_measures_by_frame_) {
+        for (auto& am : frameMeasures) {
+          if (!am.enabled) continue;
+          const double v = metricValueForHist(am.m, metric);
+          if (!std::isfinite(v) || v < lo || v > hi) am.enabled = false;
+        }
+      }
+
+      if (!tracked_contours_by_frame_.empty()) {
+        tracked_contours_by_frame_.clear();
+      }
+
+      target_meas_rows_.clear();
+      for (const auto& frameMeasures : analyzed_measures_by_frame_) {
+        for (const auto& am : frameMeasures) {
+          if (!am.enabled) continue;
+          target_meas_rows_.push_back(TargetMeasureRow{-1, am.m});
+        }
+      }
+
+      updateHistogramPlot();
       updateLeftVisualDashboard();
       onTick();
-      logLine(QString("Applied histogram rule: %1 [%2, %3]").arg(cbHistMetric_->currentText()).arg(spHistMin_->value()).arg(spHistMax_->value()));
+      logLine(QString("Applied histogram rule: %1 [%2, %3]").arg(metric).arg(lo).arg(hi));
     });
 
 
@@ -2525,6 +2555,7 @@ void MainWindow::onAnalyzeParticles() {
   tracked_contours_by_frame_.clear();
   target_meas_rows_.clear();
   meas_rows_.clear();
+  confirmed_hist_rules_.clear();
 
   int srcIdx = -1;
   if (!active_view_source_indices_.empty()) srcIdx = active_view_source_indices_.front();
@@ -2580,7 +2611,7 @@ void MainWindow::onAnalyzeParticles() {
       row.major = std::max(rr.size.width, rr.size.height) * scale;
       row.minor = std::min(rr.size.width, rr.size.height) * scale;
       row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
-      analyzed_measures_by_frame_[i].push_back(AnalyzedContourMeasure{c, row});
+      analyzed_measures_by_frame_[i].push_back(AnalyzedContourMeasure{c, row, true});
       target_meas_rows_.push_back(TargetMeasureRow{-1, row});
     }
     processedFrames = i + 1;
@@ -2667,26 +2698,20 @@ void MainWindow::onToggleTrackBinary() {
     return ans;
   };
 
-  for (int i=0;i<(int)analyzed_contours_by_frame_.size();++i) {
+  for (int i=0;i<(int)analyzed_measures_by_frame_.size();++i) {
     std::vector<cv::Point2f> currCtrs;
-    std::vector<int> validIdx;
+    std::vector<std::vector<cv::Point>> validContours;
     std::vector<MeasureRow> preRows;
-    for (int ci=0; ci<(int)analyzed_contours_by_frame_[i].size(); ++ci) {
-      const auto& c = analyzed_contours_by_frame_[i][ci];
+    for (const auto& am : analyzed_measures_by_frame_[i]) {
+      if (!am.enabled) continue;
+      const auto& c = am.contour;
       if (c.empty()) continue;
       cv::Moments m = cv::moments(c);
       if (std::abs(m.m00) < 1e-9) continue;
-      MeasureRow mr;
+      MeasureRow mr = am.m;
       mr.key = i;
-      mr.area = std::abs(cv::contourArea(c)) * scale * scale;
-      mr.perim = cv::arcLength(c, true) * scale;
-      cv::RotatedRect rr = cv::minAreaRect(c);
-      mr.major = std::max(rr.size.width, rr.size.height) * scale;
-      mr.minor = std::min(rr.size.width, rr.size.height) * scale;
-      mr.circ = (mr.perim > 1e-9) ? (4.0 * std::acos(-1.0) * mr.area / (mr.perim * mr.perim)) : 0.0;
-      if (!passesConfirmedHistogramRules(mr)) continue;
       currCtrs.push_back(cv::Point2f((float)(m.m10/m.m00), (float)(m.m01/m.m00)));
-      validIdx.push_back(ci);
+      validContours.push_back(c);
       preRows.push_back(mr);
     }
 
@@ -2717,7 +2742,7 @@ void MainWindow::onToggleTrackBinary() {
       int id = assignedCurr[c];
       if (id < 0) id = nextId++;
       id_curr[id] = currCtrs[c];
-      const auto& contour = analyzed_contours_by_frame_[i][validIdx[c]];
+      const auto& contour = validContours[c];
       newTrackedContours[i].push_back(TrackedContour{id, contour, currCtrs[c]});
 
       MeasureRow row = preRows[c];
@@ -3315,41 +3340,28 @@ void MainWindow::onTick() {
   // Tracking overlay is triggered by the explicit Detect button to avoid
   // repeatedly accumulating visual detections on static frames.
 
-  auto contourMetricPass = [&](const std::vector<cv::Point>& c)->bool {
-    if (c.empty()) return true;
-    const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
-    MeasureRow r;
-    r.area = std::abs(cv::contourArea(c)) * scale * scale;
-    r.perim = cv::arcLength(c, true) * scale;
-    cv::RotatedRect rr = cv::minAreaRect(c);
-    r.major = std::max(rr.size.width, rr.size.height) * scale;
-    r.minor = std::min(rr.size.width, rr.size.height) * scale;
-    r.circ = (r.perim > 1e-9) ? (4.0 * std::acos(-1.0) * r.area / (r.perim * r.perim)) : 0.0;
-    return passesConfirmedHistogramRules(r);
-  };
   int frameIdx = std::max(0, (int)play_frame_);
   if (track_binary_enabled_ && frameIdx < (int)tracked_contours_by_frame_.size()) {
     for (auto& f : vis) {
       if (f.empty()) continue;
       for (const auto& tc : tracked_contours_by_frame_[frameIdx]) {
-        if (!contourMetricPass(tc.contour)) continue;
         cv::drawContours(f, std::vector<std::vector<cv::Point>>{tc.contour}, -1, cv::Scalar(0,255,0), 2);
         cv::putText(f, std::string("ID:")+std::to_string(tc.id), tc.centroid + cv::Point2f(3.f,-3.f),
                     cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2, cv::LINE_AA);
       }
     }
-  } else if (frameIdx < (int)analyzed_contours_by_frame_.size()) {
+  } else if (frameIdx < (int)analyzed_measures_by_frame_.size()) {
     for (auto& f : vis) {
       if (f.empty()) continue;
       std::vector<std::vector<cv::Point>> show;
-      for (const auto& c : analyzed_contours_by_frame_[frameIdx]) if (contourMetricPass(c)) show.push_back(c);
+      for (const auto& am : analyzed_measures_by_frame_[frameIdx]) if (am.enabled) show.push_back(am.contour);
       if (!show.empty()) cv::drawContours(f, show, -1, cv::Scalar(0,255,0), 2);
     }
   } else if (!analyzed_contours_.empty()) {
     for (auto& f : vis) {
       if (f.empty()) continue;
       std::vector<std::vector<cv::Point>> show;
-      for (const auto& c : analyzed_contours_) if (contourMetricPass(c)) show.push_back(c);
+      for (const auto& c : analyzed_contours_) show.push_back(c);
       if (!show.empty()) cv::drawContours(f, show, -1, cv::Scalar(0,255,0), 2);
     }
   }
@@ -4055,11 +4067,6 @@ bool MainWindow::passesConfirmedHistogramRules(const MeasureRow& r) const {
     if (!std::isfinite(v)) return false;
     if (v < kv.second.first || v > kv.second.second) return false;
   }
-  if (cbHistMetric_ && spHistMin_ && spHistMax_) {
-    const double v = metricValueForHist(r, cbHistMetric_->currentText());
-    if (!std::isfinite(v)) return false;
-    if (v < spHistMin_->value() || v > spHistMax_->value()) return false;
-  }
   return true;
 }
 
@@ -4084,7 +4091,12 @@ void MainWindow::updateHistogramPlot() {
   auto pick = [&](const MeasureRow& r)->double { return metricValueForHist(r, metric); };
 
   std::vector<double> vals;
-  for (const auto& fs : analyzed_measures_by_frame_) for (const auto& am : fs) vals.push_back(pick(am.m));
+  for (const auto& fs : analyzed_measures_by_frame_) {
+    for (const auto& am : fs) {
+      if (!am.enabled) continue;
+      vals.push_back(pick(am.m));
+    }
+  }
   if (vals.empty()) {
     vals.reserve(std::max(target_meas_rows_.size(), meas_rows_.size()));
     if (!target_meas_rows_.empty()) {
