@@ -1507,10 +1507,11 @@ void MainWindow::buildUI() {
     connect(cbHistMetric_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, resetHistogramRange](int){
       if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
       const QString metric = cbHistMetric_->currentText();
+      QSignalBlocker blockMin(spHistMin_);
+      QSignalBlocker blockMax(spHistMax_);
       configureHistogramEditorsForMetric(metric);
       auto it = confirmed_hist_rules_.find(metric);
       if (it != confirmed_hist_rules_.end()) {
-        QSignalBlocker b1(spHistMin_); QSignalBlocker b2(spHistMax_);
         double lo = it->second.first;
         double hi = it->second.second;
         if (lo > hi) std::swap(lo, hi);
