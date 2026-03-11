@@ -894,6 +894,8 @@ void MainWindow::buildUI() {
     topSourceBar->addWidget(cbTargetFilter_);
     btnFitAllPlots_ = new QPushButton("Fit", central);
     topSourceBar->addWidget(btnFitAllPlots_);
+    btnVisualAuto_ = new QPushButton("Auto", central);
+    topSourceBar->addWidget(btnVisualAuto_);
     cbXAxisMode_ = new QComboBox(central);
     cbXAxisMode_->addItems({"Time (s)", "Frame"});
     cbXAxisMode_->setCurrentIndex(1);
@@ -939,6 +941,7 @@ void MainWindow::buildUI() {
     btnExportTableCsv_->setVisible(false);
     btnExportMp4_->setVisible(false);
     if (btnFitAllPlots_) btnFitAllPlots_->setVisible(false);
+    if (btnVisualAuto_) btnVisualAuto_->setVisible(false);
     if (lblTargetFilter_) lblTargetFilter_->setVisible(false);
     if (cbTargetFilter_) cbTargetFilter_->setVisible(false);
     if (lblXAxisMode_) lblXAxisMode_->setVisible(false);
@@ -989,6 +992,7 @@ void MainWindow::buildUI() {
     leftVisImage_->setAlignment(Qt::AlignCenter);
     leftVisImage_->setStyleSheet("background:#111827;border:1px solid #374151;color:#cbd5e1;");
     leftVisImage_->setText("Image view");
+    leftVisImage_->installEventFilter(this);
     auto mkPlot=[&](const QString& y){
       QCustomPlot* p=new QCustomPlot(visualDashHost_);
       p->setMinimumHeight(visH);
@@ -1092,6 +1096,12 @@ void MainWindow::buildUI() {
     connect(btnExportTableCsv_, &QPushButton::clicked, this, &MainWindow::onExportTableCsv);
     connect(btnExportMp4_, &QPushButton::clicked, this, &MainWindow::onExportVisualMp4);
     if (btnFitAllPlots_) connect(btnFitAllPlots_, &QPushButton::clicked, this, &MainWindow::fitAllVisualPlots);
+    if (btnVisualAuto_) connect(btnVisualAuto_, &QPushButton::clicked, this, [this](){
+      visual_image_auto_mode_ = true;
+      visual_image_zoom_ = 1.0;
+      visual_image_center_ = QPointF(0.5, 0.5);
+      refreshVisualizationImagePixmap();
+    });
     visualDashGrid_->addWidget(visSep,2,0,1,3);
     visualDashGrid_->addWidget(leftMeasureTable_,3,0,1,3);
     connect(leftMeasureTable_, &QTableWidget::itemSelectionChanged, this, [this](){
@@ -1682,6 +1692,7 @@ void MainWindow::buildUI() {
       if (btnExportTableCsv_) btnExportTableCsv_->setVisible(visual);
       if (btnExportMp4_) btnExportMp4_->setVisible(visual);
       if (btnFitAllPlots_) btnFitAllPlots_->setVisible(visual);
+      if (btnVisualAuto_) btnVisualAuto_->setVisible(visual);
       if (lblTargetFilter_) lblTargetFilter_->setVisible(visual);
       if (cbTargetFilter_) cbTargetFilter_->setVisible(visual);
       if (lblXAxisMode_) lblXAxisMode_->setVisible(visual);
@@ -2396,20 +2407,17 @@ void MainWindow::onShowBinaryPreviewPopup() {
     lv->setContentsMargins(8, 8, 8, 8);
 
     QHBoxLayout* topCtl = new QHBoxLayout();
-    btnBinaryPreviewPrev_ = new QPushButton("Prev", binaryPreviewDialog_);
-    btnBinaryPreviewNext_ = new QPushButton("Next", binaryPreviewDialog_);
     btnBinaryPreviewSnap_ = new QPushButton("Snap", binaryPreviewDialog_);
     cbBinaryPreviewMorphOp_ = new QComboBox(binaryPreviewDialog_);
     for (const QString& op : {"Erode","Dilate","Open","Close","Fill Holes","Watershed","Skeletonize","Outline","Clear Border"}) cbBinaryPreviewMorphOp_->addItem(op);
     btnBinaryPreviewMorphUndo_ = new QPushButton("Undo", binaryPreviewDialog_);
     lblBinaryPreviewMorphOps_ = new QLabel("Pipeline: (none)", binaryPreviewDialog_);
     lblBinaryPreviewMorphOps_->setStyleSheet("color:#cbd5e1;");
-    topCtl->addWidget(btnBinaryPreviewPrev_);
-    topCtl->addWidget(btnBinaryPreviewNext_);
     topCtl->addWidget(btnBinaryPreviewSnap_);
     topCtl->addSpacing(12);
     topCtl->addWidget(new QLabel("Morph", binaryPreviewDialog_));
     topCtl->addWidget(cbBinaryPreviewMorphOp_);
+    btnBinaryPreviewMorphUndo_->setText("Back");
     topCtl->addWidget(btnBinaryPreviewMorphUndo_);
     topCtl->addWidget(lblBinaryPreviewMorphOps_, 1);
     lv->addLayout(topCtl);
@@ -2427,8 +2435,30 @@ void MainWindow::onShowBinaryPreviewPopup() {
     }
     lv->addLayout(views, 1);
 
+    QHBoxLayout* bottomCtl = new QHBoxLayout();
+    btnBinaryPreviewPrev_ = new QPushButton("Prev", binaryPreviewDialog_);
+    btnBinaryPreviewPlay_ = new QPushButton("Play", binaryPreviewDialog_);
+    btnBinaryPreviewPlay_->setCheckable(true);
+    btnBinaryPreviewNext_ = new QPushButton("Next", binaryPreviewDialog_);
+    bottomCtl->addStretch(1);
+    bottomCtl->addWidget(btnBinaryPreviewPrev_);
+    bottomCtl->addWidget(btnBinaryPreviewPlay_);
+    bottomCtl->addWidget(btnBinaryPreviewNext_);
+    bottomCtl->addStretch(1);
+    lv->addLayout(bottomCtl);
+
     connect(btnBinaryPreviewPrev_, &QPushButton::clicked, this, &MainWindow::onBinaryPreviewPrevFrame);
     connect(btnBinaryPreviewNext_, &QPushButton::clicked, this, &MainWindow::onBinaryPreviewNextFrame);
+    connect(btnBinaryPreviewPlay_, &QPushButton::toggled, this, [this](bool on){
+      if (on) {
+        if (btnBinaryPreviewPlay_) btnBinaryPreviewPlay_->setText("Pause");
+        if (!binary_preview_play_timer_.isActive()) binary_preview_play_timer_.start(66);
+      } else {
+        if (btnBinaryPreviewPlay_) btnBinaryPreviewPlay_->setText("Play");
+        binary_preview_play_timer_.stop();
+      }
+    });
+    connect(&binary_preview_play_timer_, &QTimer::timeout, this, &MainWindow::onBinaryPreviewNextFrame);
     connect(btnBinaryPreviewSnap_, &QPushButton::clicked, this, &MainWindow::onBinaryPreviewSnap);
     connect(cbBinaryPreviewMorphOp_, QOverload<int>::of(&QComboBox::activated), this, [this](int){
       if (!cbBinaryPreviewMorphOp_) return;
@@ -2453,6 +2483,9 @@ void MainWindow::onShowBinaryPreviewPopup() {
   QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o;
   if (lblBinaryPreviewMorphOps_) lblBinaryPreviewMorphOps_->setText(binary_ops_pipeline_.empty() ? "Pipeline: (none)" : QString("Pipeline: %1").arg(ops.join(" -> ")));
   binary_preview_zoom_ = 1.0;
+  binary_preview_center_ = QPointF(0.5, 0.5);
+  if (btnBinaryPreviewPlay_) { btnBinaryPreviewPlay_->setChecked(false); btnBinaryPreviewPlay_->setText("Play"); }
+  binary_preview_play_timer_.stop();
   binaryPreviewDialog_->showMaximized();
   binaryPreviewDialog_->raise();
   binaryPreviewDialog_->activateWindow();
@@ -2508,25 +2541,154 @@ void MainWindow::updateBinaryPreviewPopupFrame() {
 
 void MainWindow::refreshBinaryPreviewPopupPixmaps() {
   if (!lblBinaryPreviewOrig_ || !lblBinaryPreviewPopup_) return;
-  if (!binary_preview_orig_img_.isNull()) {
-    const QSize sz(std::max(1, (int)std::round(lblBinaryPreviewOrig_->width() * binary_preview_zoom_)),
-                   std::max(1, (int)std::round(lblBinaryPreviewOrig_->height() * binary_preview_zoom_)));
-    lblBinaryPreviewOrig_->setPixmap(QPixmap::fromImage(binary_preview_orig_img_).scaled(sz, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+  auto applyView = [&](QLabel* lab, const QImage& img){
+    if (!lab || img.isNull()) return;
+    const int iw = img.width(), ih = img.height();
+    if (iw <= 0 || ih <= 0) return;
+    const double z = std::max(1.0, binary_preview_zoom_);
+    const int cw = std::max(1, (int)std::round(iw / z));
+    const int ch = std::max(1, (int)std::round(ih / z));
+    int cx = (int)std::round(std::clamp(binary_preview_center_.x(), 0.0, 1.0) * (iw - 1));
+    int cy = (int)std::round(std::clamp(binary_preview_center_.y(), 0.0, 1.0) * (ih - 1));
+    QRect roi(cx - cw/2, cy - ch/2, cw, ch);
+    roi = roi.intersected(QRect(0, 0, iw, ih));
+    if (roi.width() <= 0 || roi.height() <= 0) roi = QRect(0, 0, iw, ih);
+    QImage cropped = img.copy(roi);
+    lab->setPixmap(QPixmap::fromImage(cropped).scaled(lab->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+  };
+  applyView(lblBinaryPreviewOrig_, binary_preview_orig_img_);
+  applyView(lblBinaryPreviewPopup_, binary_preview_mask_img_);
+}
+
+void MainWindow::refreshVisualizationImagePixmap() {
+  if (!leftVisImage_ || visual_image_base_.isNull()) return;
+  const int iw = visual_image_base_.width();
+  const int ih = visual_image_base_.height();
+  if (iw <= 0 || ih <= 0) return;
+
+  auto gatherShowIds = [this]() {
+    std::set<int> ids;
+    for (const auto& t : target_meas_rows_) ids.insert(t.id);
+    std::set<int> show = ids;
+    if (cbTargetFilter_) {
+      if (auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model())) {
+        show.clear();
+        for (int i=0;i<model->rowCount();++i) {
+          auto* it = model->item(i);
+          if (!it) continue;
+          const int id = it->data(Qt::UserRole).toInt();
+          if (id >= 0 && it->checkState() == Qt::Checked) show.insert(id);
+        }
+      }
+    }
+    return show;
+  };
+
+  if (visual_image_auto_mode_) {
+    const int frameIdx = std::max(0, (int)play_frame_);
+    std::set<int> showIds = gatherShowIds();
+    cv::Rect box;
+    bool has = false;
+    if (frameIdx < (int)tracked_contours_by_frame_.size()) {
+      for (const auto& tc : tracked_contours_by_frame_[frameIdx]) {
+        if (!showIds.empty() && !showIds.count(tc.id)) continue;
+        cv::Rect r = cv::boundingRect(tc.contour);
+        box = has ? (box | r) : r;
+        has = true;
+      }
+    }
+    if (has) {
+      const double cx = (box.x + box.width * 0.5) / std::max(1, iw);
+      const double cy = (box.y + box.height * 0.5) / std::max(1, ih);
+      visual_image_center_ = QPointF(std::clamp(cx, 0.0, 1.0), std::clamp(cy, 0.0, 1.0));
+      const double zx = (box.width > 0) ? ((double)iw / std::max(1, box.width)) : 1.0;
+      const double zy = (box.height > 0) ? ((double)ih / std::max(1, box.height)) : 1.0;
+      visual_image_zoom_ = std::max(1.0, std::min(12.0, std::min(zx, zy) * 0.9));
+    } else {
+      visual_image_center_ = QPointF(0.5, 0.5);
+      visual_image_zoom_ = 1.0;
+    }
   }
-  if (!binary_preview_mask_img_.isNull()) {
-    const QSize sz(std::max(1, (int)std::round(lblBinaryPreviewPopup_->width() * binary_preview_zoom_)),
-                   std::max(1, (int)std::round(lblBinaryPreviewPopup_->height() * binary_preview_zoom_)));
-    lblBinaryPreviewPopup_->setPixmap(QPixmap::fromImage(binary_preview_mask_img_).scaled(sz, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-  }
+
+  const double z = std::max(1.0, visual_image_zoom_);
+  const int cw = std::max(1, (int)std::round(iw / z));
+  const int ch = std::max(1, (int)std::round(ih / z));
+  int cx = (int)std::round(std::clamp(visual_image_center_.x(), 0.0, 1.0) * (iw - 1));
+  int cy = (int)std::round(std::clamp(visual_image_center_.y(), 0.0, 1.0) * (ih - 1));
+  QRect roi(cx - cw/2, cy - ch/2, cw, ch);
+  roi = roi.intersected(QRect(0, 0, iw, ih));
+  if (roi.width() <= 0 || roi.height() <= 0) roi = QRect(0, 0, iw, ih);
+  QImage cropped = visual_image_base_.copy(roi);
+  leftVisImage_->setPixmap(QPixmap::fromImage(cropped).scaled(leftVisImage_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
-  if ((watched == lblBinaryPreviewOrig_ || watched == lblBinaryPreviewPopup_) && event && event->type() == QEvent::Wheel) {
-    auto* we = static_cast<QWheelEvent*>(event);
+  if (!event) return QMainWindow::eventFilter(watched, event);
+
+  auto handleWheel = [&](QLabel* lab, double& zoom, QPointF& center, const QWheelEvent* we, auto refreshFn) {
+    if (!lab || !we) return;
+    const QPointF pos = we->position();
+    const double nx = (lab->width() > 1) ? std::clamp(pos.x() / (double)lab->width(), 0.0, 1.0) : 0.5;
+    const double ny = (lab->height() > 1) ? std::clamp(pos.y() / (double)lab->height(), 0.0, 1.0) : 0.5;
+    const double oldZoom = std::max(1.0, zoom);
     const double step = (we->angleDelta().y() > 0) ? 1.12 : 0.90;
-    binary_preview_zoom_ = std::max(0.2, std::min(6.0, binary_preview_zoom_ * step));
-    refreshBinaryPreviewPopupPixmaps();
-    return true;
+    zoom = std::max(1.0, std::min(12.0, zoom * step));
+    const double newZoom = std::max(1.0, zoom);
+    if (std::abs(newZoom - oldZoom) > 1e-9) {
+      const double s = oldZoom / newZoom;
+      center.setX(std::clamp(center.x() + (nx - 0.5) * (1.0 - s), 0.0, 1.0));
+      center.setY(std::clamp(center.y() + (ny - 0.5) * (1.0 - s), 0.0, 1.0));
+    }
+    refreshFn();
+  };
+
+  if (watched == lblBinaryPreviewOrig_ || watched == lblBinaryPreviewPopup_) {
+    if (event->type() == QEvent::Wheel) {
+      handleWheel(qobject_cast<QLabel*>(watched), binary_preview_zoom_, binary_preview_center_, static_cast<QWheelEvent*>(event), [this](){ refreshBinaryPreviewPopupPixmaps(); });
+      return true;
+    }
+    if (event->type() == QEvent::MouseButtonPress) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      if (me->button() == Qt::LeftButton) { binary_preview_dragging_ = true; binary_preview_last_pos_ = me->pos(); return true; }
+    }
+    if (event->type() == QEvent::MouseMove && binary_preview_dragging_) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      const QPoint d = me->pos() - binary_preview_last_pos_;
+      binary_preview_last_pos_ = me->pos();
+      binary_preview_center_.setX(std::clamp(binary_preview_center_.x() - d.x() / std::max(1.0, (double)qobject_cast<QLabel*>(watched)->width()) / std::max(1.0, binary_preview_zoom_), 0.0, 1.0));
+      binary_preview_center_.setY(std::clamp(binary_preview_center_.y() - d.y() / std::max(1.0, (double)qobject_cast<QLabel*>(watched)->height()) / std::max(1.0, binary_preview_zoom_), 0.0, 1.0));
+      refreshBinaryPreviewPopupPixmaps();
+      return true;
+    }
+    if (event->type() == QEvent::MouseButtonRelease) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      if (me->button() == Qt::LeftButton) { binary_preview_dragging_ = false; return true; }
+    }
+  }
+
+  if (watched == leftVisImage_) {
+    if (event->type() == QEvent::Wheel) {
+      visual_image_auto_mode_ = false;
+      handleWheel(leftVisImage_, visual_image_zoom_, visual_image_center_, static_cast<QWheelEvent*>(event), [this](){ refreshVisualizationImagePixmap(); });
+      return true;
+    }
+    if (event->type() == QEvent::MouseButtonPress) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      if (me->button() == Qt::LeftButton) { visual_image_dragging_ = true; visual_image_last_pos_ = me->pos(); visual_image_auto_mode_ = false; return true; }
+    }
+    if (event->type() == QEvent::MouseMove && visual_image_dragging_) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      const QPoint d = me->pos() - visual_image_last_pos_;
+      visual_image_last_pos_ = me->pos();
+      visual_image_center_.setX(std::clamp(visual_image_center_.x() - d.x() / std::max(1.0, (double)leftVisImage_->width()) / std::max(1.0, visual_image_zoom_), 0.0, 1.0));
+      visual_image_center_.setY(std::clamp(visual_image_center_.y() - d.y() / std::max(1.0, (double)leftVisImage_->height()) / std::max(1.0, visual_image_zoom_), 0.0, 1.0));
+      refreshVisualizationImagePixmap();
+      return true;
+    }
+    if (event->type() == QEvent::MouseButtonRelease) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      if (me->button() == Qt::LeftButton) { visual_image_dragging_ = false; return true; }
+    }
   }
   return QMainWindow::eventFilter(watched, event);
 }
@@ -3660,8 +3822,8 @@ void MainWindow::onTick() {
       visImageLabel_->setPixmap(QPixmap::fromImage(qi).scaled(visImageLabel_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
     }
     if (leftVisImage_) {
-      QImage qi = matToQImage(f);
-      leftVisImage_->setPixmap(QPixmap::fromImage(qi).scaled(leftVisImage_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+      visual_image_base_ = matToQImage(f);
+      refreshVisualizationImagePixmap();
     }
     break;
   }

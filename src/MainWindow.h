@@ -256,6 +256,7 @@ private:
   void fitAllVisualPlots();
   void updateBinaryPreviewPopupFrame();
   void refreshBinaryPreviewPopupPixmaps();
+  void refreshVisualizationImagePixmap();
   double metricValueForHist(const MeasureRow& r, const QString& metric) const;
   bool passesConfirmedHistogramRules(const MeasureRow& r) const;
   void configureHistogramEditorsForMetric(const QString& metric);
@@ -415,6 +416,7 @@ private:
   QLabel* lblBinaryPreviewPopup_=nullptr;
   QPushButton* btnBinaryPreviewPrev_=nullptr;
   QPushButton* btnBinaryPreviewNext_=nullptr;
+  QPushButton* btnBinaryPreviewPlay_=nullptr;
   QPushButton* btnBinaryPreviewSnap_=nullptr;
   QComboBox* cbBinaryPreviewMorphOp_=nullptr;
   QPushButton* btnBinaryPreviewMorphUndo_=nullptr;
@@ -544,6 +546,7 @@ private:
   QPushButton* btnExportTableCsv_=nullptr;
   QPushButton* btnExportMp4_=nullptr;
   QPushButton* btnFitAllPlots_=nullptr;
+  QPushButton* btnVisualAuto_=nullptr;
   QPushButton* btnToggleTable_=nullptr;
   QPushButton* btnTileLayout_=nullptr;
   QTableWidget* leftMeasureTable_=nullptr;
@@ -554,8 +557,18 @@ private:
   int selected_target_frame_ = -1;
   bool pending_visual_fit_ = false;
   double binary_preview_zoom_ = 1.0;
+  QPointF binary_preview_center_ = QPointF(0.5, 0.5);
+  bool binary_preview_dragging_ = false;
+  QPoint binary_preview_last_pos_;
   QImage binary_preview_orig_img_;
   QImage binary_preview_mask_img_;
+  double visual_image_zoom_ = 1.0;
+  QPointF visual_image_center_ = QPointF(0.5, 0.5);
+  bool visual_image_dragging_ = false;
+  QPoint visual_image_last_pos_;
+  bool visual_image_auto_mode_ = true;
+  QImage visual_image_base_;
+  QTimer binary_preview_play_timer_;
 
   bool eventFilter(QObject* watched, QEvent* event) override;
 
