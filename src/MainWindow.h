@@ -196,6 +196,9 @@ private slots:
   void onTryAllGlobalMethods();
   void onTryAllLocalMethods();
   void onShowBinaryPreviewPopup();
+  void onBinaryPreviewPrevFrame();
+  void onBinaryPreviewNextFrame();
+  void onBinaryPreviewSnap();
   void onAddMaskRegion();
   void onAddDetectRegion();
   void onDeleteRegion();
@@ -251,6 +254,8 @@ private:
   void refreshRegionOverlays(int highlightedIndex=-1, int editingIndex=-1);
   void updateLeftVisualDashboard();
   void fitAllVisualPlots();
+  void updateBinaryPreviewPopupFrame();
+  void refreshBinaryPreviewPopupPixmaps();
   double metricValueForHist(const MeasureRow& r, const QString& metric) const;
   bool passesConfirmedHistogramRules(const MeasureRow& r) const;
   void configureHistogramEditorsForMetric(const QString& metric);
@@ -406,7 +411,14 @@ private:
   QDoubleSpinBox* spLocalK_=nullptr;
   QLabel* lblBinaryPreview_=nullptr;
   QDialog* binaryPreviewDialog_=nullptr;
+  QLabel* lblBinaryPreviewOrig_=nullptr;
   QLabel* lblBinaryPreviewPopup_=nullptr;
+  QPushButton* btnBinaryPreviewPrev_=nullptr;
+  QPushButton* btnBinaryPreviewNext_=nullptr;
+  QPushButton* btnBinaryPreviewSnap_=nullptr;
+  QComboBox* cbBinaryPreviewMorphOp_=nullptr;
+  QPushButton* btnBinaryPreviewMorphUndo_=nullptr;
+  QLabel* lblBinaryPreviewMorphOps_=nullptr;
   QPushButton* btnTryAllGlobal_=nullptr;
   QPushButton* btnTryAllLocal_=nullptr;
   QComboBox* cbBinaryOp_=nullptr;
@@ -541,6 +553,11 @@ private:
   QDoubleSpinBox* spSmoothAlphaAccel_=nullptr;
   int selected_target_frame_ = -1;
   bool pending_visual_fit_ = false;
+  double binary_preview_zoom_ = 1.0;
+  QImage binary_preview_orig_img_;
+  QImage binary_preview_mask_img_;
+
+  bool eventFilter(QObject* watched, QEvent* event) override;
 
   // Timer (UI refresh)
   std::map<QString, std::pair<double,double>> confirmed_hist_rules_;

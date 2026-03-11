@@ -41,6 +41,7 @@
 #include <QToolTip>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QWheelEvent>
 #include <functional>
 #include <algorithm>
 #include <array>
@@ -1508,6 +1509,7 @@ void MainWindow::buildUI() {
     bp->addWidget(btnUndoBinaryOp_, 0, 2);
     bp->addWidget(lblBinaryOps_, 1, 0, 1, 4);
     gbBinaryProc->setLayout(bp);
+    gbBinaryProc->setVisible(false);
     trkMainLayout->addWidget(gbBinaryProc);
 
     QGroupBox* gbDetect = new QGroupBox("3.Detect & Filter", tabObj);
@@ -2376,7 +2378,8 @@ void MainWindow::onObjectThresholdParamsChanged() {
       QImage qi = matToQImage(bin);
       lblBinaryPreview_->setPixmap(QPixmap::fromImage(qi).scaled(lblBinaryPreview_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
       if (lblBinaryPreviewPopup_) {
-        lblBinaryPreviewPopup_->setPixmap(QPixmap::fromImage(qi).scaled(lblBinaryPreviewPopup_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        binary_preview_mask_img_ = qi;
+        refreshBinaryPreviewPopupPixmaps();
       }
     }
     break;
@@ -2387,21 +2390,145 @@ void MainWindow::onShowBinaryPreviewPopup() {
   if (!binaryPreviewDialog_) {
     binaryPreviewDialog_ = new QDialog(this);
     binaryPreviewDialog_->setAttribute(Qt::WA_DeleteOnClose, false);
-    binaryPreviewDialog_->setWindowTitle("Binary Preview");
+    binaryPreviewDialog_->setWindowTitle("Detect Preview");
     binaryPreviewDialog_->setModal(false);
     QVBoxLayout* lv = new QVBoxLayout(binaryPreviewDialog_);
     lv->setContentsMargins(8, 8, 8, 8);
+
+    QHBoxLayout* topCtl = new QHBoxLayout();
+    btnBinaryPreviewPrev_ = new QPushButton("Prev", binaryPreviewDialog_);
+    btnBinaryPreviewNext_ = new QPushButton("Next", binaryPreviewDialog_);
+    btnBinaryPreviewSnap_ = new QPushButton("Snap", binaryPreviewDialog_);
+    cbBinaryPreviewMorphOp_ = new QComboBox(binaryPreviewDialog_);
+    for (const QString& op : {"Erode","Dilate","Open","Close","Fill Holes","Watershed","Skeletonize","Outline","Clear Border"}) cbBinaryPreviewMorphOp_->addItem(op);
+    btnBinaryPreviewMorphUndo_ = new QPushButton("Undo", binaryPreviewDialog_);
+    lblBinaryPreviewMorphOps_ = new QLabel("Pipeline: (none)", binaryPreviewDialog_);
+    lblBinaryPreviewMorphOps_->setStyleSheet("color:#cbd5e1;");
+    topCtl->addWidget(btnBinaryPreviewPrev_);
+    topCtl->addWidget(btnBinaryPreviewNext_);
+    topCtl->addWidget(btnBinaryPreviewSnap_);
+    topCtl->addSpacing(12);
+    topCtl->addWidget(new QLabel("Morph", binaryPreviewDialog_));
+    topCtl->addWidget(cbBinaryPreviewMorphOp_);
+    topCtl->addWidget(btnBinaryPreviewMorphUndo_);
+    topCtl->addWidget(lblBinaryPreviewMorphOps_, 1);
+    lv->addLayout(topCtl);
+
+    QHBoxLayout* views = new QHBoxLayout();
+    lblBinaryPreviewOrig_ = new QLabel(binaryPreviewDialog_);
     lblBinaryPreviewPopup_ = new QLabel(binaryPreviewDialog_);
-    lblBinaryPreviewPopup_->setAlignment(Qt::AlignCenter);
-    lblBinaryPreviewPopup_->setMinimumSize(960, 540);
-    lblBinaryPreviewPopup_->setStyleSheet("background:#000;border:1px solid #3a4250;color:#9aa7b8;");
-    lblBinaryPreviewPopup_->setText("No binary preview");
-    lv->addWidget(lblBinaryPreviewPopup_);
+    for (QLabel* lab : {lblBinaryPreviewOrig_, lblBinaryPreviewPopup_}) {
+      lab->setAlignment(Qt::AlignCenter);
+      lab->setMinimumSize(600, 420);
+      lab->setStyleSheet("background:#000;border:1px solid #3a4250;color:#9aa7b8;");
+      lab->setText("No preview");
+      lab->installEventFilter(this);
+      views->addWidget(lab, 1);
+    }
+    lv->addLayout(views, 1);
+
+    connect(btnBinaryPreviewPrev_, &QPushButton::clicked, this, &MainWindow::onBinaryPreviewPrevFrame);
+    connect(btnBinaryPreviewNext_, &QPushButton::clicked, this, &MainWindow::onBinaryPreviewNextFrame);
+    connect(btnBinaryPreviewSnap_, &QPushButton::clicked, this, &MainWindow::onBinaryPreviewSnap);
+    connect(cbBinaryPreviewMorphOp_, QOverload<int>::of(&QComboBox::activated), this, [this](int){
+      if (!cbBinaryPreviewMorphOp_) return;
+      const QString op = cbBinaryPreviewMorphOp_->currentText();
+      if (op.isEmpty()) return;
+      binary_ops_pipeline_.push_back(op);
+      QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o;
+      if (lblBinaryOps_) lblBinaryOps_->setText(binary_ops_pipeline_.empty() ? "Pipeline: (none)" : QString("Pipeline: %1").arg(ops.join(" -> ")));
+      if (lblBinaryPreviewMorphOps_) lblBinaryPreviewMorphOps_->setText(binary_ops_pipeline_.empty() ? "Pipeline: (none)" : QString("Pipeline: %1").arg(ops.join(" -> ")));
+      onObjectThresholdParamsChanged();
+      updateBinaryPreviewPopupFrame();
+    });
+    connect(btnBinaryPreviewMorphUndo_, &QPushButton::clicked, this, [this](){
+      if (!binary_ops_pipeline_.empty()) binary_ops_pipeline_.pop_back();
+      QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o;
+      if (lblBinaryOps_) lblBinaryOps_->setText(binary_ops_pipeline_.empty() ? "Pipeline: (none)" : QString("Pipeline: %1").arg(ops.join(" -> ")));
+      if (lblBinaryPreviewMorphOps_) lblBinaryPreviewMorphOps_->setText(binary_ops_pipeline_.empty() ? "Pipeline: (none)" : QString("Pipeline: %1").arg(ops.join(" -> ")));
+      onObjectThresholdParamsChanged();
+      updateBinaryPreviewPopupFrame();
+    });
   }
+  QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o;
+  if (lblBinaryPreviewMorphOps_) lblBinaryPreviewMorphOps_->setText(binary_ops_pipeline_.empty() ? "Pipeline: (none)" : QString("Pipeline: %1").arg(ops.join(" -> ")));
+  binary_preview_zoom_ = 1.0;
   binaryPreviewDialog_->showMaximized();
   binaryPreviewDialog_->raise();
   binaryPreviewDialog_->activateWindow();
-  onObjectThresholdParamsChanged();
+  updateBinaryPreviewPopupFrame();
+}
+
+void MainWindow::onBinaryPreviewPrevFrame() {
+  stepAllVideos(-1);
+  updateBinaryPreviewPopupFrame();
+}
+
+void MainWindow::onBinaryPreviewNextFrame() {
+  stepAllVideos(1);
+  updateBinaryPreviewPopupFrame();
+}
+
+void MainWindow::onBinaryPreviewSnap() {
+  if (binary_preview_mask_img_.isNull()) return;
+  const QString def = QString("binary_preview_%1.bmp").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+  const QString path = QFileDialog::getSaveFileName(this, "Save Binary Preview", def, "Bitmap (*.bmp)");
+  if (path.isEmpty()) return;
+  if (!binary_preview_mask_img_.save(path, "BMP")) {
+    QMessageBox::warning(this, "Save Binary", "Failed to save binary snapshot.");
+    return;
+  }
+  openSavedDirectoryForFile(path);
+}
+
+void MainWindow::updateBinaryPreviewPopupFrame() {
+  if (!lblBinaryPreviewOrig_ || !lblBinaryPreviewPopup_) return;
+  std::vector<cv::Mat> frames;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    frames = last_frames_;
+  }
+  for (const auto& f0 : frames) {
+    if (f0.empty()) continue;
+    cv::Mat pre = applyPreprocess(f0);
+    int autoT = spObjectThresh_ ? spObjectThresh_->value() : 128;
+    cv::Mat bin = makeObjectBinaryPreview(pre, &autoT);
+    if (bin.empty()) continue;
+    auto contours = detectBinaryContours(pre);
+    cv::Mat orig = pre.clone();
+    if (!contours.empty()) cv::drawContours(orig, contours, -1, cv::Scalar(0,255,0), 2);
+    binary_preview_orig_img_ = matToQImage(orig);
+    binary_preview_mask_img_ = matToQImage(bin);
+    refreshBinaryPreviewPopupPixmaps();
+    return;
+  }
+  lblBinaryPreviewOrig_->setText("No source frame");
+  lblBinaryPreviewPopup_->setText("No binary preview");
+}
+
+void MainWindow::refreshBinaryPreviewPopupPixmaps() {
+  if (!lblBinaryPreviewOrig_ || !lblBinaryPreviewPopup_) return;
+  if (!binary_preview_orig_img_.isNull()) {
+    const QSize sz(std::max(1, (int)std::round(lblBinaryPreviewOrig_->width() * binary_preview_zoom_)),
+                   std::max(1, (int)std::round(lblBinaryPreviewOrig_->height() * binary_preview_zoom_)));
+    lblBinaryPreviewOrig_->setPixmap(QPixmap::fromImage(binary_preview_orig_img_).scaled(sz, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+  }
+  if (!binary_preview_mask_img_.isNull()) {
+    const QSize sz(std::max(1, (int)std::round(lblBinaryPreviewPopup_->width() * binary_preview_zoom_)),
+                   std::max(1, (int)std::round(lblBinaryPreviewPopup_->height() * binary_preview_zoom_)));
+    lblBinaryPreviewPopup_->setPixmap(QPixmap::fromImage(binary_preview_mask_img_).scaled(sz, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+  }
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+  if ((watched == lblBinaryPreviewOrig_ || watched == lblBinaryPreviewPopup_) && event && event->type() == QEvent::Wheel) {
+    auto* we = static_cast<QWheelEvent*>(event);
+    const double step = (we->angleDelta().y() > 0) ? 1.12 : 0.90;
+    binary_preview_zoom_ = std::max(0.2, std::min(6.0, binary_preview_zoom_ * step));
+    refreshBinaryPreviewPopupPixmaps();
+    return true;
+  }
+  return QMainWindow::eventFilter(watched, event);
 }
 
 cv::Mat MainWindow::makeObjectBinaryMask(const cv::Mat& src, int* outGlobalThreshold) const {
@@ -3555,7 +3682,8 @@ void MainWindow::onTick() {
         QImage qi = matToQImage(bin);
         lblBinaryPreview_->setPixmap(QPixmap::fromImage(qi).scaled(lblBinaryPreview_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
         if (lblBinaryPreviewPopup_) {
-          lblBinaryPreviewPopup_->setPixmap(QPixmap::fromImage(qi).scaled(lblBinaryPreviewPopup_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+          binary_preview_mask_img_ = qi;
+          refreshBinaryPreviewPopupPixmaps();
         }
       }
       break;
