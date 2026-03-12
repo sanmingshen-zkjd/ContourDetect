@@ -1837,6 +1837,9 @@ void MainWindow::buildUI() {
         root->setStretch(1, visual ? 0 : 2);
       }
       if (this->size() != keepSize) this->resize(keepSize);
+      QTimer::singleShot(0, this, [this, keepSize]() {
+        if (this->size() != keepSize) this->resize(keepSize);
+      });
     });
 
     dv->addWidget(actionTabs_);
@@ -2342,6 +2345,7 @@ void MainWindow::onRemoveSource() {
   stepDone_[3] = false;
   last_meas_key_ = std::numeric_limits<qint64>::min();
   last_ctr_ = cv::Point2f(0, 0);
+  first_ctr_ = cv::Point2f(0, 0);
   last_speed_ = 0.0;
   measurements_frozen_ = false;
   track_binary_enabled_ = false;
@@ -3549,9 +3553,11 @@ void MainWindow::onTryAllGlobalMethods() {
   QWidget* wrap = new QWidget(scroll);
   QGridLayout* grid = new QGridLayout();
   auto tiles = std::make_shared<std::vector<ThumbnailLabel*>>();
+  auto tileImages = std::make_shared<std::vector<QImage>>();
   const int thumbW = std::max(320, (int)(ar.width()*0.28));
   const int thumbH = std::max(220, (int)(ar.height()*0.26));
   const int cols = 3;
+  double zoom = 1.0;
 
   for (int i = 0; i < n; ++i) {
     if (cbGlobalMethod_) cbGlobalMethod_->setCurrentIndex(i);
@@ -3562,11 +3568,13 @@ void MainWindow::onTryAllGlobalMethods() {
     cv::putText(b, methodName.toStdString(), cv::Point(8, 20), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,0,255), 2, cv::LINE_AA);
 
     auto* tile = new ThumbnailLabel(i, dlg);
+    const QImage tileImg = matToQImage(b);
     tile->setFixedSize(thumbW, thumbH);
-    tile->setPixmap(QPixmap::fromImage(matToQImage(b)));
+    tile->setPixmap(QPixmap::fromImage(tileImg));
     tile->setScaledContents(true);
     tile->setToolTip(methodName + "\nDouble-click to use this method");
     tiles->push_back(tile);
+    tileImages->push_back(tileImg);
     tile->onClicked = [tiles, tile, &pickedIdx](int idx) {
       for (auto* t : *tiles) if (t) t->setSelected(false);
       if (tile) tile->setSelected(true);
@@ -3584,10 +3592,46 @@ void MainWindow::onTryAllGlobalMethods() {
     if (idx >= 0) cbGlobalMethod_->setCurrentIndex(idx);
   }
 
+  auto applyThumbZoom = [tiles, tileImages, thumbW, thumbH, &zoom]() {
+    if (!tiles || !tileImages) return;
+    const int w = std::max(96, (int)std::round(thumbW * zoom));
+    const int h = std::max(72, (int)std::round(thumbH * zoom));
+    const int n = std::min(tiles->size(), tileImages->size());
+    for (int k=0; k<n; ++k) {
+      auto* t = (*tiles)[k];
+      const QImage& im = (*tileImages)[k];
+      if (!t || im.isNull()) continue;
+      t->setFixedSize(w, h);
+      t->setPixmap(QPixmap::fromImage(im));
+      t->setScaledContents(true);
+    }
+  };
+
+  QHBoxLayout* zoomCtl = new QHBoxLayout();
+  QPushButton* btnZoomOut = new QPushButton("-", dlg);
+  QPushButton* btnZoomIn = new QPushButton("+", dlg);
+  QSlider* slZoom = new QSlider(Qt::Horizontal, dlg);
+  slZoom->setRange(50, 250);
+  slZoom->setValue(100);
+  QLabel* lblZoom = new QLabel("Zoom", dlg);
+  zoomCtl->addWidget(lblZoom);
+  zoomCtl->addWidget(btnZoomOut);
+  zoomCtl->addWidget(slZoom, 1);
+  zoomCtl->addWidget(btnZoomIn);
+  outer->addLayout(zoomCtl);
+
   wrap->setLayout(grid);
   scroll->setWidget(wrap);
   scroll->setWidgetResizable(true);
   outer->addWidget(scroll, 1);
+  auto setZoom = [&zoom, slZoom, applyThumbZoom](int v) {
+    zoom = std::max(0.5, std::min(2.5, v / 100.0));
+    applyThumbZoom();
+  };
+  QObject::connect(slZoom, &QSlider::valueChanged, dlg, setZoom);
+  QObject::connect(btnZoomIn, &QPushButton::clicked, dlg, [slZoom]() { slZoom->setValue(std::min(250, slZoom->value() + 10)); });
+  QObject::connect(btnZoomOut, &QPushButton::clicked, dlg, [slZoom]() { slZoom->setValue(std::max(50, slZoom->value() - 10)); });
+
   QDialogButtonBox* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dlg);
   connect(box, &QDialogButtonBox::accepted, dlg, &QDialog::accept);
   connect(box, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
@@ -3630,9 +3674,11 @@ void MainWindow::onTryAllLocalMethods() {
   QWidget* wrap = new QWidget(scroll);
   QGridLayout* grid = new QGridLayout();
   auto tiles = std::make_shared<std::vector<ThumbnailLabel*>>();
+  auto tileImages = std::make_shared<std::vector<QImage>>();
   const int thumbW = std::max(320, (int)(ar.width()*0.28));
   const int thumbH = std::max(220, (int)(ar.height()*0.26));
   const int cols = 3;
+  double zoom = 1.0;
 
   for (int i = 0; i < n; ++i) {
     if (cbLocalMethod_) cbLocalMethod_->setCurrentIndex(i);
@@ -3643,11 +3689,13 @@ void MainWindow::onTryAllLocalMethods() {
     cv::putText(b, methodName.toStdString(), cv::Point(8, 20), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,0,255), 2, cv::LINE_AA);
 
     auto* tile = new ThumbnailLabel(i, dlg);
+    const QImage tileImg = matToQImage(b);
     tile->setFixedSize(thumbW, thumbH);
-    tile->setPixmap(QPixmap::fromImage(matToQImage(b)));
+    tile->setPixmap(QPixmap::fromImage(tileImg));
     tile->setScaledContents(true);
     tile->setToolTip(methodName + "\nDouble-click to use this method");
     tiles->push_back(tile);
+    tileImages->push_back(tileImg);
     tile->onClicked = [tiles, tile, &pickedIdx](int idx) {
       for (auto* t : *tiles) if (t) t->setSelected(false);
       if (tile) tile->setSelected(true);
@@ -3660,10 +3708,46 @@ void MainWindow::onTryAllLocalMethods() {
     grid->addWidget(tile, i / cols, i % cols);
   }
 
+  auto applyThumbZoom = [tiles, tileImages, thumbW, thumbH, &zoom]() {
+    if (!tiles || !tileImages) return;
+    const int w = std::max(96, (int)std::round(thumbW * zoom));
+    const int h = std::max(72, (int)std::round(thumbH * zoom));
+    const int n = std::min(tiles->size(), tileImages->size());
+    for (int k=0; k<n; ++k) {
+      auto* t = (*tiles)[k];
+      const QImage& im = (*tileImages)[k];
+      if (!t || im.isNull()) continue;
+      t->setFixedSize(w, h);
+      t->setPixmap(QPixmap::fromImage(im));
+      t->setScaledContents(true);
+    }
+  };
+
+  QHBoxLayout* zoomCtl = new QHBoxLayout();
+  QPushButton* btnZoomOut = new QPushButton("-", dlg);
+  QPushButton* btnZoomIn = new QPushButton("+", dlg);
+  QSlider* slZoom = new QSlider(Qt::Horizontal, dlg);
+  slZoom->setRange(50, 250);
+  slZoom->setValue(100);
+  QLabel* lblZoom = new QLabel("Zoom", dlg);
+  zoomCtl->addWidget(lblZoom);
+  zoomCtl->addWidget(btnZoomOut);
+  zoomCtl->addWidget(slZoom, 1);
+  zoomCtl->addWidget(btnZoomIn);
+  outer->addLayout(zoomCtl);
+
   wrap->setLayout(grid);
   scroll->setWidget(wrap);
   scroll->setWidgetResizable(true);
   outer->addWidget(scroll, 1);
+  auto setZoom = [&zoom, slZoom, applyThumbZoom](int v) {
+    zoom = std::max(0.5, std::min(2.5, v / 100.0));
+    applyThumbZoom();
+  };
+  QObject::connect(slZoom, &QSlider::valueChanged, dlg, setZoom);
+  QObject::connect(btnZoomIn, &QPushButton::clicked, dlg, [slZoom]() { slZoom->setValue(std::min(250, slZoom->value() + 10)); });
+  QObject::connect(btnZoomOut, &QPushButton::clicked, dlg, [slZoom]() { slZoom->setValue(std::max(50, slZoom->value() - 10)); });
+
   QDialogButtonBox* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dlg);
   connect(box, &QDialogButtonBox::accepted, dlg, &QDialog::accept);
   connect(box, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
@@ -4646,13 +4730,15 @@ void MainWindow::updateMeasurementFromFrame(const cv::Mat& preprocessedFrame) {
   MeasureRow row;
   row.key = key;
   if (meas_rows_.empty()) {
+    first_ctr_ = ctr;
     row.disp = 0.0;
     row.speed = 0.0;
     row.accel = 0.0;
   } else {
-    row.disp = cv::norm(ctr - last_ctr_) * scale;
+    row.disp = cv::norm(ctr - first_ctr_) * scale;
     const double fps = std::max(1.0, play_fps_);
-    row.speed = row.disp * fps;
+    const double stepDisp = cv::norm(ctr - last_ctr_) * scale;
+    row.speed = stepDisp * fps;
     row.accel = (row.speed - last_speed_) * fps;
   }
   row.area = area; row.perim = perim; row.major = major; row.minor = minor; row.circ = circ;
@@ -4897,9 +4983,11 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource(bool showProgress) {
   analyzed_measures_by_frame_.clear();
   last_meas_key_ = std::numeric_limits<qint64>::min();
   last_ctr_ = cv::Point2f(0,0);
+  first_ctr_ = cv::Point2f(0,0);
   last_speed_ = 0.0;
 
   std::unordered_map<int, cv::Point2f> id_last_ctr;
+  std::unordered_map<int, cv::Point2f> id_first_ctr;
   std::unordered_map<int, double> id_last_speed;
   std::unordered_map<int, cv::Point2f> id_prev_centroids;
   int id_next = 1;
@@ -4941,11 +5029,21 @@ void MainWindow::rebuildMeasurementSeriesFromCurrentSource(bool showProgress) {
       row.minor = std::min(rr.size.width, rr.size.height) * scale;
       row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
       auto itPrev = id_last_ctr.find(bestId);
-      if (itPrev == id_last_ctr.end()) { row.disp = 0.0; row.speed = 0.0; row.accel = 0.0; }
-      else {
-        row.disp = cv::norm(ctr - itPrev->second) * scale;
+      auto itFirst = id_first_ctr.find(bestId);
+      if (itPrev == id_last_ctr.end()) {
+        id_first_ctr[bestId] = ctr;
+        row.disp = 0.0;
+        row.speed = 0.0;
+        row.accel = 0.0;
+      } else {
+        if (itFirst == id_first_ctr.end()) {
+          id_first_ctr[bestId] = itPrev->second;
+          itFirst = id_first_ctr.find(bestId);
+        }
+        row.disp = cv::norm(ctr - itFirst->second) * scale;
         const double fps = std::max(1.0, play_fps_);
-        row.speed = row.disp * fps;
+        const double stepDisp = cv::norm(ctr - itPrev->second) * scale;
+        row.speed = stepDisp * fps;
         row.accel = (row.speed - id_last_speed[bestId]) * fps;
       }
       id_last_ctr[bestId] = ctr;

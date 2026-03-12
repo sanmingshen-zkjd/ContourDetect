@@ -500,6 +500,7 @@ private:
   std::vector<TargetMeasureRow> target_meas_rows_;
   qint64 last_meas_key_ = std::numeric_limits<qint64>::min();
   cv::Point2f last_ctr_{0,0};
+  cv::Point2f first_ctr_{0,0};
   double last_speed_ = 0.0;
   bool measurements_frozen_ = false;
   struct RegionSpec { int id=0; bool include=true; QPolygonF poly; };
