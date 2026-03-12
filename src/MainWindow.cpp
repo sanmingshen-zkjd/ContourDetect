@@ -184,6 +184,26 @@ static cv::RotatedRect processHullRepairEllipseFit(const cv::Mat& bin) {
   try { return cv::fitEllipse(hull); } catch (...) { return {}; }
 }
 
+static cv::RotatedRect fitEllipseByMethod(const cv::Mat& bin, const QString& method) {
+  if (method == "RansacEllipseFit") return processRansacEllipseFit(bin);
+  if (method == "DirectEllipseFit") return processDirectEllipseFit(bin);
+  return processHullRepairEllipseFit(bin);
+}
+
+static std::vector<cv::Point> contourFromEllipse(const cv::RotatedRect& e) {
+  std::vector<cv::Point> poly;
+  if (e.size.width <= 0 || e.size.height <= 0) return poly;
+  cv::ellipse2Poly(e.center,
+                   cv::Size((int)std::round(e.size.width * 0.5), (int)std::round(e.size.height * 0.5)),
+                   (int)std::round(e.angle),
+                   0,
+                   360,
+                   2,
+                   poly);
+  if (poly.size() < 5) poly.clear();
+  return poly;
+}
+
 static int stepToTabIndex(int step) { return step; }
 static int tabIndexToStep(int tabIndex) { return tabIndex; }
 
@@ -2637,15 +2657,10 @@ void MainWindow::updateBinaryPreviewPopupFrame() {
     int autoT = spObjectThresh_ ? spObjectThresh_->value() : 128;
     cv::Mat bin = makeObjectBinaryPreview(pre, &autoT);
     if (bin.empty()) continue;
-    auto contours = detectBinaryContours(pre);
     cv::Mat orig = pre.clone();
-    if (!contours.empty()) cv::drawContours(orig, contours, -1, cv::Scalar(0,255,0), 1);
 
-    cv::RotatedRect fitted;
     const QString fitMethod = cbBinaryPreviewFitMethod_ ? cbBinaryPreviewFitMethod_->currentText() : QString("HullRepairEllipseFit");
-    if (fitMethod == "RansacEllipseFit") fitted = processRansacEllipseFit(bin);
-    else if (fitMethod == "DirectEllipseFit") fitted = processDirectEllipseFit(bin);
-    else fitted = processHullRepairEllipseFit(bin);
+    cv::RotatedRect fitted = fitEllipseByMethod(bin, fitMethod);
     if (fitted.size.width > 0 && fitted.size.height > 0) {
       cv::ellipse(orig, fitted, cv::Scalar(255, 170, 0), 2, cv::LINE_AA);
       cv::putText(orig, fitMethod.toStdString(), fitted.center + cv::Point2f(6.f, -6.f),
@@ -3135,21 +3150,30 @@ void MainWindow::onAnalyzeParticles() {
     if (f.empty()) continue;
     f = applyPreprocess(f);
     auto contours = detectBinaryContours(f);
-    analyzed_contours_by_frame_[i] = contours;
+    const QString fitMethod = cbBinaryPreviewFitMethod_ ? cbBinaryPreviewFitMethod_->currentText() : QString("HullRepairEllipseFit");
+    std::vector<std::vector<cv::Point>> fittedContours;
 
     for (const auto& c : contours) {
       if (c.size() < 5) continue;
+      cv::Mat singleMask(f.rows, f.cols, CV_8UC1, cv::Scalar(0));
+      cv::drawContours(singleMask, std::vector<std::vector<cv::Point>>{c}, -1, cv::Scalar(255), cv::FILLED);
+      cv::RotatedRect fitted = fitEllipseByMethod(singleMask, fitMethod);
+      std::vector<cv::Point> fitContour = contourFromEllipse(fitted);
+      if (fitContour.empty()) continue;
+
       MeasureRow row;
       row.key = i;
-      row.area = std::abs(cv::contourArea(c)) * scale * scale;
-      row.perim = cv::arcLength(c, true) * scale;
-      cv::RotatedRect rr = cv::minAreaRect(c);
+      row.area = std::abs(cv::contourArea(fitContour)) * scale * scale;
+      row.perim = cv::arcLength(fitContour, true) * scale;
+      cv::RotatedRect rr = cv::minAreaRect(fitContour);
       row.major = std::max(rr.size.width, rr.size.height) * scale;
       row.minor = std::min(rr.size.width, rr.size.height) * scale;
       row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
-      analyzed_measures_by_frame_[i].push_back(AnalyzedContourMeasure{c, row, true});
+      analyzed_measures_by_frame_[i].push_back(AnalyzedContourMeasure{fitContour, row, true});
       target_meas_rows_.push_back(TargetMeasureRow{-1, row});
+      fittedContours.push_back(fitContour);
     }
+    analyzed_contours_by_frame_[i] = std::move(fittedContours);
     processedFrames = i + 1;
   }
 
