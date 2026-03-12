@@ -2507,8 +2507,11 @@ void MainWindow::onShowBinaryPreviewPopup() {
     QHBoxLayout* topCtl = new QHBoxLayout();
     btnBinaryPreviewSnap_ = new QPushButton("Snap", binaryPreviewDialog_);
     cbBinaryPreviewMorphOp_ = new QComboBox(binaryPreviewDialog_);
+    cbBinaryPreviewContourMode_ = new QComboBox(binaryPreviewDialog_);
     cbBinaryPreviewFitMethod_ = new QComboBox(binaryPreviewDialog_);
     for (const QString& op : {"Erode","Dilate","Open","Close","Fill Holes","Watershed","Skeletonize","Outline","Clear Border"}) cbBinaryPreviewMorphOp_->addItem(op);
+    cbBinaryPreviewContourMode_->addItems({"ContourSimple", "ContourNone"});
+    cbBinaryPreviewContourMode_->setCurrentText("ContourSimple");
     cbBinaryPreviewFitMethod_->addItems({"RansacEllipseFit", "DirectEllipseFit", "HullRepairEllipseFit"});
     cbBinaryPreviewFitMethod_->setCurrentText("HullRepairEllipseFit");
     btnBinaryPreviewMorphUndo_ = new QPushButton("Undo", binaryPreviewDialog_);
@@ -2518,6 +2521,8 @@ void MainWindow::onShowBinaryPreviewPopup() {
     topCtl->addSpacing(12);
     topCtl->addWidget(new QLabel("Morph", binaryPreviewDialog_));
     topCtl->addWidget(cbBinaryPreviewMorphOp_);
+    topCtl->addWidget(new QLabel("Contour", binaryPreviewDialog_));
+    topCtl->addWidget(cbBinaryPreviewContourMode_);
     topCtl->addWidget(new QLabel("Fit", binaryPreviewDialog_));
     topCtl->addWidget(cbBinaryPreviewFitMethod_);
     btnBinaryPreviewMorphUndo_->setText("Back");
@@ -2563,6 +2568,7 @@ void MainWindow::onShowBinaryPreviewPopup() {
     });
     connect(&binary_preview_play_timer_, &QTimer::timeout, this, &MainWindow::onBinaryPreviewNextFrame);
     connect(btnBinaryPreviewSnap_, &QPushButton::clicked, this, &MainWindow::onBinaryPreviewSnap);
+    connect(cbBinaryPreviewContourMode_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ updateBinaryPreviewPopupFrame(); });
     connect(cbBinaryPreviewFitMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ updateBinaryPreviewPopupFrame(); });
     connect(cbBinaryPreviewMorphOp_, QOverload<int>::of(&QComboBox::activated), this, [this](int){
       if (!cbBinaryPreviewMorphOp_) return;
@@ -2633,7 +2639,7 @@ void MainWindow::updateBinaryPreviewPopupFrame() {
     if (bin.empty()) continue;
     auto contours = detectBinaryContours(pre);
     cv::Mat orig = pre.clone();
-    if (!contours.empty()) cv::drawContours(orig, contours, -1, cv::Scalar(0,255,0), 2);
+    if (!contours.empty()) cv::drawContours(orig, contours, -1, cv::Scalar(0,255,0), 1);
 
     cv::RotatedRect fitted;
     const QString fitMethod = cbBinaryPreviewFitMethod_ ? cbBinaryPreviewFitMethod_->currentText() : QString("HullRepairEllipseFit");
@@ -3040,7 +3046,12 @@ cv::Mat MainWindow::makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalTh
 std::vector<std::vector<cv::Point>> MainWindow::detectBinaryContours(const cv::Mat& src, int* outGlobalThreshold) const {
   cv::Mat mask = makeObjectBinaryMask(src, outGlobalThreshold);
   std::vector<std::vector<cv::Point>> contours;
-  if (!mask.empty()) cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+  int chain = cv::CHAIN_APPROX_SIMPLE;
+  if (cbBinaryPreviewContourMode_) {
+    const QString m = cbBinaryPreviewContourMode_->currentText();
+    if (m == "ContourNone") chain = cv::CHAIN_APPROX_NONE;
+  }
+  if (!mask.empty()) cv::findContours(mask, contours, cv::RETR_EXTERNAL, chain);
   return contours;
 }
 
@@ -3905,7 +3916,7 @@ void MainWindow::onTick() {
       if (f.empty()) continue;
       for (const auto& tc : tracked_contours_by_frame_[frameIdx]) {
         if (!contourMetricPass(tc.contour)) continue;
-        cv::drawContours(f, std::vector<std::vector<cv::Point>>{tc.contour}, -1, cv::Scalar(0,255,0), 2);
+        cv::drawContours(f, std::vector<std::vector<cv::Point>>{tc.contour}, -1, cv::Scalar(0,255,0), 1);
         cv::putText(f, std::string("ID:")+std::to_string(tc.id), tc.centroid + cv::Point2f(3.f,-3.f),
                     cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2, cv::LINE_AA);
       }
@@ -3917,14 +3928,14 @@ void MainWindow::onTick() {
       for (const auto& am : analyzed_measures_by_frame_[frameIdx]) {
         if (am.enabled && previewPassForMeasure(am.m)) show.push_back(am.contour);
       }
-      if (!show.empty()) cv::drawContours(f, show, -1, cv::Scalar(0,255,0), 2);
+      if (!show.empty()) cv::drawContours(f, show, -1, cv::Scalar(0,255,0), 1);
     }
   } else if (!analyzed_contours_.empty()) {
     for (auto& f : vis) {
       if (f.empty()) continue;
       std::vector<std::vector<cv::Point>> show;
       for (const auto& c : analyzed_contours_) show.push_back(c);
-      if (!show.empty()) cv::drawContours(f, show, -1, cv::Scalar(0,255,0), 2);
+      if (!show.empty()) cv::drawContours(f, show, -1, cv::Scalar(0,255,0), 1);
     }
   }
 

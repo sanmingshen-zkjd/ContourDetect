@@ -419,6 +419,7 @@ private:
   QPushButton* btnBinaryPreviewPlay_=nullptr;
   QPushButton* btnBinaryPreviewSnap_=nullptr;
   QComboBox* cbBinaryPreviewMorphOp_=nullptr;
+  QComboBox* cbBinaryPreviewContourMode_=nullptr;
   QComboBox* cbBinaryPreviewFitMethod_=nullptr;
   QPushButton* btnBinaryPreviewMorphUndo_=nullptr;
   QLabel* lblBinaryPreviewMorphOps_=nullptr;
