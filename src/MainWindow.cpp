@@ -3648,7 +3648,10 @@ void MainWindow::onContourMaskPointClicked(const QPointF& p) {
   for (const auto& f : frames) { if (!f.empty()) { frame = f; break; } }
   if (frame.empty()) return;
 
-  cv::Mat pre = applyPreprocess(frame);
+  cv::Mat pre = frame.clone();
+  if (pre.channels() == 4) cv::cvtColor(pre, pre, cv::COLOR_BGRA2BGR);
+  cv::Mat preBlur;
+  cv::GaussianBlur(pre, preBlur, cv::Size(5, 5), 0.0);
   if (contour_mask_frame_key_ != frameKey) {
     contour_mask_working_contours_.clear();
     contour_mask_frame_key_ = frameKey;
@@ -3658,9 +3661,9 @@ void MainWindow::onContourMaskPointClicked(const QPointF& p) {
   }
 
   cv::Mat gray;
-  if (pre.channels() == 3) cv::cvtColor(pre, gray, cv::COLOR_BGR2GRAY);
-  else if (pre.channels() == 4) cv::cvtColor(pre, gray, cv::COLOR_BGRA2GRAY);
-  else gray = pre.clone();
+  if (preBlur.channels() == 3) cv::cvtColor(preBlur, gray, cv::COLOR_BGR2GRAY);
+  else if (preBlur.channels() == 4) cv::cvtColor(preBlur, gray, cv::COLOR_BGRA2GRAY);
+  else gray = preBlur.clone();
   if (gray.type() != CV_8UC1) gray.convertTo(gray, CV_8UC1);
 
   cv::Mat gx, gy, gradMag, gradNorm, gxN, gyN;
@@ -4404,11 +4407,15 @@ void MainWindow::onTick() {
 
   // Note: some sources may not have frames yet; mosaic will show placeholders.
 
-  std::vector<cv::Mat> vis = frames;
-  for (auto& f : vis) {
+  const bool maskEditEnabled = (chkEnableMaskEdit_ && chkEnableMaskEdit_->isChecked());
+  std::vector<cv::Mat> vis = frames;   // display base
+  std::vector<cv::Mat> preVis = frames; // processing base
+  for (auto& f : preVis) {
     if (!f.empty()) f = applyPreprocess(f);
   }
-  std::vector<cv::Mat> preVis = vis;
+  if (!maskEditEnabled) {
+    vis = preVis;
+  }
   // If sources count changed, rebuild calibrator to match to avoid crash
   if (mode_==CALIB) {
     int n = (int)frames.size();
@@ -4514,6 +4521,9 @@ void MainWindow::onTick() {
       }
       if (!contour_mask_add_path_.empty()) {
         cv::polylines(f, std::vector<std::vector<cv::Point>>{contour_mask_add_path_}, false, cv::Scalar(255, 255, 0), 1, cv::LINE_AA);
+      }
+      for (const auto& pt : contour_mask_add_snap_points_) {
+        cv::circle(f, pt, 2, cv::Scalar(0, 255, 255), cv::FILLED, cv::LINE_AA);
       }
       for (int i=0; i<(int)contour_mask_working_contours_.size(); ++i) {
         cv::Moments mm = cv::moments(contour_mask_working_contours_[(size_t)i]);
