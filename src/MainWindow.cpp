@@ -540,6 +540,10 @@ void ImageViewer::setPointClickCallback(const std::function<void(const QPointF&)
   onPointClicked_ = cb;
 }
 
+void ImageViewer::setPointRightClickCallback(const std::function<void(const QPointF&)>& cb) {
+  onPointRightClicked_ = cb;
+}
+
 void ImageViewer::clearAllLines() {
   const auto items = scene_.items();
   for (auto* it : items) {
@@ -641,9 +645,12 @@ void ImageViewer::mousePressEvent(QMouseEvent* e) {
     return;
   }
 
-  if (e->button() != Qt::LeftButton) return;
-
   if (toolMode_ == PointTool) {
+    if (e->button() == Qt::RightButton) {
+      if (onPointRightClicked_) onPointRightClicked_(p);
+      return;
+    }
+    if (e->button() != Qt::LeftButton) return;
     if (onPointClicked_) {
       onPointClicked_(p);
       return;
@@ -652,6 +659,8 @@ void ImageViewer::mousePressEvent(QMouseEvent* e) {
     setToolMode(PanTool);
     return;
   }
+
+  if (e->button() != Qt::LeftButton) return;
 
   if (toolMode_ == LineTool) {
     if (!lineDrawing_) {
@@ -1638,6 +1647,7 @@ void MainWindow::buildUI() {
     lblBinaryOps_ = new QLabel("Pipeline: (none)", gbBinaryProc);
     lblBinaryOps_->setWordWrap(true);
     btnAnalyzeParticles_ = new QPushButton("Analyze Particles", tabObj);
+    btnClearContours_ = new QPushButton("Clear Contours", tabObj);
     chkEnableMaskEdit_ = new QCheckBox("Enable Mask Edit", tabObj);
     btnAddMaskContour_ = new QPushButton("Add Mask", tabObj);
     btnModifyMaskContour_ = new QPushButton("Modify Mask", tabObj);
@@ -1686,8 +1696,14 @@ void MainWindow::buildUI() {
     QPushButton* btnHistReset = new QPushButton("Reset", gbDetect);
     btnHistApply_ = new QPushButton("Apply", gbDetect);
 
-    hg->addWidget(btnAnalyzeParticles_, 0, 0, 1, 6);
-    hg->addWidget(chkEnableMaskEdit_, 1, 0, 1, 6);
+    hg->addWidget(btnAnalyzeParticles_, 0, 0, 1, 3);
+    hg->addWidget(btnClearContours_, 0, 3, 1, 3);
+    hg->addWidget(chkEnableMaskEdit_, 1, 0, 1, 3);
+    hg->addWidget(new QLabel("Snap Radius(px)", gbDetect), 1, 3);
+    spMaskSnapRadius_ = new QSpinBox(gbDetect);
+    spMaskSnapRadius_->setRange(3, 200);
+    spMaskSnapRadius_->setValue(10);
+    hg->addWidget(spMaskSnapRadius_, 1, 4, 1, 2);
     hg->addWidget(btnAddMaskContour_, 2, 0, 1, 2);
     hg->addWidget(btnModifyMaskContour_, 2, 2, 1, 2);
     hg->addWidget(btnDeleteMaskContour_, 2, 4, 1, 2);
@@ -1743,6 +1759,7 @@ void MainWindow::buildUI() {
     if (btnModifyMaskContour_) btnModifyMaskContour_->setEnabled(false);
     if (btnDeleteMaskContour_) btnDeleteMaskContour_->setEnabled(false);
     connect(btnAnalyzeParticles_, &QPushButton::clicked, this, &MainWindow::onAnalyzeParticles);
+    connect(btnClearContours_, &QPushButton::clicked, this, &MainWindow::onClearDetectedContours);
     connect(btnAddMaskContour_, &QPushButton::clicked, this, &MainWindow::onStartAddMaskContour);
     connect(btnModifyMaskContour_, &QPushButton::clicked, this, &MainWindow::onStartModifyMaskContour);
     connect(btnDeleteMaskContour_, &QPushButton::clicked, this, &MainWindow::onStartDeleteMaskContour);
@@ -2405,6 +2422,7 @@ void MainWindow::onRemoveSource() {
   if (chkEnableMaskEdit_) chkEnableMaskEdit_->setChecked(false);
   for (auto* v : sourceViews_) if (v) {
     v->setPointClickCallback(std::function<void(const QPointF&)>());
+    v->setPointRightClickCallback(std::function<void(const QPointF&)>());
     v->setToolMode(ImageViewer::PanTool);
   }
   refreshRegionTable();
@@ -3551,6 +3569,8 @@ void MainWindow::onToggleMaskEditEnabled(bool on) {
   for (auto* v : sourceViews_) if (v) {
     v->setPointClickCallback(on ? std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskPointClicked(p); })
                                 : std::function<void(const QPointF&)>());
+    v->setPointRightClickCallback(on ? std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskRightClicked(p); })
+                                   : std::function<void(const QPointF&)>());
     v->setToolMode(on ? ImageViewer::PointTool : ImageViewer::PanTool);
   }
   if (!on) contour_mask_selected_index_ = -1;
@@ -3564,6 +3584,7 @@ void MainWindow::onStartAddMaskContour() {
   contour_mask_add_snap_points_.clear();
   for (auto* v : sourceViews_) if (v) {
     v->setPointClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskPointClicked(p); }));
+    v->setPointRightClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskRightClicked(p); }));
     v->setToolMode(ImageViewer::PointTool);
   }
   logLine("Add Mask enabled: click points with snapping to build contour path.");
@@ -3578,6 +3599,7 @@ void MainWindow::onStartModifyMaskContour() {
   contour_mask_mode_ = ContourMaskModify;
   for (auto* v : sourceViews_) if (v) {
     v->setPointClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskPointClicked(p); }));
+    v->setPointRightClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskRightClicked(p); }));
     v->setToolMode(ImageViewer::PointTool);
   }
   logLine("Modify Mask enabled: click new position to modify selected contour.");
@@ -3633,7 +3655,8 @@ void MainWindow::onContourMaskPointClicked(const QPointF& p) {
   }
 
   if (contour_mask_mode_ == ContourMaskAdd) {
-    if (bestContour < 0 || bestPoint < 0 || bestDist > 60.0) {
+    const double snapRadius = spMaskSnapRadius_ ? (double)spMaskSnapRadius_->value() : 10.0;
+    if (bestContour < 0 || bestPoint < 0 || bestDist > snapRadius) {
       logLine("Add Mask: click near contour edge for snapping.");
       return;
     }
@@ -3694,6 +3717,34 @@ void MainWindow::onContourMaskPointClicked(const QPointF& p) {
     }
   }
 
+  onTick();
+  updateDetectParticlePanel();
+}
+
+void MainWindow::onClearDetectedContours() {
+  analyzed_contours_.clear();
+  analyzed_contours_by_frame_.clear();
+  analyzed_measures_by_frame_.clear();
+  contour_mask_working_contours_.clear();
+  contour_mask_add_path_.clear();
+  contour_mask_add_snap_points_.clear();
+  contour_mask_selected_index_ = -1;
+  contour_mask_frame_key_ = -1;
+  updateDetectParticlePanel();
+  onTick();
+  logLine("All detected contours cleared.");
+}
+
+void MainWindow::onContourMaskRightClicked(const QPointF&) {
+  if (!chkEnableMaskEdit_ || !chkEnableMaskEdit_->isChecked()) return;
+  if (contour_mask_mode_ != ContourMaskAdd) return;
+  if (contour_mask_add_path_.size() >= 3) {
+    contour_mask_working_contours_.push_back(contour_mask_add_path_);
+    contour_mask_selected_index_ = (int)contour_mask_working_contours_.size() - 1;
+    logLine("Add Mask: contour finalized by right click.");
+  }
+  contour_mask_add_path_.clear();
+  contour_mask_add_snap_points_.clear();
   onTick();
   updateDetectParticlePanel();
 }
@@ -4312,6 +4363,7 @@ void MainWindow::onTick() {
         v->setToolMode(ImageViewer::PanTool);
       } else {
         v->setPointClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskPointClicked(p); }));
+        v->setPointRightClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskRightClicked(p); }));
         v->setToolMode(ImageViewer::PointTool);
       }
     }

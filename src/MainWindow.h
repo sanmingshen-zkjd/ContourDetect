@@ -87,6 +87,7 @@ public:
   void applySelectedLineStyle(const QString& name, const QColor& color, int width);
   void setAnnotationsVisible(bool visible);
   void setPointClickCallback(const std::function<void(const QPointF&)>& cb);
+  void setPointRightClickCallback(const std::function<void(const QPointF&)>& cb);
   void clearAllLines();
   double selectedLineLength() const;
   double anyLineLength() const;
@@ -124,6 +125,7 @@ private:
   std::function<void(const QPolygonF&)> onPolygonFinished_;
   std::function<void(int, const QPolygonF&)> onRegionEdited_;
   std::function<void(const QPointF&)> onPointClicked_;
+  std::function<void(const QPointF&)> onPointRightClicked_;
 };
 
 class MainWindow : public QMainWindow {
@@ -208,6 +210,8 @@ private slots:
   void onStartDeleteMaskContour();
   void onContourMaskPointClicked(const QPointF& p);
   void onToggleMaskEditEnabled(bool on);
+  void onClearDetectedContours();
+  void onContourMaskRightClicked(const QPointF& p);
   void onDeleteRegion();
   void onRegionTableSelectionChanged();
   void onSelectBinaryOp();
@@ -437,6 +441,7 @@ private:
   QComboBox* cbBinaryOp_=nullptr;
   QPushButton* btnUndoBinaryOp_=nullptr;
   QPushButton* btnAnalyzeParticles_=nullptr;
+  QPushButton* btnClearContours_=nullptr;
   QCheckBox* chkEnableMaskEdit_=nullptr;
   QPushButton* btnAddMaskContour_=nullptr;
   QPushButton* btnModifyMaskContour_=nullptr;
@@ -445,6 +450,7 @@ private:
   QLabel* lblBinaryOps_=nullptr;
   QLabel* lblDetectParticleCount_=nullptr;
   QTableWidget* tblDetectParticles_=nullptr;
+  QSpinBox* spMaskSnapRadius_=nullptr;
 
   // Tracking tab
   QPushButton* btnLoadTag_=nullptr;
