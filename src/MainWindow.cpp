@@ -18,6 +18,7 @@
 #include <QJsonArray>
 #include <QFile>
 #include <QScrollArea>
+#include <QStackedWidget>
 #include <QApplication>
 #include <QScreen>
 #include <QHeaderView>
@@ -28,10 +29,29 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QCheckBox>
+#include <QButtonGroup>
+#include <QProgressDialog>
 #include <QFormLayout>
 #include <QMenu>
+#include <QTextDocument>
+#include <QRegularExpression>
+#include <QStandardItemModel>
+#include <QSignalBlocker>
+#include <QScopedValueRollback>
+#include <QTextStream>
+#include <QToolTip>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QWheelEvent>
 #include <functional>
+#include <algorithm>
+#include <array>
 #include <climits>
+#include <cmath>
+#include <memory>
+#include <set>
+#include <map>
+#include <queue>
 
 static QString nowStr() {
   return QDateTime::currentDateTime().toString("hh:mm:ss");
@@ -40,6 +60,154 @@ static QString nowStr() {
 static QStringList kImageNameFilters() {
   return {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff"};
 }
+
+static cv::Mat imreadUnicodePath(const QString& filePath, int flags=cv::IMREAD_COLOR) {
+  QFile f(filePath);
+  if (!f.open(QIODevice::ReadOnly)) return cv::Mat();
+  QByteArray bytes = f.readAll();
+  if (bytes.isEmpty()) return cv::Mat();
+  std::vector<uchar> buf(bytes.begin(), bytes.end());
+  return cv::imdecode(buf, flags);
+}
+
+static bool openVideoCaptureUnicode(cv::VideoCapture& cap, const QString& path) {
+  cap.release();
+  const QString nativePath = QDir::toNativeSeparators(path);
+  const QByteArray utf8 = nativePath.toUtf8();
+  if (cap.open(utf8.constData())) return true;
+  const QByteArray local = QFile::encodeName(nativePath);
+  if (cap.open(local.constData())) return true;
+  if (cap.open(nativePath.toStdString())) return true;
+  return false;
+}
+
+static void openSavedDirectoryForFile(const QString& filePath) {
+  if (filePath.isEmpty()) return;
+  const QString dirPath = QFileInfo(filePath).absolutePath();
+  if (dirPath.isEmpty()) return;
+  QDesktopServices::openUrl(QUrl::fromLocalFile(dirPath));
+}
+
+static cv::RotatedRect processRansacEllipseFit(const cv::Mat& bin) {
+  if (bin.empty()) return {};
+  cv::Mat mask;
+  if (bin.channels() == 1) mask = bin.clone();
+  else if (bin.channels() == 3) cv::cvtColor(bin, mask, cv::COLOR_BGR2GRAY);
+  else if (bin.channels() == 4) cv::cvtColor(bin, mask, cv::COLOR_BGRA2GRAY);
+  else return {};
+  if (mask.type() != CV_8UC1) mask.convertTo(mask, CV_8UC1);
+  cv::threshold(mask, mask, 0, 255, cv::THRESH_BINARY);
+
+  std::vector<std::vector<cv::Point>> contours;
+  cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+  if (contours.empty()) return {};
+  auto* bestContour = &contours[0];
+  for (auto& c : contours) if (c.size() > bestContour->size()) bestContour = &c;
+  auto& pts = *bestContour;
+  if (pts.size() < 5) return {};
+
+  cv::RNG rng((uint64)cv::getTickCount());
+  int best = -1;
+  cv::RotatedRect bestEllipse;
+  for (int i=0; i<200; ++i) {
+    std::vector<cv::Point> sample;
+    sample.reserve(20);
+    for (int j=0; j<20; ++j) sample.push_back(pts[rng.uniform(0, (int)pts.size())]);
+    if (sample.size() < 5) continue;
+    cv::RotatedRect e;
+    try { e = cv::fitEllipse(sample); } catch (...) { continue; }
+    if (e.size.width <= 0 || e.size.height <= 0) continue;
+
+    std::vector<cv::Point> epoly;
+    cv::ellipse2Poly(e.center, cv::Size((int)std::round(e.size.width*0.5), (int)std::round(e.size.height*0.5)),
+                     (int)std::round(e.angle), 0, 360, 4, epoly);
+    if (epoly.size() < 5) continue;
+
+    int inliers = 0;
+    for (const auto& p : pts) {
+      double d = cv::pointPolygonTest(epoly, p, true);
+      if (std::abs(d) < 3.0) inliers++;
+    }
+    if (inliers > best) {
+      best = inliers;
+      bestEllipse = e;
+    }
+  }
+  return bestEllipse;
+}
+
+static cv::RotatedRect processDirectEllipseFit(const cv::Mat& bin) {
+  if (bin.empty()) return {};
+  cv::Mat mask;
+  if (bin.channels() == 1) mask = bin.clone();
+  else if (bin.channels() == 3) cv::cvtColor(bin, mask, cv::COLOR_BGR2GRAY);
+  else if (bin.channels() == 4) cv::cvtColor(bin, mask, cv::COLOR_BGRA2GRAY);
+  else return {};
+  if (mask.type() != CV_8UC1) mask.convertTo(mask, CV_8UC1);
+  cv::threshold(mask, mask, 0, 255, cv::THRESH_BINARY);
+
+  std::vector<std::vector<cv::Point>> contours;
+  cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+  if (contours.empty()) return {};
+  int id = -1;
+  double maxA = 0.0;
+  for (int i=0; i<(int)contours.size(); ++i) {
+    if (contours[i].size() < 5) continue;
+    double a = std::abs(cv::contourArea(contours[i]));
+    if (a > maxA) { maxA = a; id = i; }
+  }
+  if (id < 0) return {};
+  try { return cv::fitEllipse(contours[id]); } catch (...) { return {}; }
+}
+
+static cv::RotatedRect processHullRepairEllipseFit(const cv::Mat& bin) {
+  if (bin.empty()) return {};
+  cv::Mat mask;
+  if (bin.channels() == 1) mask = bin.clone();
+  else if (bin.channels() == 3) cv::cvtColor(bin, mask, cv::COLOR_BGR2GRAY);
+  else if (bin.channels() == 4) cv::cvtColor(bin, mask, cv::COLOR_BGRA2GRAY);
+  else return {};
+  if (mask.type() != CV_8UC1) mask.convertTo(mask, CV_8UC1);
+  cv::threshold(mask, mask, 0, 255, cv::THRESH_BINARY);
+
+  std::vector<std::vector<cv::Point>> contours;
+  cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+  if (contours.empty()) return {};
+  int id = -1;
+  double maxA = 0.0;
+  for (int i=0; i<(int)contours.size(); ++i) {
+    double a = std::abs(cv::contourArea(contours[i]));
+    if (a > maxA) { maxA = a; id = i; }
+  }
+  if (id < 0) return {};
+  std::vector<cv::Point> hull;
+  cv::convexHull(contours[id], hull);
+  if (hull.size() < 5) return {};
+  try { return cv::fitEllipse(hull); } catch (...) { return {}; }
+}
+
+static cv::RotatedRect fitEllipseByMethod(const cv::Mat& bin, const QString& method) {
+  if (method == "RansacEllipseFit") return processRansacEllipseFit(bin);
+  if (method == "DirectEllipseFit") return processDirectEllipseFit(bin);
+  return processHullRepairEllipseFit(bin);
+}
+
+static std::vector<cv::Point> contourFromEllipse(const cv::RotatedRect& e) {
+  std::vector<cv::Point> poly;
+  if (e.size.width <= 0 || e.size.height <= 0) return poly;
+  cv::ellipse2Poly(e.center,
+                   cv::Size((int)std::round(e.size.width * 0.5), (int)std::round(e.size.height * 0.5)),
+                   (int)std::round(e.angle),
+                   0,
+                   360,
+                   2,
+                   poly);
+  if (poly.size() < 5) poly.clear();
+  return poly;
+}
+
+static int stepToTabIndex(int step) { return step; }
+static int tabIndexToStep(int tabIndex) { return tabIndex; }
 
 class ClickJumpSlider : public QSlider {
 public:
@@ -114,6 +282,117 @@ private:
 };
 
 
+
+class ThumbnailLabel : public QLabel {
+public:
+  explicit ThumbnailLabel(int idx, QWidget* parent=nullptr) : QLabel(parent), index_(idx) {
+    setCursor(Qt::PointingHandCursor);
+    setSelected(false);
+  }
+  std::function<void(int)> onClicked;
+  std::function<void(int)> onDoubleClick;
+  void setSelected(bool on) {
+    selected_ = on;
+    setStyleSheet(selected_ ? "border:2px solid #22c55e;" : "border:1px solid #4b5563;");
+  }
+protected:
+  void mousePressEvent(QMouseEvent* e) override {
+    if (e->button() == Qt::LeftButton && onClicked) {
+      onClicked(index_);
+      e->accept();
+      return;
+    }
+    QLabel::mousePressEvent(e);
+  }
+  void mouseDoubleClickEvent(QMouseEvent* e) override {
+    if (e->button() == Qt::LeftButton && onDoubleClick) {
+      onDoubleClick(index_);
+      e->accept();
+      return;
+    }
+    QLabel::mouseDoubleClickEvent(e);
+  }
+private:
+  int index_ = -1;
+  bool selected_ = false;
+};
+
+class NamedLineItem : public QGraphicsLineItem {
+public:
+  NamedLineItem(const QLineF& line, const QString& name, const QColor& color, int width, QGraphicsItem* parent=nullptr)
+      : QGraphicsLineItem(line, parent), name_(name), color_(color), width_(std::max(1, width)) {
+    setFlags(QGraphicsItem::ItemIsSelectable | QGraphicsItem::ItemIsFocusable);
+    applyStyle();
+    label_ = new QGraphicsTextItem(this);
+    label_->setDefaultTextColor(color_);
+    label_->setPlainText(name_);
+    label_->setTextInteractionFlags(Qt::NoTextInteraction);
+    updateLabelPos();
+    QObject::connect(label_->document(), &QTextDocument::contentsChanged, [this]() {
+      QString t = label_->toPlainText().trimmed();
+      if (!t.isEmpty()) name_ = t;
+
+      // Regular expression to match numbers (integer or decimal)
+      QRegularExpression re("([-+]?[0-9]*\\.?[0-9]+)");
+      auto m = re.match(t);
+
+      if (m.hasMatch() && onValueEdited_) {
+        bool ok = false;
+        double v = m.captured(1).toDouble(&ok);
+        if (ok) {
+          onValueEdited_(this->line().length(), v);
+        }
+      }
+    });
+  }
+
+  void setMeta(const QString& name, const QColor& color, int width) {
+    if (!name.isEmpty()) { name_ = name; label_->setPlainText(name_); }
+    color_ = color;
+    width_ = std::max(1, width);
+    applyStyle();
+    label_->setDefaultTextColor(color_);
+    updateLabelPos();
+  }
+  void enableInlineEdit() {
+    updateLabelPos();
+    label_->setTextInteractionFlags(Qt::TextEditorInteraction);
+    label_->setFocus(Qt::MouseFocusReason);
+  }
+  void finishInlineEdit() { label_->setTextInteractionFlags(Qt::NoTextInteraction); }
+  void setValueEditedCallback(const std::function<void(double,double)>& cb) { onValueEdited_ = cb; }
+  void updateLabelPos() {
+    QPointF mid = (line().p1() + line().p2()) * 0.5;
+    label_->setPos(mid + QPointF(4, -18));
+  }
+
+private:
+  void applyStyle() {
+    QPen p(color_, width_);
+    if (isSelected()) p.setStyle(Qt::DashLine);
+    setPen(p);
+  }
+  QPainterPath shape() const override {
+    QPainterPath p;
+    p.moveTo(line().p1());
+    p.lineTo(line().p2());
+    QPainterPathStroker stroker;
+    stroker.setWidth(std::max(10.0, (double)width_ + 10.0));
+    return stroker.createStroke(p);
+  }
+
+  QVariant itemChange(GraphicsItemChange change, const QVariant &value) override {
+    if (change == QGraphicsItem::ItemSelectedHasChanged) applyStyle();
+    return QGraphicsLineItem::itemChange(change, value);
+  }
+
+  QString name_;
+  QColor color_;
+  int width_ = 2;
+  QGraphicsTextItem* label_ = nullptr;
+  std::function<void(double,double)> onValueEdited_;
+};
+
 ImageViewer::ImageViewer(QWidget* parent) : QGraphicsView(parent) {
   setScene(&scene_);
   setRenderHint(QPainter::Antialiasing, true);
@@ -152,6 +431,11 @@ void ImageViewer::setToolMode(ToolMode mode) {
     delete previewLine_;
     previewLine_ = nullptr;
   }
+  if (toolMode_ != PolygonTool) {
+    polygonDrawing_ = false;
+    polygonPoints_.clear();
+    if (previewPolygon_) { scene_.removeItem(previewPolygon_); delete previewPolygon_; previewPolygon_ = nullptr; }
+  }
 }
 
 void ImageViewer::zoomIn() { applyZoom(1.15); }
@@ -172,6 +456,121 @@ void ImageViewer::clearAnnotations() {
   }
   previewLine_ = nullptr;
   lineDrawing_ = false;
+  previewPolygon_ = nullptr;
+  polygonDrawing_ = false;
+  polygonPoints_.clear();
+  regionPolygonItems_.clear();
+}
+
+
+void ImageViewer::setLineCreatedCallback(const std::function<void(double)>& cb) { onLineCreated_ = cb; }
+void ImageViewer::setLineDoubleClickCallback(const std::function<void(double)>& cb) { onLineDoubleClick_ = cb; }
+void ImageViewer::setLineValueEditedCallback(const std::function<void(double,double)>& cb) { onLineValueEdited_ = cb; }
+void ImageViewer::setPolygonFinishedCallback(const std::function<void(const QPolygonF&)>& cb) { onPolygonFinished_ = cb; }
+
+void ImageViewer::setRegionPolygons(const std::vector<QPolygonF>& polygons, const std::vector<bool>& includes, int highlightedIndex) {
+  for (auto* it : regionPolygonItems_) { if (it) { scene_.removeItem(it); delete it; } }
+  regionPolygonItems_.clear();
+  for (auto* h : regionEditHandles_) { if (h) { scene_.removeItem(h); delete h; } }
+  regionEditHandles_.clear();
+  highlightedRegionIndex_ = highlightedIndex;
+
+  const int n = std::min((int)polygons.size(), (int)includes.size());
+  for (int i=0;i<n;++i) {
+    const auto& p = polygons[(size_t)i];
+    if (p.size() < 3) continue;
+    const QColor c = includes[(size_t)i] ? QColor(34,197,94) : QColor(239,68,68);
+    const bool hi = (i == highlightedRegionIndex_);
+    auto* it = scene_.addPolygon(p,
+      QPen(hi ? QColor(250,204,21) : c, hi ? 3 : 2, Qt::DashLine),
+      QBrush(QColor(c.red(), c.green(), c.blue(), hi ? 70 : 40)));
+    it->setZValue(3);
+    regionPolygonItems_.push_back(it);
+  }
+
+  if (editingRegionIndex_ >= 0 && editingRegionIndex_ < (int)regionPolygonItems_.size()) {
+    auto* editPoly = regionPolygonItems_[(size_t)editingRegionIndex_];
+    if (editPoly) {
+      const QPolygonF poly = editPoly->polygon();
+      for (int i=0;i<poly.size();++i) {
+        auto* h = scene_.addEllipse(-5,-5,10,10, QPen(QColor(250,204,21), 2), QBrush(QColor(250,204,21)));
+        h->setZValue(6);
+        h->setPos(poly[i]);
+        regionEditHandles_.push_back(h);
+      }
+    }
+  }
+}
+
+void ImageViewer::setRegionEditIndex(int index) {
+  editingRegionIndex_ = index;
+}
+
+void ImageViewer::setRegionEditedCallback(const std::function<void(int, const QPolygonF&)>& cb) {
+  onRegionEdited_ = cb;
+}
+
+void ImageViewer::applySelectedLineStyle(const QString& name, const QColor& color, int width) {
+  bool applied = false;
+  const auto selected = scene_.selectedItems();
+  for (auto* it : selected) {
+    if (auto* li = dynamic_cast<NamedLineItem*>(it)) {
+      li->setMeta(name, color, width);
+      applied = true;
+    }
+  }
+  if (applied) return;
+  // Single-line workflow fallback: apply to the first line if none is explicitly selected.
+  const auto items = scene_.items();
+  for (auto* it : items) {
+    if (auto* li = dynamic_cast<NamedLineItem*>(it)) {
+      li->setMeta(name, color, width);
+      break;
+    }
+  }
+}
+
+void ImageViewer::setAnnotationsVisible(bool visible) {
+  const auto items = scene_.items();
+  for (auto* it : items) {
+    if (it == pixmapItem_) continue;
+    it->setVisible(visible);
+  }
+}
+
+void ImageViewer::setPointClickCallback(const std::function<void(const QPointF&)>& cb) {
+  onPointClicked_ = cb;
+}
+
+void ImageViewer::setPointRightClickCallback(const std::function<void(const QPointF&)>& cb) {
+  onPointRightClicked_ = cb;
+}
+
+void ImageViewer::clearAllLines() {
+  const auto items = scene_.items();
+  for (auto* it : items) {
+    if (it == pixmapItem_ || it == previewLine_) continue;
+    if (dynamic_cast<QGraphicsLineItem*>(it)) {
+      scene_.removeItem(it);
+      delete it;
+    }
+  }
+}
+
+double ImageViewer::selectedLineLength() const {
+  const auto items = scene_.selectedItems();
+  for (auto* it : items) {
+    if (auto* li = dynamic_cast<QGraphicsLineItem*>(it)) return li->line().length();
+  }
+  return 0.0;
+}
+
+double ImageViewer::anyLineLength() const {
+  const auto items = scene_.items();
+  for (auto* it : items) {
+    if (auto* li = dynamic_cast<QGraphicsLineItem*>(it)) return li->line().length();
+  }
+  return 0.0;
 }
 
 void ImageViewer::applyZoom(double factor) {
@@ -181,33 +580,101 @@ void ImageViewer::applyZoom(double factor) {
 }
 
 void ImageViewer::wheelEvent(QWheelEvent* e) {
-  if (e->angleDelta().y() > 0) zoomIn();
-  else zoomOut();
+  if (!e) return;
+  const QPoint vp = e->position().toPoint();
+  const QPointF sceneBefore = mapToScene(vp);
+  const double factor = (e->angleDelta().y() > 0) ? 1.15 : (1.0 / 1.15);
+  const double oldZoom = zoomFactor_;
+  zoomFactor_ = std::max(0.1, std::min(zoomFactor_ * factor, 20.0));
+  const double applied = (oldZoom > 0.0) ? (zoomFactor_ / oldZoom) : factor;
+  scale(applied, applied);
+
+  // Keep cursor-fixed scene point invariant before/after scaling.
+  const QPointF sceneAfter = mapToScene(vp);
+  const QPointF sceneDelta = sceneAfter - sceneBefore;
+  const QPointF centerNow = mapToScene(viewport()->rect().center());
+  centerOn(centerNow - sceneDelta);
+  e->accept();
 }
 
 void ImageViewer::mousePressEvent(QMouseEvent* e) {
+  if (editingRegionIndex_ >= 0 && e->button() == Qt::LeftButton) {
+    QPointF sp = mapToScene(e->pos());
+    for (int i=0;i<(int)regionEditHandles_.size();++i) {
+      auto* h = regionEditHandles_[(size_t)i];
+      if (!h) continue;
+      if (QLineF(h->scenePos(), sp).length() <= 10.0) {
+        draggingRegionHandle_ = true;
+        draggingHandleIndex_ = i;
+        e->accept();
+        return;
+      }
+    }
+  }
   if (toolMode_ == PanTool) {
     QGraphicsView::mousePressEvent(e);
     return;
   }
-  if (e->button() != Qt::LeftButton || pixmapItem_->pixmap().isNull()) return;
+  if (pixmapItem_->pixmap().isNull()) return;
 
   QPointF p = mapToScene(e->pos());
   if (!sceneRect().contains(p)) return;
 
+  if (toolMode_ == PolygonTool) {
+    if (e->button() == Qt::LeftButton) {
+      if (!polygonDrawing_) {
+        polygonDrawing_ = true;
+        polygonPoints_.clear();
+        if (previewPolygon_) { scene_.removeItem(previewPolygon_); delete previewPolygon_; previewPolygon_ = nullptr; }
+        previewPolygon_ = scene_.addPolygon(QPolygonF(), QPen(QColor(250,204,21), 2, Qt::DashLine), QBrush(QColor(250,204,21,30)));
+        previewPolygon_->setZValue(4);
+      }
+      polygonPoints_ << p;
+      if (previewPolygon_) previewPolygon_->setPolygon(polygonPoints_);
+      return;
+    }
+    if (e->button() == Qt::RightButton && polygonDrawing_) {
+      if (polygonPoints_.size() >= 3) {
+        QPolygonF finalPoly = polygonPoints_;
+        if (onPolygonFinished_) onPolygonFinished_(finalPoly);
+      }
+      polygonDrawing_ = false;
+      polygonPoints_.clear();
+      if (previewPolygon_) { scene_.removeItem(previewPolygon_); delete previewPolygon_; previewPolygon_ = nullptr; }
+      setToolMode(PanTool);
+      return;
+    }
+    return;
+  }
+
   if (toolMode_ == PointTool) {
+    if (e->button() == Qt::RightButton) {
+      if (onPointRightClicked_) onPointRightClicked_(p);
+      return;
+    }
+    if (e->button() != Qt::LeftButton) return;
+    if (onPointClicked_) {
+      onPointClicked_(p);
+      return;
+    }
     scene_.addEllipse(p.x()-3, p.y()-3, 6, 6, QPen(QColor(255,80,80), 2), QBrush(QColor(255,80,80)));
     setToolMode(PanTool);
     return;
   }
 
+  if (e->button() != Qt::LeftButton) return;
+
   if (toolMode_ == LineTool) {
     if (!lineDrawing_) {
+      clearAllLines(); // keep only one scale line
       lineDrawing_ = true;
       lineStart_ = p;
       previewLine_ = scene_.addLine(QLineF(lineStart_, lineStart_), QPen(QColor(80,220,255), 2));
     } else {
-      scene_.addLine(QLineF(lineStart_, p), QPen(QColor(80,220,255), 2));
+      auto* finalLine = new NamedLineItem(QLineF(lineStart_, p), "Line", QColor(80,220,255), 2);
+      finalLine->setValueEditedCallback(onLineValueEdited_);
+      scene_.addItem(finalLine);
+      if (onLineCreated_) onLineCreated_(finalLine->line().length());
       if (previewLine_) {
         scene_.removeItem(previewLine_);
         delete previewLine_;
@@ -225,7 +692,74 @@ void ImageViewer::mouseMoveEvent(QMouseEvent* e) {
     previewLine_->setLine(QLineF(lineStart_, p));
     return;
   }
+  if (toolMode_ == PolygonTool && polygonDrawing_ && previewPolygon_) {
+    QPointF p = mapToScene(e->pos());
+    QPolygonF tmp = polygonPoints_;
+    tmp << p;
+    previewPolygon_->setPolygon(tmp);
+    return;
+  }
+  if (draggingRegionHandle_ && editingRegionIndex_ >= 0 && draggingHandleIndex_ >= 0 && editingRegionIndex_ < (int)regionPolygonItems_.size()) {
+    QPointF p = mapToScene(e->pos());
+    auto* polyItem = regionPolygonItems_[(size_t)editingRegionIndex_];
+    if (polyItem) {
+      QPolygonF poly = polyItem->polygon();
+      if (draggingHandleIndex_ < poly.size()) {
+        poly[draggingHandleIndex_] = p;
+        polyItem->setPolygon(poly);
+        if (draggingHandleIndex_ < (int)regionEditHandles_.size() && regionEditHandles_[(size_t)draggingHandleIndex_]) {
+          regionEditHandles_[(size_t)draggingHandleIndex_]->setPos(p);
+        }
+      }
+    }
+    e->accept();
+    return;
+  }
   QGraphicsView::mouseMoveEvent(e);
+}
+
+
+void ImageViewer::mouseReleaseEvent(QMouseEvent* e) {
+  if (draggingRegionHandle_ && e->button() == Qt::LeftButton) {
+    draggingRegionHandle_ = false;
+    if (editingRegionIndex_ >= 0 && editingRegionIndex_ < (int)regionPolygonItems_.size() && onRegionEdited_) {
+      auto* p = regionPolygonItems_[(size_t)editingRegionIndex_];
+      if (p) onRegionEdited_(editingRegionIndex_, p->polygon());
+    }
+    draggingHandleIndex_ = -1;
+    e->accept();
+    return;
+  }
+  QGraphicsView::mouseReleaseEvent(e);
+}
+
+
+void ImageViewer::mouseDoubleClickEvent(QMouseEvent* e) {
+  if (e->button() != Qt::LeftButton) {
+    QGraphicsView::mouseDoubleClickEvent(e);
+    return;
+  }
+  QPointF p = mapToScene(e->pos());
+  if (QGraphicsItem* it = scene_.itemAt(p, transform())) {
+    if (it != pixmapItem_) {
+      if (auto* li = dynamic_cast<NamedLineItem*>(it)) {
+        li->setSelected(true);
+        li->enableInlineEdit();
+        if (onLineDoubleClick_) onLineDoubleClick_(li->line().length());
+        e->accept();
+        return;
+      }
+      if (auto* txt = dynamic_cast<QGraphicsTextItem*>(it)) {
+        if (auto* parentLine = dynamic_cast<NamedLineItem*>(txt->parentItem())) {
+          parentLine->setSelected(true);
+          parentLine->enableInlineEdit();
+          e->accept();
+          return;
+        }
+      }
+    }
+  }
+  QGraphicsView::mouseDoubleClickEvent(e);
 }
 
 void ImageViewer::resizeEvent(QResizeEvent* e) {
@@ -248,7 +782,7 @@ MainWindow::MainWindow(const std::vector<InputSource>& sources,
     settings_("YourCompany", "Multi6DTracker")
 {
     setWindowFlags(Qt::FramelessWindowHint | Qt::Window);
-    setWindowTitle("Multi6DTracker");
+    setWindowTitle("MonoMeasure");
     if (QScreen* screen = QGuiApplication::primaryScreen()) {
       setGeometry(screen->availableGeometry());
     } else {
@@ -261,7 +795,7 @@ MainWindow::MainWindow(const std::vector<InputSource>& sources,
     last_frames_.resize(std::max(0,num_cams_));
     buildUI();
     connect(&timer_, &QTimer::timeout, this, &MainWindow::onTick);
-    timer_.start(33);
+    timer_.start(std::max(1, (int)std::lround(1000.0 / std::max(1.0, play_fps_))));
 
     // Start capture/solve threads
     captureWorker_ = new CaptureWorker(&sources_, &source_enabled_, &last_frames_, &sources_mutex_, 33);
@@ -269,19 +803,12 @@ MainWindow::MainWindow(const std::vector<InputSource>& sources,
     connect(&captureThread_, &QThread::started, captureWorker_, &CaptureWorker::start);
     connect(this, &MainWindow::destroyed, captureWorker_, &CaptureWorker::stop);
 
-    solveWorker_ = new SolveWorker();
-    solveWorker_->setStaticData(&cams_, &tag_corner_map_);
-    solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true);
-    solveWorker_->setInitPose(R_wr_, t_wr_);
-    solveWorker_->moveToThread(&solveThread_);
+    // 单目测量版本：移除测量求解线程，仅保留采集与预处理。
 
     // Wire signals
     connect(captureWorker_, &CaptureWorker::framesReady, this, &MainWindow::onFramesFromWorker, Qt::QueuedConnection);
-    connect(captureWorker_, &CaptureWorker::framesReady, solveWorker_, &SolveWorker::onFrames, Qt::QueuedConnection);
-    connect(solveWorker_, &SolveWorker::poseReady, this, &MainWindow::onPoseFromWorker, Qt::QueuedConnection);
 
     captureThread_.start();
-    solveThread_.start();
 }
 
 MainWindow::~MainWindow() 
@@ -307,37 +834,63 @@ MainWindow::~MainWindow()
 }
 
 void MainWindow::buildUI() {
+    const QScreen* screen = QGuiApplication::primaryScreen();
+    const qreal dpiScaleRaw = screen ? (screen->logicalDotsPerInch() / 96.0) : 1.0;
+    const qreal dpiScale = std::clamp(dpiScaleRaw, 0.90, 1.40);
+    const qreal geomScale = screen
+        ? std::clamp(std::sqrt((qreal)screen->availableGeometry().width() * (qreal)screen->availableGeometry().height()
+                               / (1920.0 * 1080.0)), 0.90, 1.20)
+        : 1.0;
+    const qreal uiScale = std::clamp(dpiScale * geomScale, 0.90, 1.60);
+
+    // Font scaling is intentionally gentler than control scaling:
+    // at 1920x1080 and 100% DPI this yields ~12pt.
+    const qreal fontScale = std::clamp(0.75 + 0.20 * dpiScale + 0.05 * geomScale, 0.95, 1.20);
+    QFont baseFont = font();
+    baseFont.setPointSizeF(12.0 * fontScale);
+    setFont(baseFont);
+
     // Top title bar spans the full QMainWindow width (including dock area)
     TitleBarWidget* titleBar = new TitleBarWidget(this);
     titleBar->setObjectName("customTitleBar");
-    titleBar->setFixedHeight(34);
+    titleBar->setFixedHeight((int)std::round(34 * uiScale));
     QHBoxLayout* titleLayout = new QHBoxLayout(titleBar);
-    titleLayout->setContentsMargins(10, 0, 0, 0);
-    titleLayout->setSpacing(6);
+    titleLayout->setContentsMargins((int)std::round(10 * uiScale), 0, 0, 0);
+    titleLayout->setSpacing((int)std::round(6 * uiScale));
 
-    QLabel* titleText = new QLabel("Multi6DTracker", titleBar);
+    QLabel* titleText = new QLabel("MonoMeasure", titleBar);
     titleText->setStyleSheet("color:#c7d2df;font-weight:600;");
     titleLayout->addWidget(titleText);
     titleLayout->addStretch(1);
 
-    auto makeTitleBtn = [titleBar](const QString& text, const QString& objName) {
+    auto makeTitleBtn = [titleBar, uiScale](const QString& text, const QString& objName) {
       QToolButton* b = new QToolButton(titleBar);
       b->setObjectName(objName);
       b->setText(text);
-      b->setFixedSize(46, 34);
+      b->setFixedSize((int)std::round(46 * uiScale), (int)std::round(34 * uiScale));
       return b;
     };
+
+    btnFileMenu_ = new QToolButton(titleBar);
+    btnFileMenu_->setObjectName("fileMenuBtn");
+    btnFileMenu_->setText("File");
+    btnFileMenu_->setPopupMode(QToolButton::InstantPopup);
+    btnFileMenu_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    btnFileMenu_->setMinimumWidth((int)std::round(70 * uiScale));
+    btnFileMenu_->setToolTip("Software info, Save Project, Load Project");
 
     QToolButton* btnMin = makeTitleBtn("-", "titleMinBtn");
     QToolButton* btnMax = makeTitleBtn("[]", "titleMaxBtn");
     QToolButton* btnClose = makeTitleBtn("X", "titleCloseBtn");
+    titleLayout->addWidget(btnFileMenu_);
+    titleLayout->addSpacing((int)std::round(4 * uiScale));
     titleLayout->addWidget(btnMin);
     titleLayout->addWidget(btnMax);
     titleLayout->addWidget(btnClose);
 
     titleBar->setStyleSheet(
       "#customTitleBar{background:#1f232b;border-bottom:1px solid #3a4250;}"
-      "QToolButton{background:#2b3340;color:#cfd8e3;border:none;border-left:1px solid #4b586d;border-radius:0;font-size:12px;}"
+      "QToolButton{background:#2b3340;color:#cfd8e3;border:none;border-left:1px solid #4b586d;border-radius:0;font-size:12px;}#fileMenuBtn{border:1px solid #4b586d;border-radius:4px;padding:0 10px;}"
       "QToolButton:hover{background:#374255;}"
       "QToolButton#titleCloseBtn:hover{background:#b42318;color:#ffffff;}");
 
@@ -361,12 +914,12 @@ void MainWindow::buildUI() {
 
     QWidget* sideBar = new QWidget(central);
     sideBar->setObjectName("leftSidebar");
-    sideBar->setFixedWidth(64);
+    sideBar->setFixedWidth((int)std::round(72 * uiScale));
     QVBoxLayout* sv = new QVBoxLayout(sideBar);
-    sv->setContentsMargins(6, 8, 6, 8);
-    sv->setSpacing(10);
+    sv->setContentsMargins((int)std::round(6 * uiScale), (int)std::round(8 * uiScale), (int)std::round(6 * uiScale), (int)std::round(8 * uiScale));
+    sv->setSpacing((int)std::round(10 * uiScale));
 
-    QLabel* appTitle = new QLabel("Multi6DTracker", sideBar);
+    QLabel* appTitle = new QLabel("MonoMeasure", sideBar);
     appTitle->setObjectName("sidebarTitle");
     appTitle->setWordWrap(true);
     appTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -377,63 +930,42 @@ void MainWindow::buildUI() {
     titleSep->setFrameShadow(QFrame::Plain);
     sv->addWidget(titleSep);
 
-    sideModeTabs_ = new QTabBar(sideBar);
-    sideModeTabs_->addTab("Capture");
-    sideModeTabs_->addTab("Calibration");
-    sideModeTabs_->addTab("Tracking");
-    sideModeTabs_->setExpanding(true);
-    sideModeTabs_->setShape(QTabBar::RoundedWest);
-    sideModeTabs_->setDrawBase(false);
-    sideModeTabs_->setCurrentIndex(0);
-    sideModeTabs_->setMovable(false);
-    sideModeTabs_->setUsesScrollButtons(false);
-    sideModeTabs_->setElideMode(Qt::ElideRight);
-    sideModeTabs_->setDocumentMode(true);
-    sv->addWidget(sideModeTabs_);
-
+    // 左侧步骤TAB已删除，改为顶部步骤引导。
     sv->addStretch(1);
 
     QFrame* bottomSep = new QFrame(sideBar);
     bottomSep->setFrameShape(QFrame::HLine);
     bottomSep->setFrameShadow(QFrame::Plain);
     sv->addWidget(bottomSep);
-
-    btnFileMenu_ = new QToolButton(sideBar);
-    btnFileMenu_->setObjectName("fileMenuBtn");
-    btnFileMenu_->setText("File");
-    btnFileMenu_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    btnFileMenu_->setIcon(style()->standardIcon(QStyle::SP_ArrowRight));
-    btnFileMenu_->setLayoutDirection(Qt::RightToLeft);
-    btnFileMenu_->setPopupMode(QToolButton::InstantPopup);
-    btnFileMenu_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    btnFileMenu_->setToolTip("Software info, Save Project, Load Project");
-    sv->addWidget(btnFileMenu_);
-    root->addWidget(sideBar);
     sideBar->setStyleSheet(
       "#leftSidebar{background:#1f232b;border-right:1px solid #4a5568;}"
       "#sidebarTitle{font-size:11px;font-weight:600;color:#b8c4d6;padding:4px 4px;line-height:1.1;}"
-      "QTabBar::tab{background:transparent;color:#c8d0da;padding:4px 4px;text-align:left;border-radius:6px;margin:2px 0;min-width:44px;}"
-      "QTabBar::tab:selected{background:#3b82f6;color:white;font-weight:600;}"
-      "QTabBar::tab:hover:!selected{background:#2a3140;color:#f0f4f8;}"
       "QToolButton{background:#2b3340;border:1px solid #4b586d;border-radius:6px;padding:6px 6px;color:#eef2f8;text-align:left;}"
       "QToolButton::menu-indicator{subcontrol-position:right center;right:8px;}"
       "QFrame{color:#394150;background:#394150;}");
 
-    const int sidebarReserved = sideBar->width() + 12;
-    statusBar()->setStyleSheet(QString("QStatusBar{padding-left:%1px;border-top:1px solid #3a4250;}"
-                                      "QStatusBar::item{border:none;}").arg(sidebarReserved));
+    statusBar()->setStyleSheet("QStatusBar{border-top:1px solid #3a4250;}QStatusBar::item{border:none;}");
 
     QWidget* mainPane = new QWidget(central);
     QVBoxLayout* v = new QVBoxLayout(mainPane);
+    v->setSpacing(10);
 
-    // Top mode tabs
-    modeTabs_ = new QTabWidget(central);
-    modeTabs_->addTab(new QWidget(modeTabs_), "Capture");
-    modeTabs_->addTab(new QWidget(modeTabs_), "Calibration");
-    modeTabs_->addTab(new QWidget(modeTabs_), "Tracking");
-    modeTabs_->setCurrentIndex(0);
-    modeTabs_->setVisible(false);
-    connect(modeTabs_, &QTabWidget::currentChanged, this, &MainWindow::onModeTabChanged);
+    // Top step guide
+    stepTabs_ = new QTabBar(central);
+    stepTabs_->addTab("1 Source");
+    stepTabs_->addTab("2 PreProcess");
+    stepTabs_->addTab("3 Detect");
+    stepTabs_->addTab("4 Visualization");
+    stepTabs_->setExpanding(false);
+    stepTabs_->setDocumentMode(true);
+    stepTabs_->setCurrentIndex(stepToTabIndex(0));
+    for (int i=0;i<4;++i) stepDone_[i] = false;
+    stepTabs_->setStyleSheet(
+      "QTabBar::tab{padding:4px 10px;margin-right:8px;min-width:112px;background:#2d333b;color:#dbe5f1;border:1px solid #485468;border-radius:6px;}"
+      "QTabBar::tab:selected{background:#3b82f6;color:#ffffff;font-weight:700;}"
+      "QTabBar::tab:hover:!selected{background:#374151;}"
+      "QTabBar::tab:disabled{background:#1f232b;color:#6b7280;border:1px solid #394150;}");
+    v->addWidget(stepTabs_);
 
     QHBoxLayout* topSourceBar = new QHBoxLayout();
     btnAddCam_ = new QToolButton(central);
@@ -444,18 +976,114 @@ void MainWindow::buildUI() {
     btnAddVideo_->setText("AddVideo");
     btnAddImgSeq_->setText("AddImageSeq");
     btnRemoveSource_->setText("Remove");
+    QSize btnIconSize(24, 24);
     btnAddCam_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    btnAddVideo_->setIcon(QIcon(":/icons/video.png"));
+    btnAddVideo_->setIconSize(btnIconSize);
     btnAddVideo_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    btnAddVideo_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     btnAddImgSeq_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    btnRemoveSource_->setIcon(QIcon(":/icons/delete.png"));
+    btnRemoveSource_->setIconSize(btnIconSize);
     btnRemoveSource_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    btnRemoveSource_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     btnAddCam_->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
-    btnAddVideo_->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
     btnAddImgSeq_->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
-    btnRemoveSource_->setIcon(style()->standardIcon(QStyle::SP_TrashIcon));
+    btnAddCam_->setVisible(false);
+    btnAddVideo_->setVisible(false); // temporarily hide AddVideo
     topSourceBar->addWidget(btnAddVideo_);
     topSourceBar->addWidget(btnAddImgSeq_);
     topSourceBar->addWidget(btnRemoveSource_);
     topSourceBar->addStretch(1);
+    cbTargetFilter_ = new QComboBox(central);
+    cbTargetFilter_->setMinimumWidth(220);
+    cbTargetFilter_->setEditable(false);
+    cbTargetFilter_->addItem("ALL");
+    if (auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model())) {
+      if (auto* item = model->item(0)) {
+        item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        item->setData(-1, Qt::UserRole);
+        item->setCheckState(Qt::Checked);
+      }
+      connect(model, &QStandardItemModel::itemChanged, this, [this, model](QStandardItem* changed){
+        if (!changed) return;
+        QSignalBlocker blocker(model);
+        const int id = changed->data(Qt::UserRole).toInt();
+        if (id == -1) {
+          const Qt::CheckState st = changed->checkState();
+          for (int i=1;i<model->rowCount();++i) if (auto* it=model->item(i)) it->setCheckState(st);
+        } else {
+          bool allChecked = true;
+          for (int i=1;i<model->rowCount();++i) { auto* it=model->item(i); if (it && it->checkState()!=Qt::Checked) { allChecked=false; break; } }
+          if (auto* allItem = model->item(0)) allItem->setCheckState(allChecked ? Qt::Checked : Qt::Unchecked);
+        }
+        if (!left_visual_refresh_queued_) {
+          left_visual_refresh_queued_ = true;
+          QTimer::singleShot(0, this, [this]() {
+            left_visual_refresh_queued_ = false;
+            updateLeftVisualDashboard();
+          });
+        }
+      });
+    }
+    lblTargetFilter_ = new QLabel("Targets", central);
+    topSourceBar->addWidget(lblTargetFilter_);
+    topSourceBar->addWidget(cbTargetFilter_);
+    btnFitAllPlots_ = new QPushButton("Fit", central);
+    topSourceBar->addWidget(btnFitAllPlots_);
+    btnVisualAuto_ = new QPushButton("Auto", central);
+    topSourceBar->addWidget(btnVisualAuto_);
+    cbXAxisMode_ = new QComboBox(central);
+    cbXAxisMode_->addItems({"Time (s)", "Frame"});
+    cbXAxisMode_->setCurrentIndex(1);
+    lblXAxisMode_ = new QLabel("X", central);
+    topSourceBar->addWidget(lblXAxisMode_);
+    topSourceBar->addWidget(cbXAxisMode_);
+    btnCaptureVisual_ = new QPushButton("Snap To BMP", central);
+    btnExportTableCsv_ = new QPushButton("Export To CSV", central);
+    btnExportMp4_ = new QPushButton("Export All To MP4", central);
+    topSourceBar->addWidget(btnCaptureVisual_);
+    topSourceBar->addWidget(btnExportTableCsv_);
+    topSourceBar->addWidget(btnExportMp4_);
+    QWidget* smoothCtl = new QWidget(central);
+    QHBoxLayout* smoothLay = new QHBoxLayout(smoothCtl);
+    smoothLay->setContentsMargins(0,0,0,0);
+    smoothLay->setSpacing(4);
+    smoothLay->addWidget(new QLabel("Median", smoothCtl));
+    spSmoothMedianWindow_ = new QSpinBox(smoothCtl);
+    spSmoothMedianWindow_->setRange(3, 11);
+    spSmoothMedianWindow_->setSingleStep(2);
+    spSmoothMedianWindow_->setValue(3);
+    spSmoothMedianWindow_->setFixedWidth(64);
+    smoothLay->addWidget(spSmoothMedianWindow_);
+    smoothLay->addWidget(new QLabel("Speed α", smoothCtl));
+    spSmoothAlphaSpeed_ = new QDoubleSpinBox(smoothCtl);
+    spSmoothAlphaSpeed_->setRange(0.01, 1.0);
+    spSmoothAlphaSpeed_->setSingleStep(0.05);
+    spSmoothAlphaSpeed_->setDecimals(2);
+    spSmoothAlphaSpeed_->setValue(0.35);
+    spSmoothAlphaSpeed_->setFixedWidth(72);
+    smoothLay->addWidget(spSmoothAlphaSpeed_);
+    smoothLay->addWidget(new QLabel("Accel α", smoothCtl));
+    spSmoothAlphaAccel_ = new QDoubleSpinBox(smoothCtl);
+    spSmoothAlphaAccel_->setRange(0.01, 1.0);
+    spSmoothAlphaAccel_->setSingleStep(0.05);
+    spSmoothAlphaAccel_->setDecimals(2);
+    spSmoothAlphaAccel_->setValue(0.20);
+    spSmoothAlphaAccel_->setFixedWidth(72);
+    smoothLay->addWidget(spSmoothAlphaAccel_);
+    topSourceBar->addWidget(smoothCtl);
+    smoothCtl->setVisible(false); // hide smoothing params panel
+    btnCaptureVisual_->setVisible(false);
+    btnExportTableCsv_->setVisible(false);
+    btnExportMp4_->setVisible(false);
+    if (btnFitAllPlots_) btnFitAllPlots_->setVisible(false);
+    if (btnVisualAuto_) btnVisualAuto_->setVisible(false);
+    if (lblTargetFilter_) lblTargetFilter_->setVisible(false);
+    if (cbTargetFilter_) cbTargetFilter_->setVisible(false);
+    if (lblXAxisMode_) lblXAxisMode_->setVisible(false);
+    if (cbXAxisMode_) cbXAxisMode_->setVisible(false);
+    if (smoothCtl) smoothCtl->setVisible(false);
     v->addLayout(topSourceBar);
 
     QFrame* topSep = new QFrame(central);
@@ -480,13 +1108,157 @@ void MainWindow::buildUI() {
 
     // Per-view toolbars are created in rebuildSourceViews(), one toolbar per player.
 
+    auto* leftStack = new QStackedWidget(central);
+
     viewsHost_ = new QWidget(this);
     viewsGrid_ = new QGridLayout(viewsHost_);
     viewsGrid_->setContentsMargins(0,0,0,0);
     viewsGrid_->setSpacing(8);
-    viewsHost_->setMinimumSize(960, 540);
-    v->addWidget(viewsHost_, 1);
+    viewsHost_->setMinimumSize((int)std::round(640 * uiScale), (int)std::round(360 * uiScale));
     rebuildSourceViews();
+
+    visualDashHost_ = new QWidget(this);
+    visualDashGrid_ = new QGridLayout(visualDashHost_);
+    visualDashGrid_->setContentsMargins(2,2,2,2);
+    visualDashGrid_->setSpacing(4);
+    leftVisImage_ = new QLabel(visualDashHost_);
+    const int visH = (int)std::round(240 * uiScale);
+    leftVisImage_->setMinimumSize((int)std::round(320 * uiScale), visH);
+    leftVisImage_->setMaximumHeight(visH);
+    leftVisImage_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    leftVisImage_->setAlignment(Qt::AlignCenter);
+    leftVisImage_->setStyleSheet("background:#111827;border:1px solid #374151;color:#cbd5e1;");
+    leftVisImage_->setText("Image view");
+    leftVisImage_->installEventFilter(this);
+    auto mkPlot=[&](const QString& y){
+      QCustomPlot* p=new QCustomPlot(visualDashHost_);
+      p->setMinimumHeight(visH);
+      p->setMaximumHeight(visH);
+      p->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+      p->setBackground(QBrush(QColor(17,24,39)));
+      p->xAxis->setBasePen(QPen(QColor(148,163,184)));
+      p->yAxis->setBasePen(QPen(QColor(148,163,184)));
+      p->xAxis->setTickPen(QPen(QColor(148,163,184)));
+      p->yAxis->setTickPen(QPen(QColor(148,163,184)));
+      p->xAxis->setSubTickPen(QPen(QColor(100,116,139)));
+      p->yAxis->setSubTickPen(QPen(QColor(100,116,139)));
+      p->xAxis->setTickLabelColor(QColor(226,232,240));
+      p->yAxis->setTickLabelColor(QColor(226,232,240));
+      p->xAxis->setLabelColor(QColor(226,232,240));
+      p->yAxis->setLabelColor(QColor(226,232,240));
+      p->xAxis->setUpperEnding(QCPLineEnding::esSpikeArrow);
+      p->yAxis->setUpperEnding(QCPLineEnding::esSpikeArrow);
+      p->setInteractions(QCP::iRangeDrag | QCP::iRangeZoom | QCP::iSelectPlottables);
+      p->axisRect()->setRangeDrag(Qt::Horizontal | Qt::Vertical);
+      p->axisRect()->setRangeZoom(Qt::Horizontal | Qt::Vertical);
+      connect(p, &QCustomPlot::mouseMove, this, [p](QMouseEvent* ev){
+        if (!p || p->graphCount() <= 0 || !ev) return;
+        const double xCoord = p->xAxis->pixelToCoord(ev->pos().x());
+        double bestDistPx = std::numeric_limits<double>::max();
+        double bestX = 0.0, bestY = 0.0;
+        bool found = false;
+        for (int gi=0; gi<p->graphCount(); ++gi) {
+          QCPGraph* g = p->graph(gi);
+          if (!g || !g->name().startsWith("ID ") || g->lineStyle() == QCPGraph::lsNone || g->dataCount() <= 0) continue;
+          auto it = g->data()->findBegin(xCoord);
+          if (it == g->data()->constEnd()) continue;
+          const double dxPx = p->xAxis->coordToPixel(it->key) - ev->pos().x();
+          const double dyPx = p->yAxis->coordToPixel(it->value) - ev->pos().y();
+          const double distPx = std::sqrt(dxPx*dxPx + dyPx*dyPx);
+          if (distPx < bestDistPx) { bestDistPx = distPx; bestX = it->key; bestY = it->value; found = true; }
+        }
+        if (found && bestDistPx <= 10.0) {
+          QToolTip::showText(ev->globalPos(), QString("x=%1\ny=%2").arg(bestX,0,'f',3).arg(bestY,0,'f',4), p);
+        } else {
+          QToolTip::hideText();
+        }
+      });
+      p->legend->setVisible(true);
+      p->legend->setBrush(QBrush(QColor(15,23,42,210)));
+      p->legend->setBorderPen(QPen(QColor(71,85,105)));
+      p->legend->setTextColor(QColor(226,232,240));
+      p->axisRect()->insetLayout()->setInsetAlignment(0, Qt::AlignTop | Qt::AlignRight);
+      p->addGraph();
+      p->graph(0)->setPen(QPen(QColor(96,165,250), 2.0));
+      p->addGraph();
+      p->graph(1)->setPen(QPen(QColor(239,68,68), 1.6));
+      p->xAxis->setLabel("frame");
+      p->yAxis->setLabel(y);
+      return p;
+    };
+    QStringList metricItems = {"Displacement","Speed","Acceleration","Area","Perimeter","Major Axis","Minor Axis","Circularity"};
+    auto mkPlotCard=[&](QCustomPlot* p, QComboBox*& cb, const QString& shotName){
+      QWidget* card = new QWidget(visualDashHost_);
+      QVBoxLayout* cv = new QVBoxLayout(card); cv->setContentsMargins(0,0,0,0); cv->setSpacing(2);
+      QHBoxLayout* top = new QHBoxLayout(); top->setContentsMargins(0,0,0,0);
+      cb = new QComboBox(card); cb->addItems(metricItems); cb->setMinimumWidth((int)std::round(140*uiScale));
+      QPushButton* btnShot = new QPushButton("Snap", card);
+      QPushButton* btnFit = new QPushButton("Fit", card);
+      connect(cb, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ updateLeftVisualDashboard(); });
+      connect(btnShot, &QPushButton::clicked, this, [this, p, shotName](){ savePlotAsBmp(p, shotName); });
+      connect(btnFit, &QPushButton::clicked, this, [p](){ if (!p) return; p->rescaleAxes(true); p->replot(); });
+      top->addWidget(cb, 1); top->addWidget(btnShot, 0); top->addWidget(btnFit, 0);
+      cv->addLayout(top); cv->addWidget(p, 1);
+      return card;
+    };
+    leftDispPlot_=mkPlot("Displacement");
+    leftSpeedPlot_=mkPlot("Speed");
+    leftAreaPlot_=mkPlot("Area");
+    leftPerimPlot_=mkPlot("Perimeter");
+    leftCircPlot_=mkPlot("Circularity");
+    visualDashGrid_->addWidget(leftVisImage_,0,0);
+    visualDashGrid_->addWidget(mkPlotCard(leftDispPlot_, cbDispMetric_, "disp"),0,1);
+    visualDashGrid_->addWidget(mkPlotCard(leftSpeedPlot_, cbSpeedMetric_, "speed"),0,2);
+    visualDashGrid_->addWidget(mkPlotCard(leftAreaPlot_, cbAreaMetric_, "area"),1,0);
+    visualDashGrid_->addWidget(mkPlotCard(leftPerimPlot_, cbPerimMetric_, "perimeter"),1,1);
+    visualDashGrid_->addWidget(mkPlotCard(leftCircPlot_, cbCircMetric_, "circularity"),1,2);
+    if (cbDispMetric_) cbDispMetric_->setCurrentIndex(0);
+    if (cbSpeedMetric_) cbSpeedMetric_->setCurrentIndex(1);
+    if (cbAreaMetric_) cbAreaMetric_->setCurrentIndex(3);
+    if (cbPerimMetric_) cbPerimMetric_->setCurrentIndex(4);
+    if (cbCircMetric_) cbCircMetric_->setCurrentIndex(7);
+    leftMeasureTable_ = new QTableWidget(visualDashHost_);
+    leftMeasureTable_->setColumnCount(10);
+    leftMeasureTable_->setHorizontalHeaderLabels({"Frame","ID","Disp","Speed","Accel","Area","Perimeter","Major","Minor","Circularity"});
+    leftMeasureTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    leftMeasureTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    leftMeasureTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    leftMeasureTable_->setMaximumHeight((int)std::round(220 * uiScale));
+    leftMeasureTable_->setStyleSheet("QTableWidget{background:#1f2937;color:#e5e7eb;gridline-color:#4b5563;selection-background-color:#2563eb;selection-color:#ffffff;}QHeaderView::section{background:#334155;color:#f8fafc;border:1px solid #475569;padding:5px;font-weight:600;}");
+    QFrame* visSep = new QFrame(visualDashHost_);
+    visSep->setFrameShape(QFrame::HLine);
+    visSep->setFrameShadow(QFrame::Plain);
+    visSep->setStyleSheet("color:#475569;background:#475569;");
+    connect(btnCaptureVisual_, &QPushButton::clicked, this, &MainWindow::onCaptureVisualSnapshot);
+    connect(btnExportTableCsv_, &QPushButton::clicked, this, &MainWindow::onExportTableCsv);
+    connect(btnExportMp4_, &QPushButton::clicked, this, &MainWindow::onExportVisualMp4);
+    if (btnFitAllPlots_) connect(btnFitAllPlots_, &QPushButton::clicked, this, &MainWindow::fitAllVisualPlots);
+    if (btnVisualAuto_) connect(btnVisualAuto_, &QPushButton::clicked, this, [this](){
+      visual_image_auto_mode_ = true;
+      visual_image_zoom_ = 1.0;
+      visual_image_center_ = QPointF(0.5, 0.5);
+      refreshVisualizationImagePixmap();
+    });
+    visualDashGrid_->addWidget(visSep,2,0,1,3);
+    visualDashGrid_->addWidget(leftMeasureTable_,3,0,1,3);
+    connect(leftMeasureTable_, &QTableWidget::itemSelectionChanged, this, [this](){
+      if (!leftMeasureTable_) return;
+      auto sels = leftMeasureTable_->selectedItems();
+      if (sels.isEmpty()) { selected_target_id_ = -1; selected_target_frame_ = -1; updateLeftVisualDashboard(); return; }
+      int r = sels.first()->row();
+      auto* frIt = leftMeasureTable_->item(r,0);
+      auto* idIt = leftMeasureTable_->item(r,1);
+      selected_target_id_ = idIt ? idIt->text().toInt() : -1;
+      selected_target_frame_ = frIt ? frIt->text().toInt() : -1;
+      updateLeftVisualDashboard();
+    });
+
+    if (cbXAxisMode_) connect(cbXAxisMode_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); updateLeftVisualDashboard(); });
+
+    leftStack->addWidget(viewsHost_);
+    leftStack->addWidget(visualDashHost_);
+    leftStack->setCurrentWidget(viewsHost_);
+    v->addWidget(leftStack, 1);
 
     QHBoxLayout* playProgressRow = new QHBoxLayout();
     playProgressRow->addWidget(btnPlayAll_);
@@ -535,11 +1307,10 @@ void MainWindow::buildUI() {
     btnFileMenu_->setMenu(fileMenu);
     connect(actAbout, &QAction::triggered, this, [this](){
       QMessageBox::information(this, "Software Info",
-                               "Multi6DTracker\n\nCapture / Calibration / Tracking workflow.");
+                               "MonoMeasure\n\nCapture / Preprocess / Tracking workflow.");
     });
     connect(actSaveProject_, &QAction::triggered, this, &MainWindow::onSaveProject);
     connect(actLoadProject_, &QAction::triggered, this, &MainWindow::onLoadProject);
-    connect(sideModeTabs_, &QTabBar::currentChanged, this, &MainWindow::onModeTabChanged);
 
     // Right actions panel (embedded in central layout to keep top bar full-width)
     QWidget* dock = new QWidget(central);
@@ -555,107 +1326,225 @@ void MainWindow::buildUI() {
     // Capture tab
     QWidget* tabCap = new QWidget(actionTabs_);
     QVBoxLayout* capv = new QVBoxLayout(tabCap);
-    capv->addWidget(new QLabel("Live capture source management", tabCap));
-    btnCaptureNow_ = new QPushButton("Capture", tabCap);
-    capv->addWidget(btnAddCam_);
-    capv->addWidget(btnCaptureNow_);
-    capv->addStretch(1);
-    connect(btnCaptureNow_, &QPushButton::clicked, this, &MainWindow::onCaptureNow);
 
-    // Calibration tab
+    QWidget* leftSrcPane = new QWidget(tabCap);
+    QVBoxLayout* leftSrcLay = new QVBoxLayout(leftSrcPane);
+    leftSrcLay->setContentsMargins(0,0,0,0);
+    leftSrcLay->setSpacing(8);
+
+    QGroupBox* gbAddSrc = new QGroupBox("1.Add Source", leftSrcPane);
+    QVBoxLayout* addSrcLay = new QVBoxLayout(gbAddSrc);
+    addSrcLay->setContentsMargins(8,8,8,8);
+    addSrcLay->setSpacing(6);
+    QHBoxLayout* importRow = new QHBoxLayout();
+    importRow->setContentsMargins(0,0,0,0);
+    importRow->setSpacing(6);
+    btnAddVideo_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    btnAddImgSeq_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    btnAddVideo_->setStyleSheet("text-align:center;");
+    btnAddImgSeq_->setStyleSheet("text-align:center;");
+    btnRemoveSource_->setFixedHeight(btnAddImgSeq_->sizeHint().height());
+    importRow->addWidget(btnAddVideo_, 1);
+    importRow->addWidget(btnAddImgSeq_, 1);
+    addSrcLay->addLayout(importRow);
+    btnRemoveSource_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    btnRemoveSource_->setStyleSheet("text-align:center;");
+    addSrcLay->addWidget(btnRemoveSource_);
+
+    lblSourcePath_ = new QLabel("Current source: (none)", gbAddSrc);
+    lblSourcePath_->setWordWrap(true);
+    lblSourcePath_->setStyleSheet("color:#cbd5e1;");
+    addSrcLay->addWidget(lblSourcePath_);
+    gbAddSrc->setLayout(addSrcLay);
+    leftSrcLay->addWidget(gbAddSrc);
+
+    QGroupBox* gbFps = new QGroupBox("2.Frame Rate", tabCap);
+    QHBoxLayout* fpsLay = new QHBoxLayout(gbFps);
+    fpsLay->addWidget(new QLabel("FPS", gbFps));
+    spSourceFps_ = new QDoubleSpinBox(gbFps);
+    spSourceFps_->setRange(1.0, 240.0);
+    spSourceFps_->setDecimals(2);
+    spSourceFps_->setSingleStep(1.0);
+    spSourceFps_->setValue(play_fps_ > 0.0 ? play_fps_ : 30.0);
+    fpsLay->addWidget(spSourceFps_);
+    gbFps->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    gbFps->setFixedHeight(spSourceFps_->sizeHint().height() + 14);
+    gbFps->setLayout(fpsLay);
+    leftSrcLay->addWidget(gbFps);
+    capv->addWidget(leftSrcPane, 1);
+    capv->addStretch(1);
+
+    connect(spSourceFps_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v){
+      if (v <= 0.0) return;
+      play_fps_ = v;
+      if (captureWorker_) {
+        QMetaObject::invokeMethod(captureWorker_, "setPlaybackRangeSlot", Qt::QueuedConnection,
+                                  Q_ARG(qint64, (qint64)0), Q_ARG(qint64, (qint64)play_end_frame_), Q_ARG(double, play_fps_));
+      }
+      updateLeftVisualDashboard();
+      updateHistogramPlot();
+    });
+
+    // Preprocess tab
     QWidget* tabCal = new QWidget(actionTabs_);
     QVBoxLayout* calv = new QVBoxLayout(tabCal);
 
-    QGroupBox* gbMethod = new QGroupBox("Calibration Method", tabCal);
-    QVBoxLayout* ml = new QVBoxLayout(gbMethod);
-    cbCalibMethod_ = new QComboBox(gbMethod);
-    cbCalibMethod_->addItem("Chessboard Calibration (available)");
-    cbCalibMethod_->addItem("Total Station Calibration (reserved)");
-    cbCalibMethod_->addItem("UAV Calibration (reserved)");
-    cbCalibMethod_->setCurrentIndex(0);
-    ml->addWidget(cbCalibMethod_);
-    ml->addWidget(new QLabel("Reserved methods are placeholders for future implementation.", gbMethod));
-    gbMethod->setLayout(ml);
+    QGroupBox* gbColor = new QGroupBox("1.Color", tabCal);
+    QVBoxLayout* colorLayout = new QVBoxLayout(gbColor);
+    cbPreColor_ = new QComboBox(gbColor);
+    cbPreColor_->addItem("Black & White");
+    cbPreColor_->addItem("Color");
+    cbPreColor_->setCurrentIndex(1);
+    colorLayout->addWidget(cbPreColor_);
+    gbColor->setLayout(colorLayout);
 
-    QGroupBox* gbBoard = new QGroupBox("Chessboard Parameters", tabCal);
-    QGridLayout* gl = new QGridLayout(gbBoard);
+    QGroupBox* gbBC = new QGroupBox("2.Brightness/Contrast", tabCal);
+    QGridLayout* bcLayout = new QGridLayout(gbBC);
+    QLabel* lblB = new QLabel("Brightness", gbBC);
+    QLabel* lblC = new QLabel("Contrast", gbBC);
+    slBrightness_ = new QSlider(Qt::Horizontal, gbBC);
+    slContrast_ = new QSlider(Qt::Horizontal, gbBC);
+    spBrightness_ = new QSpinBox(gbBC);
+    spContrast_ = new QSpinBox(gbBC);
 
-    spBoardW_ = new QSpinBox(gbBoard);
-    spBoardH_ = new QSpinBox(gbBoard);
-    spSquare_ = new QDoubleSpinBox(gbBoard);
-    spBoardW_->setRange(2, 50);
-    spBoardH_->setRange(2, 50);
-    spSquare_->setRange(1e-6, 10.0);
-    spSquare_->setDecimals(6);
-    spSquare_->setSingleStep(0.001);
+    slBrightness_->setRange(0, 255);
+    slContrast_->setRange(0, 255);
+    spBrightness_->setRange(0, 255);
+    spContrast_->setRange(0, 255);
 
-    spBoardW_->setValue(board_w_);
-    spBoardH_->setValue(board_h_);
-    spSquare_->setValue(square_);
+    slBrightness_->setValue(128);
+    slBrightness_->setMinimumWidth(140);
+    slBrightness_->setMaximumWidth(180);
+    slContrast_->setValue(128);
+    slContrast_->setMinimumWidth(140);
+    slContrast_->setMaximumWidth(180);
+    spBrightness_->setValue(128);
+    spContrast_->setValue(128);
 
-    gl->addWidget(new QLabel("Inner corners W:", gbBoard), 0, 0);
-    gl->addWidget(spBoardW_, 0, 1);
-    gl->addWidget(new QLabel("Inner corners H:", gbBoard), 1, 0);
-    gl->addWidget(spBoardH_, 1, 1);
-    gl->addWidget(new QLabel("Square size (m):", gbBoard), 2, 0);
-    gl->addWidget(spSquare_, 2, 1);
-    gbBoard->setLayout(gl);
+    bcLayout->addWidget(lblB, 0, 0);
+    bcLayout->addWidget(slBrightness_, 0, 1);
+    bcLayout->addWidget(spBrightness_, 0, 2);
+    bcLayout->addWidget(lblC, 1, 0);
+    bcLayout->addWidget(slContrast_, 1, 1);
+    bcLayout->addWidget(spContrast_, 1, 2);
+    btnPreAuto_ = new QPushButton("Auto", gbBC);
+    btnPreAuto_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    bcLayout->addWidget(btnPreAuto_, 2, 1, 1, 2);
+    bcLayout->setHorizontalSpacing(10);
+    bcLayout->setColumnStretch(1, 1);
+    gbBC->setLayout(bcLayout);
 
-    btnGrab_ = new QPushButton("Grab Frame (Chessboard)", tabCal);
-    btnReset_ = new QPushButton("Reset Captures", tabCal);
-    btnGrab_->setVisible(false);
-    btnReset_->setVisible(false);
-    btnComputeCalib_ = new QPushButton("Compute Calibration", tabCal);
-    btnRecomputeCalib_ = new QPushButton("Recompute (Selected Frames)", tabCal);
-    btnSaveCalib_ = new QPushButton("Save rig_calib.yaml", tabCal);
-    btnSaveCalib_->setEnabled(false);
-    calibProgressBar_ = new QProgressBar(tabCal);
-    calibProgressBar_->setRange(0, 100);
-    calibProgressBar_->setValue(0);
-    lblCalibProgress_ = new QLabel("Progress: idle", tabCal);
-    calibErrorTable_ = new QTableWidget(tabCal);
-    calibErrorTable_->setColumnCount(3);
-    calibErrorTable_->setHorizontalHeaderLabels(QStringList() << "Use" << "Frame" << "RMSE(px)");
-    calibErrorTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    calibErrorTable_->verticalHeader()->setVisible(false);
-    calibErrorTable_->setAlternatingRowColors(true);
-    calibErrorTable_->setStyleSheet(
-      "QTableWidget{alternate-background-color:#2b313a;background:#252b33;color:#e8edf2;gridline-color:#3a4350;}"
-      "QHeaderView::section{background:#303744;color:#e8edf2;border:1px solid #3d4654;padding:4px;}"
-      "QTableWidget::item{padding:4px;}");
-    lblCaptured_ = new QLabel("Captured: 0", tabCal);
+    lblPreprocessHint_ = nullptr;
+    lblCaptured_ = nullptr;
+    lblScaleInfo_ = new QLabel("<b><span style=\"color:#ef4444;\">Scale: not calibrated</span></b>", tabCal);
 
-    calv->addWidget(gbMethod);
-    calv->addWidget(gbBoard);
-    calv->addWidget(btnComputeCalib_);
-    calv->addWidget(btnRecomputeCalib_);
-    calv->addWidget(btnSaveCalib_);
-    calv->addWidget(calibProgressBar_);
-    calv->addWidget(lblCalibProgress_);
-    calv->addWidget(calibErrorTable_);
-    calv->addWidget(lblCaptured_);
+    calv->addWidget(gbColor);
+    calv->addWidget(gbBC);
+    
+    QGroupBox* gbCalib = new QGroupBox("3.Calibration", tabCal);
+    QVBoxLayout* calibLay = new QVBoxLayout(gbCalib);
+    QGridLayout* scaleCtl = new QGridLayout();
+    btnStartScaleLine_ = new QPushButton("Draw Scale Line", gbCalib);
+    btnDeleteScaleLine_ = new QPushButton("Delete Scale Line", gbCalib);
+    chkShowLines_ = new QCheckBox("Show Lines", gbCalib);
+    chkShowLines_->setChecked(false);
+    chkShowLines_->setVisible(false);
+    scaleCtl->setHorizontalSpacing(6);
+    scaleCtl->addWidget(btnStartScaleLine_, 0, 0);
+    scaleCtl->addWidget(btnDeleteScaleLine_, 0, 1);
+    scaleCtl->setColumnStretch(0, 1);
+    scaleCtl->setColumnStretch(1, 1);
+    scaleCtl->addWidget(chkShowLines_, 1, 0, 1, 2);
+    calibLay->addLayout(scaleCtl);
+
+    gbLineProps_ = new QGroupBox("Line Properties", gbCalib);
+    QGridLayout* lp = new QGridLayout(gbLineProps_);
+    cbLineColor_ = new QComboBox(gbLineProps_);
+    cbLineColor_->addItem("Cyan", QColor(80,220,255));
+    cbLineColor_->addItem("Red", QColor(255,80,80));
+    cbLineColor_->addItem("Green", QColor(80,255,120));
+    cbLineColor_->addItem("Yellow", QColor(255,220,80));
+    spLineWidth_ = new QSpinBox(gbLineProps_);
+    spLineWidth_->setRange(1, 12);
+    spLineWidth_->setValue(2);
+    editPhysicalMm_ = new QLineEdit("100.0", gbLineProps_);
+    btnCalcScale_ = new QPushButton("Calculate", gbLineProps_);
+    lp->addWidget(new QLabel("Color", gbLineProps_), 0, 0);
+    lp->addWidget(cbLineColor_, 0, 1);
+    lp->addWidget(new QLabel("Width", gbLineProps_), 1, 0);
+    lp->addWidget(spLineWidth_, 1, 1);
+    lp->addWidget(new QLabel("Physical distance (mm)", gbLineProps_), 2, 0);
+    lp->addWidget(editPhysicalMm_, 2, 1);
+    lp->addWidget(btnCalcScale_, 3, 0, 1, 2);
+    gbLineProps_->setLayout(lp);
+    gbLineProps_->setVisible(true);
+
+    calibLay->addWidget(gbLineProps_);
+    calibLay->addWidget(lblScaleInfo_);
+    gbCalib->setLayout(calibLay);
+    calv->addWidget(gbCalib);
+    QGroupBox* gbRegion = new QGroupBox("4.Regions", tabCal);
+    QVBoxLayout* rv = new QVBoxLayout(gbRegion);
+    QHBoxLayout* rBtns = new QHBoxLayout();
+    btnAddMaskRegion_ = new QPushButton("Add Mask Region", gbRegion);
+    btnAddDetectRegion_ = new QPushButton("Add Detect Region", gbRegion);
+    rBtns->addWidget(btnAddMaskRegion_);
+    rBtns->addWidget(btnAddDetectRegion_);
+    tblRegions_ = new QTableWidget(gbRegion);
+    tblRegions_->setColumnCount(3);
+    tblRegions_->setHorizontalHeaderLabels({"Type","Points","Delete"});
+    tblRegions_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Fixed);
+    tblRegions_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
+    tblRegions_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
+    auto updateRegionColumnWidths = [this]() {
+      if (!tblRegions_) return;
+      const int total = tblRegions_->viewport()->width();
+      if (total <= 0) return;
+      const int unit = std::max(1, total / 7);
+      const int w0 = unit * 3;
+      const int w1 = unit * 3;
+      const int w2 = std::max(1, total - w0 - w1);
+      tblRegions_->setColumnWidth(0, w0);
+      tblRegions_->setColumnWidth(1, w1);
+      tblRegions_->setColumnWidth(2, w2);
+    };
+    connect(tblRegions_->horizontalHeader(), &QHeaderView::geometriesChanged, this, updateRegionColumnWidths);
+    QTimer::singleShot(0, this, updateRegionColumnWidths);
+    tblRegions_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tblRegions_->setSelectionMode(QAbstractItemView::SingleSelection);
+    tblRegions_->setMinimumHeight(170);
+    tblRegions_->setStyleSheet("QTableWidget{background:#1f2937;color:#e5e7eb;gridline-color:#4b5563;selection-background-color:#2563eb;selection-color:#ffffff;}QHeaderView::section{background:#334155;color:#f8fafc;border:1px solid #475569;padding:5px;font-weight:600;}");
+    rv->addLayout(rBtns);
+    rv->addWidget(tblRegions_);
+    gbRegion->setLayout(rv);
+
+    calv->addWidget(gbRegion);
     calv->addStretch(1);
 
-    connect(btnGrab_, &QPushButton::clicked, this, &MainWindow::onGrabFrame);
-    connect(btnReset_, &QPushButton::clicked, this, &MainWindow::onResetFrames);
-    connect(btnComputeCalib_, &QPushButton::clicked, this, &MainWindow::onComputeCalibration);
-    connect(btnRecomputeCalib_, &QPushButton::clicked, this, &MainWindow::onRecomputeCalibrationSelected);
-    connect(btnSaveCalib_, &QPushButton::clicked, this, &MainWindow::onSaveCalibrationYaml);
-
     // If board params change, rebuild calibrator and reset captures
-    connect(spBoardW_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int){ rebuildCalibratorFromUI(true); });
-    connect(spBoardH_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int){ rebuildCalibratorFromUI(true); });
-    connect(spSquare_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ rebuildCalibratorFromUI(true); });
 
-    // Tracking tab
-    QWidget* tabTrk = new QWidget(actionTabs_);
-    QVBoxLayout* trkv = new QVBoxLayout(tabTrk);
-    QTabWidget* trkTabs = new QTabWidget(tabTrk);
-    QWidget* trkMainPage = new QWidget(trkTabs);
-    QWidget* trkVisPage = new QWidget(trkTabs);
-    QVBoxLayout* trkMainLayout = new QVBoxLayout(trkMainPage);
-    QVBoxLayout* trkVisRoot = new QVBoxLayout(trkVisPage);
-    QScrollArea* visScrollArea = new QScrollArea(trkVisPage);
+    connect(cbPreColor_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onPreprocessParamsChanged);
+    connect(slBrightness_, &QSlider::valueChanged, this, [this](int v){ if (spBrightness_ && spBrightness_->value()!=v) spBrightness_->setValue(v); onPreprocessParamsChanged(); });
+    connect(slContrast_, &QSlider::valueChanged, this, [this](int v){ if (spContrast_ && spContrast_->value()!=v) spContrast_->setValue(v); onPreprocessParamsChanged(); });
+    connect(spBrightness_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ if (slBrightness_ && slBrightness_->value()!=v) slBrightness_->setValue(v); onPreprocessParamsChanged(); });
+    connect(spContrast_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ if (slContrast_ && slContrast_->value()!=v) slContrast_->setValue(v); onPreprocessParamsChanged(); });
+    connect(btnPreAuto_, &QPushButton::clicked, this, &MainWindow::onPreprocessAuto);
+    connect(btnStartScaleLine_, &QPushButton::clicked, this, &MainWindow::onStartScaleLine);
+    connect(btnDeleteScaleLine_, &QPushButton::clicked, this, &MainWindow::onDeleteScaleLine);
+    connect(btnCalcScale_, &QPushButton::clicked, this, &MainWindow::onApplyScaleFromInput);
+    connect(cbLineColor_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ QColor c = cbLineColor_->currentData().value<QColor>(); int w = spLineWidth_?spLineWidth_->value():2; for (auto* v: sourceViews_) if(v) v->applySelectedLineStyle("Line", c, w); });
+    connect(spLineWidth_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int){ QColor c = cbLineColor_?cbLineColor_->currentData().value<QColor>():QColor(80,220,255); int w = spLineWidth_?spLineWidth_->value():2; for (auto* v: sourceViews_) if(v) v->applySelectedLineStyle("Line", c, w); });
+    connect(chkShowLines_, &QCheckBox::toggled, this, [this](bool on){ for (auto* v: sourceViews_) if (v) v->setAnnotationsVisible(on); });
+    connect(btnAddMaskRegion_, &QPushButton::clicked, this, &MainWindow::onAddMaskRegion);
+    connect(btnAddDetectRegion_, &QPushButton::clicked, this, &MainWindow::onAddDetectRegion);
+    connect(tblRegions_, &QTableWidget::itemSelectionChanged, this, &MainWindow::onRegionTableSelectionChanged);
+
+    // ObjectDefine + Visual pages
+    QWidget* tabObj = new QWidget(actionTabs_);
+    QVBoxLayout* trkMainLayout = new QVBoxLayout(tabObj);
+    QWidget* tabVis = new QWidget(actionTabs_);
+    QVBoxLayout* trkVisRoot = new QVBoxLayout(tabVis);
+    QScrollArea* visScrollArea = new QScrollArea(tabVis);
     visScrollArea->setWidgetResizable(true);
     visScrollArea->setFrameShape(QFrame::NoFrame);
     QWidget* visContainer = new QWidget(visScrollArea);
@@ -663,136 +1552,361 @@ void MainWindow::buildUI() {
     visScrollArea->setWidget(visContainer);
     trkVisRoot->addWidget(visScrollArea);
 
-    btnLoadTag_ = new QPushButton("Load Tag Map (TXT)", tabTrk);
-    btnLoadYaml_ = new QPushButton("Load Calibration (YAML)", tabTrk);
-  //  chkPose_ = new QCheckBox("Pose Estimation ON", tabTrk);
-  //  chkPose_->setChecked(false);
+    QGroupBox* gbThresh = new QGroupBox("1.Threshold", tabObj);
+    QGridLayout* tg = new QGridLayout(gbThresh);
 
-    QGroupBox* gbParams = new QGroupBox("Tracking Parameters", tabTrk);
-    QGridLayout* tg = new QGridLayout(gbParams);
-    spRansacIters_ = new QSpinBox(gbParams);
-    spRansacIters_->setRange(10, 5000);
-    spRansacIters_->setValue(ransac_iters_);
-    spInlierThresh_ = new QDoubleSpinBox(gbParams);
-    spInlierThresh_->setRange(0.1, 50.0);
-    spInlierThresh_->setDecimals(2);
-    spInlierThresh_->setValue(inlier_thresh_px_);
-    cbTagDict_ = new QComboBox(gbParams);
-    cbTagDict_->addItem("APRILTAG_36h11", (int)cv::aruco::DICT_APRILTAG_36h11);
-    cbTagDict_->addItem("APRILTAG_25h9",  (int)cv::aruco::DICT_APRILTAG_25h9);
-    cbTagDict_->addItem("APRILTAG_16h5",  (int)cv::aruco::DICT_APRILTAG_16h5);
-    cbTagDict_->setCurrentIndex(0);
+    cbThreshType_ = new QComboBox(gbThresh);
+    cbThreshType_->addItem("Auto Threshold (Global)");
+    cbThreshType_->addItem("Auto Local Threshold");
 
-    tg->addWidget(new QLabel("RANSAC iters:"), 0, 0);
-    tg->addWidget(spRansacIters_, 0, 1);
-    tg->addWidget(new QLabel("Inlier thresh (px):"), 1, 0);
-    tg->addWidget(spInlierThresh_, 1, 1);
-    tg->addWidget(new QLabel("Tag dictionary:"), 2, 0);
-    tg->addWidget(cbTagDict_, 2, 1);
-    gbParams->setLayout(tg);
+    cbGlobalMethod_ = new QComboBox(gbThresh);
+    for (const QString& m : {"Default","Huang","Intermodes","IsoData","Li","MaxEntropy","Mean","MinError(I)","Minimum","Moments","Otsu","Percentile","RenyiEntropy","Shanbhag","Triangle","Yen"}) {
+      cbGlobalMethod_->addItem(m);
+    }
 
-    lblFps_ = new QLabel("FPS: 0", tabTrk);
-    btnDetectAll_ = new QPushButton("Detect All Frames", tabTrk);
-    lblInliers_ = new QLabel("Inliers: 0", tabTrk);
-    lblPose_ = new QLabel("Pose: -", tabTrk);
-    lblPose_->setWordWrap(true);
+    cbLocalMethod_ = new QComboBox(gbThresh);
+    for (const QString& m : {"Bernsen","Contrast","Mean","Median","MidGrey","Niblack","Otsu","Phansalkar","Sauvola","Gaussian"}) {
+      cbLocalMethod_->addItem(m);
+    }
 
-    trkMainLayout->addWidget(btnLoadTag_);
-    lblTagPath_ = new QLabel("TagMap: (none)", tabTrk);
-    trkMainLayout->addWidget(lblTagPath_);
-    trkMainLayout->addWidget(btnLoadYaml_);
-    lblYamlPath_ = new QLabel("Calib: (none)", tabTrk);
-    trkMainLayout->addWidget(lblYamlPath_);
-    trkMainLayout->addWidget(gbParams);
-   // trkMainLayout->addWidget(chkPose_);
-    trkMainLayout->addWidget(btnDetectAll_);
-    btnExportTraj_ = new QPushButton("Export Trajectory CSV", tabTrk);
-    trkMainLayout->addWidget(btnExportTraj_);
-    trkMainLayout->addWidget(lblInliers_);
-    trkMainLayout->addWidget(lblPose_);
-    trkMainLayout->addWidget(lblFps_);
-    lblLatency_ = new QLabel("Latency: 0 ms", tabTrk);
-    trkMainLayout->addWidget(lblLatency_);
+    slObjectThresh_ = new QSlider(Qt::Horizontal, gbThresh);
+    spObjectThresh_ = new QSpinBox(gbThresh);
+    slObjectThresh_->setRange(0, 255);
+    spObjectThresh_->setRange(0, 255);
+    slObjectThresh_->setValue(128);
+    spObjectThresh_->setValue(128);
+
+    chkInvertBinary_ = new QCheckBox("Invert", gbThresh);
+    btnBinaryPreviewPopup_ = new QPushButton("Preview", gbThresh);
+    spLocalBlockSize_ = new QSpinBox(gbThresh);
+    spLocalBlockSize_->setRange(3, 99);
+    spLocalBlockSize_->setSingleStep(2);
+    spLocalBlockSize_->setValue(31);
+    spLocalK_ = new QDoubleSpinBox(gbThresh);
+    spLocalK_->setRange(-50.0, 50.0);
+    spLocalK_->setDecimals(2);
+    spLocalK_->setValue(5.0);
+
+    tg->addWidget(new QLabel("Type", gbThresh), 0, 0);
+    tg->addWidget(cbThreshType_, 0, 1, 1, 3);
+    QLabel* lblGlobalMethod = new QLabel("Method", gbThresh);
+    QLabel* lblLocalMethod = new QLabel("Local method", gbThresh);
+    QLabel* lblLocalBlock = new QLabel("Local block size", gbThresh);
+    QLabel* lblLocalK = new QLabel("Local k/C", gbThresh);
+    tg->addWidget(lblGlobalMethod, 1, 0);
+    cbGlobalMethod_->setMinimumWidth(130);
+    cbLocalMethod_->setMinimumWidth(130);
+    tg->addWidget(cbGlobalMethod_, 1, 1);
+    tg->setColumnMinimumWidth(2, 36);
+    btnTryAllGlobal_ = new QPushButton("Try All", gbThresh);
+    tg->addWidget(btnTryAllGlobal_, 1, 3);
+    tg->addWidget(lblLocalMethod, 2, 0);
+    tg->addWidget(cbLocalMethod_, 2, 1);
+    btnTryAllLocal_ = new QPushButton("Try All", gbThresh);
+    tg->addWidget(btnTryAllLocal_, 2, 3);
+    tg->addWidget(lblLocalBlock, 3, 0);
+    tg->addWidget(spLocalBlockSize_, 3, 1);
+    tg->addWidget(lblLocalK, 3, 2);
+    tg->addWidget(spLocalK_, 3, 3);
+    tg->addWidget(new QLabel("Threshold", gbThresh), 4, 0);
+    tg->addWidget(slObjectThresh_, 4, 1, 1, 2);
+    tg->addWidget(spObjectThresh_, 4, 3);
+    gbThresh->setLayout(tg);
+
+    auto updateMethodUi = [this, lblGlobalMethod, lblLocalMethod, lblLocalBlock, lblLocalK]() {
+      const bool local = cbThreshType_ && cbThreshType_->currentIndex() == 1;
+      if (lblGlobalMethod) lblGlobalMethod->setVisible(!local);
+      if (cbGlobalMethod_) cbGlobalMethod_->setVisible(!local);
+      if (btnTryAllGlobal_) btnTryAllGlobal_->setVisible(!local);
+      if (lblLocalMethod) lblLocalMethod->setVisible(local);
+      if (cbLocalMethod_) cbLocalMethod_->setVisible(local);
+      if (btnTryAllLocal_) btnTryAllLocal_->setVisible(local);
+      if (lblLocalBlock) lblLocalBlock->setVisible(local);
+      if (spLocalBlockSize_) spLocalBlockSize_->setVisible(local);
+      if (lblLocalK) lblLocalK->setVisible(local);
+      if (spLocalK_) spLocalK_->setVisible(local);
+    };
+    updateMethodUi();
+
+    trkMainLayout->addWidget(gbThresh);
+
+    lblBinaryPreview_ = new QLabel(gbThresh);
+    lblBinaryPreview_->setFixedSize(360, 180);
+    lblBinaryPreview_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    lblBinaryPreview_->setAlignment(Qt::AlignCenter);
+    lblBinaryPreview_->setStyleSheet("background:#111;border:1px solid #3a4250;color:#9aa7b8;");
+    lblBinaryPreview_->setText("No binary preview");
+    tg->addWidget(new QLabel("BinaryImg", gbThresh), 5, 0);
+    tg->addWidget(chkInvertBinary_, 5, 2);
+    tg->addWidget(btnBinaryPreviewPopup_, 5, 3);
+    btnAnalyzeParticles_ = new QPushButton("Analyze Particles", gbThresh);
+    btnClearContours_ = new QPushButton("Clear Contours", gbThresh);
+    tg->addWidget(lblBinaryPreview_, 6, 0, 1, 4);
+    tg->addWidget(btnAnalyzeParticles_, 7, 0, 1, 2);
+    tg->addWidget(btnClearContours_, 7, 2, 1, 2);
+
+    QGroupBox* gbBinaryProc = new QGroupBox("2.Morphological Processing", tabObj);
+    QGridLayout* bp = new QGridLayout(gbBinaryProc);
+    cbBinaryOp_ = new QComboBox(gbBinaryProc);
+    for (const QString& op : {"Erode","Dilate","Open","Close","Fill Holes","Watershed","Skeletonize","Outline","Clear Border"}) cbBinaryOp_->addItem(op);
+    btnUndoBinaryOp_ = new QPushButton("Undo", gbBinaryProc);
+    lblBinaryOps_ = new QLabel("Pipeline: (none)", gbBinaryProc);
+    lblBinaryOps_->setWordWrap(true);
+    chkEnableMaskEdit_ = new QCheckBox("Enable Mask Edit", tabObj);
+    btnAddMaskContour_ = new QPushButton("Add Mask", tabObj);
+    btnModifyMaskContour_ = new QPushButton("Modify Mask", tabObj);
+    btnDeleteMaskContour_ = new QPushButton("Delete Mask", tabObj);
+    btnAddMaskContour_->setCheckable(true);
+    btnModifyMaskContour_->setCheckable(true);
+    btnDeleteMaskContour_->setCheckable(true);
+    QButtonGroup* maskModeGroup = new QButtonGroup(tabObj);
+    maskModeGroup->setExclusive(true);
+    maskModeGroup->addButton(btnAddMaskContour_);
+    maskModeGroup->addButton(btnModifyMaskContour_);
+    maskModeGroup->addButton(btnDeleteMaskContour_);
+    btnTrackBinary_ = new QPushButton("Track", tabObj);
+    btnTrackBinary_->setCheckable(true);
+    bp->addWidget(new QLabel("Operation", gbBinaryProc), 0, 0);
+    bp->addWidget(cbBinaryOp_, 0, 1);
+    bp->addWidget(btnUndoBinaryOp_, 0, 2);
+    bp->addWidget(lblBinaryOps_, 1, 0, 1, 4);
+    gbBinaryProc->setLayout(bp);
+    gbBinaryProc->setVisible(false);
+    trkMainLayout->addWidget(gbBinaryProc);
+
+    QGroupBox* gbDetect = new QGroupBox("3.Detect & Filter", tabObj);
+    QGridLayout* hg = new QGridLayout(gbDetect);
+    hg->setHorizontalSpacing(8);
+    hg->setVerticalSpacing(6);
+    cbHistMetric_ = new QComboBox(gbDetect);
+    cbHistMetric_->addItems({"Area","Perimeter","Circularity","MajorAxis","MinorAxis"});
+    spHistMin_ = new QDoubleSpinBox(gbDetect);
+    spHistMax_ = new QDoubleSpinBox(gbDetect);
+    spHistMin_->setRange(-1e9, 1e9); spHistMax_->setRange(-1e9, 1e9);
+    spHistMin_->setValue(0.0); spHistMax_->setValue(1e6);
+    spHistMin_->setMinimumWidth(100);
+    spHistMax_->setMinimumWidth(100);
+    configureHistogramEditorsForMetric("Area");
+    plotHistogram_ = new QCustomPlot(gbDetect);
+    plotHistogram_->setMinimumHeight(180);
+    plotHistogram_->setBackground(QBrush(QColor(17,24,39)));
+    plotHistogram_->xAxis->setBasePen(QPen(QColor(148,163,184)));
+    plotHistogram_->yAxis->setBasePen(QPen(QColor(148,163,184)));
+    plotHistogram_->xAxis->setTickPen(QPen(QColor(148,163,184)));
+    plotHistogram_->yAxis->setTickPen(QPen(QColor(148,163,184)));
+    plotHistogram_->xAxis->setSubTickPen(QPen(QColor(100,116,139)));
+    plotHistogram_->yAxis->setSubTickPen(QPen(QColor(100,116,139)));
+    plotHistogram_->xAxis->setTickLabelColor(QColor(226,232,240));
+    plotHistogram_->yAxis->setTickLabelColor(QColor(226,232,240));
+    plotHistogram_->xAxis->setLabelColor(QColor(226,232,240));
+    plotHistogram_->yAxis->setLabelColor(QColor(226,232,240));
+    plotHistogram_->xAxis->grid()->setPen(QPen(QColor(51,65,85), 1, Qt::DotLine));
+    plotHistogram_->yAxis->grid()->setPen(QPen(QColor(51,65,85), 1, Qt::DotLine));
+    plotHistogram_->xAxis->grid()->setSubGridVisible(false);
+    plotHistogram_->yAxis->grid()->setSubGridVisible(false);
+    plotHistogram_->legend->setVisible(false);
+    QPushButton* btnHistReset = new QPushButton("Reset", gbDetect);
+    btnHistApply_ = new QPushButton("Apply", gbDetect);
+
+
+    hg->addWidget(chkEnableMaskEdit_, 0, 0, 1, 3);
+    hg->addWidget(new QLabel("Snap Radius(px)", gbDetect), 0, 3);
+    spMaskSnapRadius_ = new QSpinBox(gbDetect);
+    spMaskSnapRadius_->setRange(3, 200);
+    spMaskSnapRadius_->setValue(10);
+    hg->addWidget(spMaskSnapRadius_, 0, 4, 1, 2);
+    hg->addWidget(btnAddMaskContour_, 1, 0, 1, 2);
+    hg->addWidget(btnModifyMaskContour_, 1, 2, 1, 2);
+    hg->addWidget(btnDeleteMaskContour_, 1, 4, 1, 2);
+    hg->addWidget(new QLabel("Metric", gbDetect), 2, 0);
+    hg->addWidget(cbHistMetric_, 2, 1, 1, 2);
+    hg->addWidget(btnHistReset, 2, 3);
+    hg->addWidget(btnHistApply_, 2, 4);
+
+    hg->addWidget(plotHistogram_, 3, 0, 1, 6);
+    hg->addWidget(new QLabel("Min", gbDetect), 4, 0);
+    hg->addWidget(spHistMin_, 4, 1);
+    hg->addWidget(new QLabel("Max", gbDetect), 4, 3);
+    hg->addWidget(spHistMax_, 4, 4);
+
+    lblDetectParticleCount_ = new QLabel("Particles: 0", gbDetect);
+    lblDetectParticleCount_->setStyleSheet("font-weight:600;color:#f8fafc;");
+    tblDetectParticles_ = new QTableWidget(gbDetect);
+    tblDetectParticles_->setColumnCount(5);
+    tblDetectParticles_->setHorizontalHeaderLabels({"ID","Area","Major","Minor","Circularity"});
+    tblDetectParticles_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    tblDetectParticles_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tblDetectParticles_->setSelectionMode(QAbstractItemView::SingleSelection);
+    tblDetectParticles_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tblDetectParticles_->setMinimumHeight(180);
+    tblDetectParticles_->setStyleSheet("QTableWidget{background:#1f2937;color:#e5e7eb;gridline-color:#4b5563;selection-background-color:#2563eb;selection-color:#ffffff;}QHeaderView::section{background:#334155;color:#f8fafc;border:1px solid #475569;padding:5px;font-weight:600;}");
+    hg->addWidget(lblDetectParticleCount_, 5, 0, 1, 6);
+    hg->addWidget(tblDetectParticles_, 6, 0, 1, 6);
+    hg->setColumnMinimumWidth(2, 12);
+    hg->setColumnMinimumWidth(5, 12);
+    hg->setColumnStretch(5, 1);
+    gbDetect->setLayout(hg);
+    trkMainLayout->addWidget(gbDetect);
+
+    QGroupBox* gbPair = new QGroupBox("4.Make Pair", tabObj);
+    QVBoxLayout* pairLay = new QVBoxLayout(gbPair);
+    pairLay->addWidget(btnTrackBinary_);
+    gbPair->setLayout(pairLay);
+    trkMainLayout->addWidget(gbPair);
     trkMainLayout->addStretch(1);
 
-    btnAddVisChart_ = new QPushButton("add gragh", trkVisPage);
-    visChartsLayout_->addWidget(btnAddVisChart_);
-
-    auto makeSeriesSelector = [trkVisPage]() {
-      QComboBox* cb = new QComboBox(trkVisPage);
-      cb->setToolTip(QString::fromUtf8("choose curve to show"));
-      cb->addItem(QString::fromUtf8("all"));
-      return cb;
-    };
-
-    lblTrajPosPlot_ = new QCustomPlot(trkVisPage);
-    lblTrajPosPlot_->setMinimumHeight(160);
-    lblTrajPosPlot_->setStyleSheet("background:#1d232b;border:1px solid #3a4250;color:#9fb0c4;");
-    lblTrajPosPlot_->xAxis->setLabel("t");
-    lblTrajPosPlot_->yAxis->setLabel("Position");
-    lblTrajPosPlot_->addGraph();
-    lblTrajPosPlot_->addGraph();
-    lblTrajPosPlot_->addGraph();
-    lblTrajPosPlot_->addGraph(); // red cursor line
-    lblTrajPosPlot_->graph(0)->setPen(QPen(QColor(255,99,132), 1.8));
-    lblTrajPosPlot_->graph(1)->setPen(QPen(QColor(80,220,255), 1.8));
-    lblTrajPosPlot_->graph(2)->setPen(QPen(QColor(120,220,120), 1.8));
-    lblTrajPosPlot_->graph(3)->setPen(QPen(QColor(255,70,70), 1.2));
-    lblTrajPosPlot_->legend->setVisible(false);
-    QComboBox* posSelector = makeSeriesSelector();
-    visChartsLayout_->addWidget(posSelector);
-    visChartsLayout_->addWidget(lblTrajPosPlot_);
-
-    lblTrajAngPlot_ = new QCustomPlot(trkVisPage);
-    lblTrajAngPlot_->setMinimumHeight(160);
-    lblTrajAngPlot_->setStyleSheet("background:#1d232b;border:1px solid #3a4250;color:#9fb0c4;");
-    lblTrajAngPlot_->xAxis->setLabel("t");
-    lblTrajAngPlot_->yAxis->setLabel("Angle-axis");
-    lblTrajAngPlot_->addGraph();
-    lblTrajAngPlot_->addGraph();
-    lblTrajAngPlot_->addGraph();
-    lblTrajAngPlot_->addGraph(); // red cursor line
-    lblTrajAngPlot_->graph(0)->setPen(QPen(QColor(255,179,71), 1.8));
-    lblTrajAngPlot_->graph(1)->setPen(QPen(QColor(186,104,200), 1.8));
-    lblTrajAngPlot_->graph(2)->setPen(QPen(QColor(121,134,203), 1.8));
-    lblTrajAngPlot_->graph(3)->setPen(QPen(QColor(255,70,70), 1.2));
-    lblTrajAngPlot_->legend->setVisible(false);
-    QComboBox* angSelector = makeSeriesSelector();
-    visChartsLayout_->addWidget(angSelector);
-    visChartsLayout_->addWidget(lblTrajAngPlot_);
-    visChartsLayout_->addStretch(1);
-
-    trkTabs->addTab(trkMainPage, "Tracking");
-    trkTabs->addTab(trkVisPage, QString::fromUtf8("Visual"));
-    trkv->addWidget(trkTabs);
-
-    connect(btnLoadTag_, &QPushButton::clicked, this, &MainWindow::onLoadTagMap);
-    connect(btnLoadYaml_, &QPushButton::clicked, this, &MainWindow::onLoadCalibYaml);
-  //  connect(chkPose_, &QCheckBox::toggled, this, &MainWindow::onTogglePose);
-    connect(btnDetectAll_, &QPushButton::clicked, this, &MainWindow::onDetectAllTrackingFrames);
-    connect(btnExportTraj_, &QPushButton::clicked, this, &MainWindow::onExportTrajectory);
-    connect(btnAddVisChart_, &QPushButton::clicked, this, &MainWindow::onAddVisualizationChart);
-    connect(spRansacIters_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ ransac_iters_=v; if(solveWorker_) solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true); });
-    connect(spInlierThresh_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v){ inlier_thresh_px_=v; if(solveWorker_) solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true); });
-    connect(cbTagDict_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ tag_dict_id_=cbTagDict_->currentData().toInt(); if(solveWorker_) solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true); });
-
-    lblTrajPosPlot_->setContextMenuPolicy(Qt::CustomContextMenu);
-    lblTrajAngPlot_->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(lblTrajPosPlot_, &QWidget::customContextMenuRequested, this, &MainWindow::onVisualizationPlotContextMenu);
-    connect(lblTrajAngPlot_, &QWidget::customContextMenuRequested, this, &MainWindow::onVisualizationPlotContextMenu);
 
     visCharts_.clear();
-    visCharts_.push_back({lblTrajPosPlot_, posSelector, {0,1,2}, "Position", false});
-    visCharts_.push_back({lblTrajAngPlot_, angSelector, {3,4,5}, "Angle-axis", false});
+    visChartsLayout_->addWidget(new QLabel("Visual dashboard is shown in the left player area.", tabVis));
+    visChartsLayout_->addStretch(1);
 
-    connect(posSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); });
-    connect(angSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); });
+    connect(cbThreshType_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, updateMethodUi](int){ object_thresh_manual_ = false; updateMethodUi(); onObjectThresholdParamsChanged(); });
+    connect(cbGlobalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ object_thresh_manual_ = false; onObjectThresholdParamsChanged(); });
+    connect(btnTryAllGlobal_, &QPushButton::clicked, this, &MainWindow::onTryAllGlobalMethods);
+    connect(btnTryAllLocal_, &QPushButton::clicked, this, &MainWindow::onTryAllLocalMethods);
+    connect(cbBinaryOp_, QOverload<int>::of(&QComboBox::activated), this, &MainWindow::onSelectBinaryOp);
+    connect(btnUndoBinaryOp_, &QPushButton::clicked, this, &MainWindow::onUndoBinaryOp);
+    if (btnAddMaskContour_) btnAddMaskContour_->setEnabled(false);
+    if (btnModifyMaskContour_) btnModifyMaskContour_->setEnabled(false);
+    if (btnDeleteMaskContour_) btnDeleteMaskContour_->setEnabled(false);
+    connect(btnAnalyzeParticles_, &QPushButton::clicked, this, &MainWindow::onAnalyzeParticles);
+    connect(btnClearContours_, &QPushButton::clicked, this, &MainWindow::onClearDetectedContours);
+    connect(btnAddMaskContour_, &QPushButton::clicked, this, &MainWindow::onStartAddMaskContour);
+    connect(btnModifyMaskContour_, &QPushButton::clicked, this, &MainWindow::onStartModifyMaskContour);
+    connect(btnDeleteMaskContour_, &QPushButton::clicked, this, &MainWindow::onStartDeleteMaskContour);
+    connect(chkEnableMaskEdit_, &QCheckBox::toggled, this, &MainWindow::onToggleMaskEditEnabled);
+    connect(btnTrackBinary_, &QPushButton::clicked, this, &MainWindow::onToggleTrackBinary);
+    connect(cbLocalMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ object_thresh_manual_ = false; onObjectThresholdParamsChanged(); });
+    connect(chkInvertBinary_, &QCheckBox::toggled, this, &MainWindow::onObjectThresholdParamsChanged);
+    connect(btnBinaryPreviewPopup_, &QPushButton::clicked, this, &MainWindow::onShowBinaryPreviewPopup);
+    connect(slObjectThresh_, &QSlider::valueChanged, this, [this](int v){ object_thresh_manual_ = true; if (spObjectThresh_ && spObjectThresh_->value()!=v) spObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
+    connect(spObjectThresh_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ object_thresh_manual_ = true; if (slObjectThresh_ && slObjectThresh_->value()!=v) slObjectThresh_->setValue(v); onObjectThresholdParamsChanged(); });
+    connect(spLocalBlockSize_, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
+    connect(spLocalK_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &MainWindow::onObjectThresholdParamsChanged);
+    auto resetHistogramRange = [this]() {
+      if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
+      const QString metric = cbHistMetric_->currentText();
+      auto pick = [&](const MeasureRow& r)->double { return metricValueForHist(r, metric); };
+      std::vector<double> vals;
+      for (const auto& fs : analyzed_measures_by_frame_) {
+        for (const auto& am : fs) {
+          if (!am.enabled) continue;
+          vals.push_back(pick(am.m));
+        }
+      }
+      if (vals.empty()) {
+        if (!target_meas_rows_.empty()) for (const auto& t : target_meas_rows_) vals.push_back(pick(t.m));
+        else for (const auto& r : meas_rows_) vals.push_back(pick(r));
+      }
+      vals.erase(std::remove_if(vals.begin(), vals.end(), [](double v){ return !std::isfinite(v); }), vals.end());
+      double lo = 0.0, hi = 1.0;
+      if (metric == "Circularity") { lo = 0.0; hi = 1.0; }
+      else if (!vals.empty()) { auto mm = std::minmax_element(vals.begin(), vals.end()); lo = *mm.first; hi = *mm.second; if (hi<=lo) hi = lo + 1.0; }
+      configureHistogramEditorsForMetric(metric);
+      lo = std::max(spHistMin_->minimum(), std::min(spHistMin_->maximum(), lo));
+      hi = std::max(spHistMax_->minimum(), std::min(spHistMax_->maximum(), hi));
+      if (lo > hi) lo = hi;
+      QSignalBlocker b1(spHistMin_); QSignalBlocker b2(spHistMax_);
+      spHistMin_->setValue(lo); spHistMax_->setValue(hi);
+      updateHistogramPlot(); updateLeftVisualDashboard(); onTick();
+    };
+    connect(cbHistMetric_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, resetHistogramRange](int){
+      if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
+      resetHistogramRange();
+    });
 
-    actionTabs_->addTab(tabCap, "Capture");
-    actionTabs_->addTab(tabCal, "Calibration");
-    actionTabs_->addTab(tabTrk, "Tracking");
-    // Right-side parameters must follow left mode; hide tab labels completely.
+    auto applyHistogramPreviewOnly = [this]() {
+      if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
+      updateHistogramPlot();
+      updateLeftVisualDashboard();
+      onTick();
+    };
+
+    auto applyHistogramCommitted = [this, resetHistogramRange]() {
+      if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return;
+      const QString metric = cbHistMetric_->currentText();
+      const double lo = spHistMin_->value();
+      const double hi = spHistMax_->value();
+      confirmed_hist_rules_[metric] = {lo, hi};
+
+      for (auto& frameMeasures : analyzed_measures_by_frame_) {
+        for (auto& am : frameMeasures) {
+          if (!am.enabled) continue;
+          const double v = metricValueForHist(am.m, metric);
+          if (!std::isfinite(v) || v < lo || v > hi) am.enabled = false;
+        }
+      }
+
+      tracked_contours_by_frame_.clear();
+      target_meas_rows_.clear();
+      for (const auto& frameMeasures : analyzed_measures_by_frame_) {
+        for (const auto& am : frameMeasures) {
+          if (!am.enabled) continue;
+          target_meas_rows_.push_back(TargetMeasureRow{-1, am.m});
+        }
+      }
+
+      resetHistogramRange();
+      logLine(QString("Applied histogram rule: %1 [%2, %3]").arg(metric).arg(lo).arg(hi));
+    };
+
+    connect(spHistMin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this, applyHistogramPreviewOnly](double){ applyHistogramPreviewOnly(); });
+    connect(spHistMax_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this, applyHistogramPreviewOnly](double){ applyHistogramPreviewOnly(); });
+    connect(btnHistReset, &QPushButton::clicked, this, [resetHistogramRange](){ resetHistogramRange(); });
+    if (btnHistApply_) connect(btnHistApply_, &QPushButton::clicked, this, [this, applyHistogramCommitted](){ applyHistogramCommitted(); });
+
+
+    actionTabs_->addTab(tabCap, "Source");
+    actionTabs_->addTab(tabCal, "PreProcess");
+    actionTabs_->addTab(tabObj, "Detect");
+    actionTabs_->addTab(tabVis, "Visualization");
     if (actionTabs_->tabBar()) actionTabs_->tabBar()->hide();
+
+    connect(stepTabs_, &QTabBar::currentChanged, this, [this, leftStack, dock, root, smoothCtl](int idx){
+      const QSize keepSize = this->size();
+      const int stepIdx = std::max(0, std::min(3, tabIndexToStep(idx)));
+      if (actionTabs_) actionTabs_->setCurrentIndex(std::max(0, std::min(stepIdx, actionTabs_->count()-1)));
+      const bool visual = (stepIdx == 3);
+      if (dock) dock->setVisible(!visual);
+      if (actionTabs_) actionTabs_->setVisible(!visual);
+      if (log_) log_->setVisible(false);
+      if (leftStack) leftStack->setCurrentWidget(visual ? visualDashHost_ : viewsHost_);
+      if (btnCaptureVisual_) btnCaptureVisual_->setVisible(visual);
+      if (btnExportTableCsv_) btnExportTableCsv_->setVisible(visual);
+      if (btnExportMp4_) btnExportMp4_->setVisible(visual);
+      if (btnFitAllPlots_) btnFitAllPlots_->setVisible(visual);
+      if (btnVisualAuto_) btnVisualAuto_->setVisible(visual);
+      if (lblTargetFilter_) lblTargetFilter_->setVisible(visual);
+      if (cbTargetFilter_) cbTargetFilter_->setVisible(visual);
+      if (lblXAxisMode_) lblXAxisMode_->setVisible(visual);
+      if (cbXAxisMode_) cbXAxisMode_->setVisible(visual);
+      if (smoothCtl) smoothCtl->setVisible(false);
+      const bool preprocess = (stepIdx == 1);
+      for (auto* sv : sourceViews_) if (sv) sv->setAnnotationsVisible(preprocess);
+      if (stepIdx == 0) onModeCapture();
+      else if (stepIdx == 1) onModeCalibration();
+      else if (stepIdx == 2) onModeTracking();
+      else {
+        mode_ = CAPTURE;
+        if (pending_visual_fit_) {
+          fitAllVisualPlots();
+          pending_visual_fit_ = false;
+        }
+        updateLeftVisualDashboard();
+        logLine("Switched to Visualization mode.");
+      }
+      if (stepIdx >= 0 && stepIdx < 4) stepDone_[stepIdx] = true;
+      updateStepAvailability();
+      if (root) {
+        root->setStretch(0, visual ? 1 : 5);
+        root->setStretch(1, visual ? 0 : 2);
+      }
+      if (this->size() != keepSize) this->resize(keepSize);
+      QTimer::singleShot(0, this, [this, keepSize]() {
+        if (this->size() != keepSize) this->resize(keepSize);
+        ensureWindowInVisibleArea();
+      });
+    });
 
     dv->addWidget(actionTabs_);
 
@@ -800,6 +1914,7 @@ void MainWindow::buildUI() {
     log_ = new QTextEdit(dockw);
     log_->setReadOnly(true);
     log_->setMinimumHeight(120);
+    log_->setVisible(false);
     dv->addWidget(log_);
 
     dockw->setLayout(dv);
@@ -811,16 +1926,47 @@ void MainWindow::buildUI() {
 
     root->addWidget(dock);
 
+    if (QScreen* screen = QGuiApplication::primaryScreen()) {
+      const QRect ar = screen->availableGeometry();
+      setMaximumSize(ar.size());
+      if (width() > ar.width() || height() > ar.height()) resize(ar.size());
+    }
+    ensureWindowInVisibleArea();
     lblResolution_ = new QLabel("Resolution: -", this);
     statusBar()->addPermanentWidget(lblResolution_);
 
     refreshTrajectoryPlot();
     onModeCapture();
+    updateStepAvailability();
     statusBar()->showMessage("Ready");
     refreshSourceList();
+    QTimer::singleShot(0, this, [this]() { ensureWindowInVisibleArea(); });
     // Per-source docks are OFF by default to avoid duplicate display.
     logLine("App started. Configure sources and chessboard in the UI.");
 }
+
+
+void MainWindow::ensureWindowInVisibleArea() {
+  QScreen* screen = QGuiApplication::screenAt(frameGeometry().center());
+  if (!screen) screen = QGuiApplication::primaryScreen();
+  if (!screen) return;
+  const QRect ar = screen->availableGeometry();
+
+  QSize target = size();
+  target.setWidth(std::min(target.width(), ar.width()));
+  target.setHeight(std::min(target.height(), ar.height()));
+  if (target != size()) resize(target);
+
+  QRect g = frameGeometry();
+  int nx = g.x();
+  int ny = g.y();
+  if (g.width() > ar.width()) nx = ar.left();
+  else nx = std::clamp(nx, ar.left(), ar.right() - g.width() + 1);
+  if (g.height() > ar.height()) ny = ar.top();
+  else ny = std::clamp(ny, ar.top(), ar.bottom() - g.height() + 1);
+  if (nx != g.x() || ny != g.y()) move(nx, ny);
+}
+
 
 void MainWindow::logLine(const QString& s) {
     log_->append(QString("[%1] %2").arg(nowStr(), s));
@@ -835,7 +1981,7 @@ bool MainWindow::openAllSources() {
       continue;
     }
     if (s.is_cam) s.cap.open(s.cam_id);
-    else s.cap.open(s.video_path.toStdString());
+    else openVideoCaptureUnicode(s.cap, s.video_path);
     if (!s.cap.isOpened()) okAll = false;
   }
   return okAll;
@@ -849,13 +1995,14 @@ void MainWindow::closeAllSources() {
 
 void MainWindow::refreshSourceList() {
   QStringList status;
+  QString currentPath;
   QMutexLocker locker(&sources_mutex_);
   for (int i=0;i<(int)sources_.size();++i) {
     const auto& s = sources_[i];
     QString label;
     if (s.is_cam) label = QString("Camera %1").arg(s.cam_id);
-    else if (s.is_image_seq) label = QString("ImgSeq:%1").arg(QFileInfo(s.seq_dir).fileName());
-    else label = QFileInfo(s.video_path).fileName();
+    else if (s.is_image_seq) label = QString("ImgSeq:%1").arg(QDir::toNativeSeparators(s.seq_dir));
+    else label = QDir::toNativeSeparators(s.video_path);
     bool en = (i < (int)source_enabled_.size()) ? source_enabled_[i] : true;
     QString owner = "{Capture}";
     if (s.mode_owner == (int)CALIB) owner = "{Calib}";
@@ -863,15 +2010,20 @@ void MainWindow::refreshSourceList() {
     label += owner;
     label += en ? "[RUN]" : "[PAUSED]";
     status << label;
+    if (currentPath.isEmpty() && !s.is_cam) currentPath = (s.is_image_seq ? s.seq_dir : s.video_path);
+  }
+  if (lblSourcePath_) {
+    if (currentPath.isEmpty()) lblSourcePath_->setText("Current source: (none)");
+    else lblSourcePath_->setText(QString("Current source: %1").arg(QDir::toNativeSeparators(currentPath)));
   }
   Q_UNUSED(status); // status bar text is centralized in updateStatus().
 }
 
 std::vector<int> MainWindow::activeSourceIndices() const {
+  // Keep the main image view stable across Source / PreProcess / ObjectDefine steps.
   std::vector<int> idx;
-  for (int i=0;i<(int)sources_.size();++i) {
-    if (sources_[i].mode_owner == (int)mode_) idx.push_back(i);
-  }
+  idx.reserve(sources_.size());
+  for (int i=0;i<(int)sources_.size();++i) idx.push_back(i);
   return idx;
 }
 
@@ -887,7 +2039,7 @@ void MainWindow::rebuildSourceViews() {
   active_view_source_indices_ = activeSourceIndices();
   const int n = std::min(2, (int)active_view_source_indices_.size());
   if (n <= 0) {
-    QLabel* hint = new QLabel("No sources. Click AddVideo to create a viewer.", viewsHost_);
+    QLabel* hint = new QLabel("No sources. Please add an image sequence.", viewsHost_);
     hint->setAlignment(Qt::AlignCenter);
     hint->setStyleSheet("background-color:#111; border:1px solid #333; color:#ddd;");
     hint->setMinimumSize(960, 540);
@@ -968,6 +2120,37 @@ void MainWindow::rebuildSourceViews() {
     ImageViewer* v = new ImageViewer(canvas);
     v->setMinimumSize(480, 270);
     v->setToolMode(ImageViewer::PanTool);
+    v->setLineCreatedCallback([this, v](double pxLen){ if (gbLineProps_) gbLineProps_->setVisible(true); v->setToolMode(ImageViewer::PanTool); for (auto* ov: sourceViews_) if (ov!=v && ov) ov->setToolMode(ImageViewer::PanTool); pre_scale_line_drawn_ = true; updateScaleStatus(pxLen); updateStepAvailability(); });
+    v->setLineDoubleClickCallback([this](double pxLen){ updateScaleStatus(pxLen); });
+    v->setLineValueEditedCallback([this](double pxLen, double mm){
+      if (pxLen <= 1e-9 || mm <= 0.0) return;
+      updateScaleStatus(pxLen);
+      logLine(QString("Scale inline value edited: %1 mm for %2 px (click Calculate to apply)")
+              .arg(mm,0,'f',6).arg(pxLen,0,'f',3));
+    });
+    v->setPolygonFinishedCallback([this](const QPolygonF& poly){
+      if (poly.size() < 3 || drawing_region_type_ == 0) return;
+      RegionSpec rs;
+      rs.id = next_region_id_++;
+      rs.include = (drawing_region_type_ == 1);
+      rs.poly = poly;
+      regions_.push_back(rs);
+      refreshRegionTable();
+      refreshRegionOverlays((int)regions_.size()-1, -1);
+      drawing_region_type_ = 0;
+      logLine(rs.include ? "Added detect region." : "Added mask region.");
+    });
+    std::vector<QPolygonF> polys; std::vector<bool> includes;
+    for (const auto& r : regions_) { polys.push_back(r.poly); includes.push_back(r.include); }
+    v->setRegionEditedCallback([this](int idx, const QPolygonF& poly){
+      if (idx < 0 || idx >= (int)regions_.size()) return;
+      regions_[(size_t)idx].poly = poly;
+      refreshRegionTable();
+      refreshRegionOverlays(idx, idx);
+    });
+    v->setRegionEditIndex(editing_region_index_);
+    v->setRegionPolygons(polys, includes, tblRegions_ ? tblRegions_->currentRow() : -1);
+    v->setAnnotationsVisible(chkShowLines_ ? chkShowLines_->isChecked() : false);
     //connect(panBtn, &QToolButton::clicked, this, [v, panBtn, pointBtn, lineBtn]() {
     //  panBtn->setChecked(true); pointBtn->setChecked(false); lineBtn->setChecked(false);
     //  v->setToolMode(ImageViewer::PanTool);
@@ -1067,6 +2250,10 @@ void MainWindow::onAddCamera() {
     QMessageBox::information(this, "Add Camera", "Please switch to Capture tab to add camera sources.");
     return;
   }
+  if (!sources_.empty()) {
+    QMessageBox::information(this, "Add Camera", "Monocular mode supports only 1 source.");
+    return;
+  }
 
   InputSource s;
   s.is_cam = true;
@@ -1104,6 +2291,8 @@ void MainWindow::onAddCamera() {
   if (show_docks_) rebuildSourceDocks();
   rebuildSourceViews();
   updateSourceViews(last_frames_);
+  updateStatus();
+  updateStepAvailability();
 }
 
 void MainWindow::onAddVideo() 
@@ -1113,8 +2302,8 @@ void MainWindow::onAddVideo()
     QString path = QFileDialog::getOpenFileName(this, "Add Video", last,"Video (*.mp4 *.avi *.mov *.mkv);;All (*.*)");
     if (path.isEmpty()) return;
 
-    if ((int)activeSourceIndices().size() >= 2) {
-      QMessageBox::information(this, "Add Video", "Current tab already has 2 sources.");
+    if (!sources_.empty()) {
+      QMessageBox::information(this, "Add Video", "Monocular mode supports only 1 source.");
       return;
     }
 
@@ -1122,8 +2311,7 @@ void MainWindow::onAddVideo()
     s.is_cam = false;
     s.mode_owner = (int)mode_;
     s.video_path = path;
-    std::string p = QFile::encodeName(path).constData();
-    s.cap.open(p);
+    openVideoCaptureUnicode(s.cap, path);
     if (!s.cap.isOpened()) 
     {
         QMessageBox::warning(this, "Video", "Failed to open video file.");
@@ -1158,6 +2346,8 @@ void MainWindow::onAddVideo()
     if (show_docks_) rebuildSourceDocks();
     rebuildSourceViews();
     updateSourceViews(last_frames_);
+    updateStatus();
+    updateStepAvailability();
     logLine(QString("Added video: %1").arg(path));
 }
 
@@ -1176,8 +2366,8 @@ void MainWindow::onAddImageSequence()
       return;
     }
 
-    if ((int)activeSourceIndices().size() >= 2) {
-      QMessageBox::information(this, "Add Image Sequence", "Current tab already has 2 sources.");
+    if (!sources_.empty()) {
+      QMessageBox::information(this, "Add Image Sequence", "Monocular mode supports only 1 source.");
       return;
     }
 
@@ -1190,7 +2380,7 @@ void MainWindow::onAddImageSequence()
     s.seq_idx = 0;
     for (const auto& fi : files) s.seq_files.push_back(fi.absoluteFilePath());
 
-    cv::Mat firstFrame = cv::imread(s.seq_files.front().toStdString(), cv::IMREAD_COLOR);
+    cv::Mat firstFrame = imreadUnicodePath(s.seq_files.front(), cv::IMREAD_COLOR);
     if (firstFrame.empty()) {
       QMessageBox::warning(this, "Image Sequence", "Failed to read first image in selected folder.");
       return;
@@ -1214,6 +2404,8 @@ void MainWindow::onAddImageSequence()
     if (show_docks_) rebuildSourceDocks();
     rebuildSourceViews();
     updateSourceViews(last_frames_);
+    updateStatus();
+    updateStepAvailability();
     logLine(QString("Added image sequence: %1 (%2 frames)").arg(dir).arg(files.size()));
 }
 
@@ -1231,6 +2423,46 @@ void MainWindow::onRemoveSource() {
   }
   if (removed <= 0) return;
 
+  // Source removal must reset all Visual/ObjectDefine measurement outputs.
+  regions_.clear();
+  editing_region_index_ = -1;
+  drawing_region_type_ = 0;
+  contour_mask_working_contours_.clear();
+  contour_mask_mode_ = ContourMaskNone;
+  contour_mask_frame_key_ = -1;
+  if (chkEnableMaskEdit_) chkEnableMaskEdit_->setChecked(false);
+  for (auto* v : sourceViews_) if (v) {
+    v->setPointClickCallback(std::function<void(const QPointF&)>());
+    v->setPointRightClickCallback(std::function<void(const QPointF&)>());
+    v->setToolMode(ImageViewer::PanTool);
+  }
+  refreshRegionTable();
+  refreshRegionOverlays(-1, -1);
+
+  meas_rows_.clear();
+  target_meas_rows_.clear();
+  analyzed_measures_by_frame_.clear();
+  selected_target_id_ = -1;
+  selected_target_frame_ = -1;
+  pre_scale_line_drawn_ = false;
+  pre_scale_calculated_ = false;
+  stepDone_[1] = false;
+  stepDone_[2] = false;
+  stepDone_[3] = false;
+  last_meas_key_ = std::numeric_limits<qint64>::min();
+  last_ctr_ = cv::Point2f(0, 0);
+  first_ctr_ = cv::Point2f(0, 0);
+  last_speed_ = 0.0;
+  measurements_frozen_ = false;
+  track_binary_enabled_ = false;
+  next_track_id_ = 1;
+  tracked_centroids_.clear();
+  tracked_contours_.clear();
+  if (btnTrackBinary_) btnTrackBinary_->setChecked(false);
+  refreshTrajectoryPlot();
+  updateLeftVisualDashboard();
+  updateDetectParticlePanel();
+
   num_cams_ = (int)sources_.size();
   source_enabled_.assign(std::max(0,num_cams_), true);
   // last_frames_ will be populated by CaptureWorker when frames arrive.
@@ -1242,46 +2474,40 @@ void MainWindow::onRemoveSource() {
   rebuildSourceViews();
   updateSourceViews(last_frames_);
   updateStatus();
+  updateStepAvailability();
   logLine(QString("Removed %1 source(s) in current mode.").arg(removed));
 }
 
 void MainWindow::onModeCalibration() {
-  mode_ = CALIB;
-  if (sideModeTabs_ && sideModeTabs_->currentIndex()!=1) sideModeTabs_->setCurrentIndex(1);
+  // Keep image/render pipeline on capture source set; only switch right-side params.
+  mode_ = CAPTURE;
   if (btnAddCam_) btnAddCam_->setVisible(false);
-  if (btnAddVideo_) btnAddVideo_->setVisible(true);
+  if (btnAddVideo_) btnAddVideo_->setVisible(false);
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-  if (modeTabs_ && modeTabs_->currentIndex()!=1) modeTabs_->setCurrentIndex(1);
-  if (actionTabs_) actionTabs_->setCurrentIndex(1);
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
-  logLine("Switched to Calibration mode.");
+  if (actionTabs_ && actionTabs_->currentIndex()!=1) actionTabs_->setCurrentIndex(1);
+  if (stepTabs_ && stepTabs_->currentIndex()!=stepToTabIndex(1)) stepTabs_->setCurrentIndex(stepToTabIndex(1));
+  logLine("Switched to Preprocess mode.");
 }
 
 void MainWindow::onModeTracking() {
-  mode_ = TRACK;
-  if (sideModeTabs_ && sideModeTabs_->currentIndex()!=2) sideModeTabs_->setCurrentIndex(2);
+  // Keep image/render pipeline stable across Source/PreProcess/ObjectDefine.
+  mode_ = CAPTURE;
   if (btnAddCam_) btnAddCam_->setVisible(false);
-  if (btnAddVideo_) btnAddVideo_->setVisible(true);
+  if (btnAddVideo_) btnAddVideo_->setVisible(false);
   if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-  if (modeTabs_ && modeTabs_->currentIndex()!=2) modeTabs_->setCurrentIndex(2);
-  if (actionTabs_) actionTabs_->setCurrentIndex(2);
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
-  logLine("Switched to Tracking mode.");
+  if (actionTabs_ && actionTabs_->currentIndex()!=2) actionTabs_->setCurrentIndex(2);
+  if (stepTabs_ && stepTabs_->currentIndex()!=stepToTabIndex(2)) stepTabs_->setCurrentIndex(stepToTabIndex(2));
+  logLine("Switched to Detect mode.");
 }
 
 void MainWindow::onModeCapture() {
   mode_ = CAPTURE;
-  if (sideModeTabs_ && sideModeTabs_->currentIndex()!=0) sideModeTabs_->setCurrentIndex(0);
-  if (btnAddCam_) btnAddCam_->setVisible(true);
+  if (btnAddCam_) btnAddCam_->setVisible(false);
   if (btnAddVideo_) btnAddVideo_->setVisible(false);
-  if (btnAddImgSeq_) btnAddImgSeq_->setVisible(false);
-  if (modeTabs_ && modeTabs_->currentIndex()!=0) modeTabs_->setCurrentIndex(0);
-  if (actionTabs_) actionTabs_->setCurrentIndex(0);
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
-  logLine("Switched to Capture mode.");
+  if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
+  if (actionTabs_ && actionTabs_->currentIndex()!=0) actionTabs_->setCurrentIndex(0);
+  if (stepTabs_ && stepTabs_->currentIndex()!=stepToTabIndex(0)) stepTabs_->setCurrentIndex(stepToTabIndex(0));
+  logLine("Switched to Source mode.");
 }
 
 void MainWindow::onCaptureNow() {
@@ -1296,7 +2522,7 @@ void MainWindow::onCaptureNow() {
       if (s.is_image_seq) {
         if (!s.seq_files.isEmpty()) {
           int idx = std::max(0, std::min(s.seq_idx, s.seq_files.size()-1));
-          f = cv::imread(s.seq_files[idx].toStdString(), cv::IMREAD_COLOR);
+          f = imreadUnicodePath(s.seq_files[idx], cv::IMREAD_COLOR);
         }
       } else if (s.cap.isOpened()) {
         s.cap.read(f);
@@ -1309,31 +2535,1725 @@ void MainWindow::onCaptureNow() {
 }
 
 void MainWindow::onModeTabChanged(int idx) {
-  if (modeTabs_ && modeTabs_->currentIndex() != idx) modeTabs_->setCurrentIndex(idx);
-  if (idx == 0) {
-    mode_ = CAPTURE;
-    if (btnAddCam_) btnAddCam_->setVisible(true);
-    if (btnAddVideo_) btnAddVideo_->setVisible(false);
-    if (btnAddImgSeq_) btnAddImgSeq_->setVisible(false);
-    if (actionTabs_) actionTabs_->setCurrentIndex(0);
-    logLine("Switched to Capture mode.");
-  } else if (idx == 1) {
-    mode_ = CALIB;
-    if (btnAddCam_) btnAddCam_->setVisible(false);
-    if (btnAddVideo_) btnAddVideo_->setVisible(true);
-    if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-    if (actionTabs_) actionTabs_->setCurrentIndex(1);
-    logLine("Switched to Calibration mode.");
-  } else {
-    mode_ = TRACK;
-    if (btnAddCam_) btnAddCam_->setVisible(false);
-    if (btnAddVideo_) btnAddVideo_->setVisible(true);
-    if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-    if (actionTabs_) actionTabs_->setCurrentIndex(2);
-    logLine("Switched to Tracking mode.");
+  if (!stepTabs_) return;
+  updateStepAvailability();
+  const int tabIdx = stepToTabIndex(std::max(0, std::min(3, idx)));
+  int target = tabIdx;
+  if (target < 0 || target >= stepTabs_->count() || !stepTabs_->isTabEnabled(target)) {
+    target = stepTabs_->currentIndex();
   }
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
+  if (target >= 0 && target < stepTabs_->count() && stepTabs_->currentIndex()!=target) {
+    stepTabs_->setCurrentIndex(target);
+  }
+}
+
+bool MainWindow::hasAnySourceInCurrentMode() {
+  QMutexLocker srcLock(&sources_mutex_);
+  for (const auto& s : sources_) {
+    if (s.mode_owner == (int)mode_) return true;
+  }
+  return false;
+}
+
+void MainWindow::updateStepAvailability() {
+  if (!stepTabs_ || stepTabs_->count() < 4) return;
+  const bool sourceDone = hasAnySourceInCurrentMode();
+  stepDone_[0] = sourceDone;
+  stepDone_[1] = pre_scale_line_drawn_ && pre_scale_calculated_;
+  stepDone_[2] = stepDone_[2] && (!target_meas_rows_.empty() || !meas_rows_.empty() || !tracked_contours_by_frame_.empty());
+
+  // Progressive unlock: step N is clickable only when step N-1 is done.
+  const bool en0 = true;
+  const bool en1 = stepDone_[0];
+  const bool en2 = en1 && stepDone_[1];
+  const bool en3 = en2 && stepDone_[2];
+  stepTabs_->setTabEnabled(stepToTabIndex(0), en0);
+  stepTabs_->setTabEnabled(stepToTabIndex(1), en1);
+  stepTabs_->setTabEnabled(stepToTabIndex(2), en2);
+  stepTabs_->setTabEnabled(stepToTabIndex(3), en3);
+
+  int curStep = tabIndexToStep(stepTabs_->currentIndex());
+  if (curStep == 3 && !en3) curStep = 2;
+  if (curStep == 2 && !en2) curStep = 1;
+  if (curStep == 1 && !en1) curStep = 0;
+  const int curTab = stepToTabIndex(curStep);
+  if (curTab != stepTabs_->currentIndex()) stepTabs_->setCurrentIndex(curTab);
+}
+
+void MainWindow::onPreprocessParamsChanged() {
+  logLine(QString("Preprocess changed: color=%1, brightness=%2, contrast=%3")
+          .arg(cbPreColor_ && cbPreColor_->currentIndex()==0 ? "B/W" : "Color")
+          .arg(slBrightness_ ? slBrightness_->value() : 128)
+          .arg(slContrast_ ? slContrast_->value() : 128));
+
+  std::vector<cv::Mat> frames;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    frames = last_frames_;
+  }
+  if (frames.empty()) return;
+  for (auto& f : frames) {
+    if (!f.empty()) f = applyPreprocess(f);
+  }
+  updateSourceViews(frames);
+}
+
+void MainWindow::onObjectThresholdParamsChanged() {
+  if (track_binary_enabled_ && measurements_frozen_) { onAnalyzeParticles(); onToggleTrackBinary(); }
+  std::vector<cv::Mat> frames;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    frames = last_frames_;
+  }
+  if (frames.empty()) return;
+  for (const auto& f : frames) {
+    if (f.empty()) continue;
+    int autoT = spObjectThresh_ ? spObjectThresh_->value() : 128;
+    cv::Mat bin = makeObjectBinaryPreview(applyPreprocess(f), &autoT);
+    if (!object_thresh_manual_ && slObjectThresh_ && cbThreshType_ && cbThreshType_->currentIndex()==0) {
+      if (slObjectThresh_->value()!=autoT) slObjectThresh_->setValue(autoT);
+      if (spObjectThresh_ && spObjectThresh_->value()!=autoT) spObjectThresh_->setValue(autoT);
+    }
+    if (!bin.empty() && lblBinaryPreview_) {
+      QImage qi = matToQImage(bin);
+      lblBinaryPreview_->setPixmap(QPixmap::fromImage(qi).scaled(lblBinaryPreview_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+      if (lblBinaryPreviewPopup_) {
+        binary_preview_mask_img_ = qi;
+        refreshBinaryPreviewPopupPixmaps();
+      }
+    }
+    break;
+  }
+}
+
+void MainWindow::onShowBinaryPreviewPopup() {
+  if (!binaryPreviewDialog_) {
+    binaryPreviewDialog_ = new QDialog(this);
+    binaryPreviewDialog_->setAttribute(Qt::WA_DeleteOnClose, false);
+    binaryPreviewDialog_->setWindowTitle("Detect Preview");
+    binaryPreviewDialog_->setModal(false);
+    QVBoxLayout* lv = new QVBoxLayout(binaryPreviewDialog_);
+    lv->setContentsMargins(8, 8, 8, 8);
+
+    QHBoxLayout* topCtl = new QHBoxLayout();
+    btnBinaryPreviewSnap_ = new QPushButton("Snap", binaryPreviewDialog_);
+    cbBinaryPreviewMorphOp_ = new QComboBox(binaryPreviewDialog_);
+    cbBinaryPreviewContourMode_ = new QComboBox(binaryPreviewDialog_);
+    cbBinaryPreviewFitMethod_ = new QComboBox(binaryPreviewDialog_);
+    for (const QString& op : {"Erode","Dilate","Open","Close","Fill Holes","Watershed","Skeletonize","Outline","Clear Border"}) cbBinaryPreviewMorphOp_->addItem(op);
+    cbBinaryPreviewContourMode_->addItems({"ContourSimple", "ContourNone"});
+    cbBinaryPreviewContourMode_->setCurrentText("ContourSimple");
+    cbBinaryPreviewFitMethod_->addItems({"RansacEllipseFit", "DirectEllipseFit", "HullRepairEllipseFit"});
+    cbBinaryPreviewFitMethod_->setCurrentText("HullRepairEllipseFit");
+    btnBinaryPreviewMorphUndo_ = new QPushButton("Undo", binaryPreviewDialog_);
+    lblBinaryPreviewMorphOps_ = new QLabel("Pipeline: (none)", binaryPreviewDialog_);
+    lblBinaryPreviewMorphOps_->setStyleSheet("color:#cbd5e1;");
+    topCtl->addWidget(btnBinaryPreviewSnap_);
+    topCtl->addSpacing(12);
+    topCtl->addWidget(new QLabel("Morph", binaryPreviewDialog_));
+    topCtl->addWidget(cbBinaryPreviewMorphOp_);
+    topCtl->addWidget(new QLabel("Contour", binaryPreviewDialog_));
+    topCtl->addWidget(cbBinaryPreviewContourMode_);
+    topCtl->addWidget(new QLabel("Fit", binaryPreviewDialog_));
+    topCtl->addWidget(cbBinaryPreviewFitMethod_);
+    btnBinaryPreviewMorphUndo_->setText("Back");
+    topCtl->addWidget(btnBinaryPreviewMorphUndo_);
+    topCtl->addWidget(lblBinaryPreviewMorphOps_, 1);
+    lv->addLayout(topCtl);
+
+    QHBoxLayout* views = new QHBoxLayout();
+    lblBinaryPreviewOrig_ = new QLabel(binaryPreviewDialog_);
+    lblBinaryPreviewPopup_ = new QLabel(binaryPreviewDialog_);
+    for (QLabel* lab : {lblBinaryPreviewOrig_, lblBinaryPreviewPopup_}) {
+      lab->setAlignment(Qt::AlignCenter);
+      lab->setMinimumSize(600, 420);
+      lab->setStyleSheet("background:#000;border:1px solid #3a4250;color:#9aa7b8;");
+      lab->setText("No preview");
+      lab->installEventFilter(this);
+      views->addWidget(lab, 1);
+    }
+    lv->addLayout(views, 1);
+
+    QHBoxLayout* bottomCtl = new QHBoxLayout();
+    btnBinaryPreviewPrev_ = new QPushButton("Prev", binaryPreviewDialog_);
+    btnBinaryPreviewPlay_ = new QPushButton("Play", binaryPreviewDialog_);
+    btnBinaryPreviewPlay_->setCheckable(true);
+    btnBinaryPreviewNext_ = new QPushButton("Next", binaryPreviewDialog_);
+    bottomCtl->addStretch(1);
+    bottomCtl->addWidget(btnBinaryPreviewPrev_);
+    bottomCtl->addWidget(btnBinaryPreviewPlay_);
+    bottomCtl->addWidget(btnBinaryPreviewNext_);
+    bottomCtl->addStretch(1);
+    lv->addLayout(bottomCtl);
+
+    connect(btnBinaryPreviewPrev_, &QPushButton::clicked, this, &MainWindow::onBinaryPreviewPrevFrame);
+    connect(btnBinaryPreviewNext_, &QPushButton::clicked, this, &MainWindow::onBinaryPreviewNextFrame);
+    connect(btnBinaryPreviewPlay_, &QPushButton::toggled, this, [this](bool on){
+      if (on) {
+        if (btnBinaryPreviewPlay_) btnBinaryPreviewPlay_->setText("Pause");
+        if (!binary_preview_play_timer_.isActive()) binary_preview_play_timer_.start(66);
+      } else {
+        if (btnBinaryPreviewPlay_) btnBinaryPreviewPlay_->setText("Play");
+        binary_preview_play_timer_.stop();
+      }
+    });
+    connect(&binary_preview_play_timer_, &QTimer::timeout, this, &MainWindow::onBinaryPreviewNextFrame);
+    connect(btnBinaryPreviewSnap_, &QPushButton::clicked, this, &MainWindow::onBinaryPreviewSnap);
+    connect(cbBinaryPreviewContourMode_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ updateBinaryPreviewPopupFrame(); });
+    connect(cbBinaryPreviewFitMethod_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ updateBinaryPreviewPopupFrame(); });
+    connect(cbBinaryPreviewMorphOp_, QOverload<int>::of(&QComboBox::activated), this, [this](int){
+      if (!cbBinaryPreviewMorphOp_) return;
+      const QString op = cbBinaryPreviewMorphOp_->currentText();
+      if (op.isEmpty()) return;
+      binary_ops_pipeline_.push_back(op);
+      QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o;
+      if (lblBinaryOps_) lblBinaryOps_->setText(binary_ops_pipeline_.empty() ? "Pipeline: (none)" : QString("Pipeline: %1").arg(ops.join(" -> ")));
+      if (lblBinaryPreviewMorphOps_) lblBinaryPreviewMorphOps_->setText(binary_ops_pipeline_.empty() ? "Pipeline: (none)" : QString("Pipeline: %1").arg(ops.join(" -> ")));
+      onObjectThresholdParamsChanged();
+      updateBinaryPreviewPopupFrame();
+    });
+    connect(btnBinaryPreviewMorphUndo_, &QPushButton::clicked, this, [this](){
+      if (!binary_ops_pipeline_.empty()) binary_ops_pipeline_.pop_back();
+      QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o;
+      if (lblBinaryOps_) lblBinaryOps_->setText(binary_ops_pipeline_.empty() ? "Pipeline: (none)" : QString("Pipeline: %1").arg(ops.join(" -> ")));
+      if (lblBinaryPreviewMorphOps_) lblBinaryPreviewMorphOps_->setText(binary_ops_pipeline_.empty() ? "Pipeline: (none)" : QString("Pipeline: %1").arg(ops.join(" -> ")));
+      onObjectThresholdParamsChanged();
+      updateBinaryPreviewPopupFrame();
+    });
+  }
+  QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o;
+  if (lblBinaryPreviewMorphOps_) lblBinaryPreviewMorphOps_->setText(binary_ops_pipeline_.empty() ? "Pipeline: (none)" : QString("Pipeline: %1").arg(ops.join(" -> ")));
+  binary_preview_zoom_ = 1.0;
+  binary_preview_center_ = QPointF(0.5, 0.5);
+  if (btnBinaryPreviewPlay_) { btnBinaryPreviewPlay_->setChecked(false); btnBinaryPreviewPlay_->setText("Play"); }
+  binary_preview_play_timer_.stop();
+  binaryPreviewDialog_->showMaximized();
+  binaryPreviewDialog_->raise();
+  binaryPreviewDialog_->activateWindow();
+  updateBinaryPreviewPopupFrame();
+}
+
+void MainWindow::onBinaryPreviewPrevFrame() {
+  stepAllVideos(-1);
+  updateBinaryPreviewPopupFrame();
+}
+
+void MainWindow::onBinaryPreviewNextFrame() {
+  stepAllVideos(1);
+  updateBinaryPreviewPopupFrame();
+}
+
+void MainWindow::onBinaryPreviewSnap() {
+  if (binary_preview_mask_img_.isNull()) return;
+  const QString def = QString("binary_preview_%1.bmp").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+  const QString path = QFileDialog::getSaveFileName(this, "Save Binary Preview", def, "Bitmap (*.bmp)");
+  if (path.isEmpty()) return;
+  if (!binary_preview_mask_img_.save(path, "BMP")) {
+    QMessageBox::warning(this, "Save Binary", "Failed to save binary snapshot.");
+    return;
+  }
+  openSavedDirectoryForFile(path);
+}
+
+void MainWindow::updateBinaryPreviewPopupFrame() {
+  if (!lblBinaryPreviewOrig_ || !lblBinaryPreviewPopup_) return;
+  std::vector<cv::Mat> frames;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    frames = last_frames_;
+  }
+  for (const auto& f0 : frames) {
+    if (f0.empty()) continue;
+    cv::Mat pre = applyPreprocess(f0);
+    int autoT = spObjectThresh_ ? spObjectThresh_->value() : 128;
+    cv::Mat bin = makeObjectBinaryPreview(pre, &autoT);
+    if (bin.empty()) continue;
+    cv::Mat orig = pre.clone();
+
+    const QString fitMethod = cbBinaryPreviewFitMethod_ ? cbBinaryPreviewFitMethod_->currentText() : QString("HullRepairEllipseFit");
+    cv::RotatedRect fitted = fitEllipseByMethod(bin, fitMethod);
+    if (fitted.size.width > 0 && fitted.size.height > 0) {
+      cv::ellipse(orig, fitted, cv::Scalar(255, 170, 0), 2, cv::LINE_AA);
+      cv::putText(orig, fitMethod.toStdString(), fitted.center + cv::Point2f(6.f, -6.f),
+                  cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 170, 0), 2, cv::LINE_AA);
+    }
+
+    binary_preview_orig_img_ = matToQImage(orig);
+    binary_preview_mask_img_ = matToQImage(bin);
+    refreshBinaryPreviewPopupPixmaps();
+    return;
+  }
+  lblBinaryPreviewOrig_->setText("No source frame");
+  lblBinaryPreviewPopup_->setText("No binary preview");
+}
+
+void MainWindow::refreshBinaryPreviewPopupPixmaps() {
+  if (!lblBinaryPreviewOrig_ || !lblBinaryPreviewPopup_) return;
+  auto applyView = [&](QLabel* lab, const QImage& img){
+    if (!lab || img.isNull()) return;
+    const int iw = img.width(), ih = img.height();
+    if (iw <= 0 || ih <= 0) return;
+    const double z = std::max(1.0, binary_preview_zoom_);
+    const int cw = std::max(1, (int)std::round(iw / z));
+    const int ch = std::max(1, (int)std::round(ih / z));
+    int cx = (int)std::round(std::clamp(binary_preview_center_.x(), 0.0, 1.0) * (iw - 1));
+    int cy = (int)std::round(std::clamp(binary_preview_center_.y(), 0.0, 1.0) * (ih - 1));
+    QRect roi(cx - cw/2, cy - ch/2, cw, ch);
+    roi = roi.intersected(QRect(0, 0, iw, ih));
+    if (roi.width() <= 0 || roi.height() <= 0) roi = QRect(0, 0, iw, ih);
+    QImage cropped = img.copy(roi);
+    lab->setPixmap(QPixmap::fromImage(cropped).scaled(lab->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+  };
+  applyView(lblBinaryPreviewOrig_, binary_preview_orig_img_);
+  applyView(lblBinaryPreviewPopup_, binary_preview_mask_img_);
+}
+
+void MainWindow::refreshVisualizationImagePixmap() {
+  if (!leftVisImage_ || visual_image_base_.isNull()) return;
+  const int iw = visual_image_base_.width();
+  const int ih = visual_image_base_.height();
+  if (iw <= 0 || ih <= 0) return;
+
+  auto gatherShowIds = [this]() {
+    std::set<int> ids;
+    for (const auto& t : target_meas_rows_) ids.insert(t.id);
+    std::set<int> show = ids;
+    if (cbTargetFilter_) {
+      if (auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model())) {
+        show.clear();
+        for (int i=0;i<model->rowCount();++i) {
+          auto* it = model->item(i);
+          if (!it) continue;
+          const int id = it->data(Qt::UserRole).toInt();
+          if (id >= 0 && it->checkState() == Qt::Checked) show.insert(id);
+        }
+      }
+    }
+    return show;
+  };
+
+  if (visual_image_auto_mode_) {
+    const int frameIdx = std::max(0, (int)play_frame_);
+    std::set<int> showIds = gatherShowIds();
+    cv::Rect box;
+    bool has = false;
+    if (frameIdx < (int)tracked_contours_by_frame_.size()) {
+      for (const auto& tc : tracked_contours_by_frame_[frameIdx]) {
+        if (!showIds.empty() && !showIds.count(tc.id)) continue;
+        cv::Rect r = cv::boundingRect(tc.contour);
+        box = has ? (box | r) : r;
+        has = true;
+      }
+    }
+    if (has) {
+      const double cx = (box.x + box.width * 0.5) / std::max(1, iw);
+      const double cy = (box.y + box.height * 0.5) / std::max(1, ih);
+      visual_image_center_ = QPointF(std::clamp(cx, 0.0, 1.0), std::clamp(cy, 0.0, 1.0));
+      const double zx = (box.width > 0) ? ((double)iw / std::max(1, box.width)) : 1.0;
+      const double zy = (box.height > 0) ? ((double)ih / std::max(1, box.height)) : 1.0;
+      visual_image_zoom_ = std::max(1.0, std::min(12.0, std::min(zx, zy) * 0.9));
+    } else {
+      visual_image_center_ = QPointF(0.5, 0.5);
+      visual_image_zoom_ = 1.0;
+    }
+  }
+
+  const double z = std::max(1.0, visual_image_zoom_);
+  const int cw = std::max(1, (int)std::round(iw / z));
+  const int ch = std::max(1, (int)std::round(ih / z));
+  int cx = (int)std::round(std::clamp(visual_image_center_.x(), 0.0, 1.0) * (iw - 1));
+  int cy = (int)std::round(std::clamp(visual_image_center_.y(), 0.0, 1.0) * (ih - 1));
+  QRect roi(cx - cw/2, cy - ch/2, cw, ch);
+  roi = roi.intersected(QRect(0, 0, iw, ih));
+  if (roi.width() <= 0 || roi.height() <= 0) roi = QRect(0, 0, iw, ih);
+  QImage cropped = visual_image_base_.copy(roi);
+  leftVisImage_->setPixmap(QPixmap::fromImage(cropped).scaled(leftVisImage_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+  if (!event) return QMainWindow::eventFilter(watched, event);
+
+  auto handleWheel = [&](QLabel* lab, double& zoom, QPointF& center, const QWheelEvent* we, auto refreshFn) {
+    if (!lab || !we) return;
+    const QPointF pos = we->position();
+    const double nx = (lab->width() > 1) ? std::clamp(pos.x() / (double)lab->width(), 0.0, 1.0) : 0.5;
+    const double ny = (lab->height() > 1) ? std::clamp(pos.y() / (double)lab->height(), 0.0, 1.0) : 0.5;
+    const double oldZoom = std::max(1.0, zoom);
+    const double step = (we->angleDelta().y() > 0) ? 1.12 : 0.90;
+    zoom = std::max(1.0, std::min(12.0, zoom * step));
+    const double newZoom = std::max(1.0, zoom);
+    if (std::abs(newZoom - oldZoom) > 1e-9) {
+      const double s = oldZoom / newZoom;
+      center.setX(std::clamp(center.x() + (nx - 0.5) * (1.0 - s), 0.0, 1.0));
+      center.setY(std::clamp(center.y() + (ny - 0.5) * (1.0 - s), 0.0, 1.0));
+    }
+    refreshFn();
+  };
+
+  if (watched == lblBinaryPreviewOrig_ || watched == lblBinaryPreviewPopup_) {
+    if (event->type() == QEvent::Wheel) {
+      handleWheel(qobject_cast<QLabel*>(watched), binary_preview_zoom_, binary_preview_center_, static_cast<QWheelEvent*>(event), [this](){ refreshBinaryPreviewPopupPixmaps(); });
+      return true;
+    }
+    if (event->type() == QEvent::MouseButtonPress) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      if (me->button() == Qt::LeftButton) { binary_preview_dragging_ = true; binary_preview_last_pos_ = me->pos(); return true; }
+    }
+    if (event->type() == QEvent::MouseMove && binary_preview_dragging_) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      const QPoint d = me->pos() - binary_preview_last_pos_;
+      binary_preview_last_pos_ = me->pos();
+      binary_preview_center_.setX(std::clamp(binary_preview_center_.x() - d.x() / std::max(1.0, (double)qobject_cast<QLabel*>(watched)->width()) / std::max(1.0, binary_preview_zoom_), 0.0, 1.0));
+      binary_preview_center_.setY(std::clamp(binary_preview_center_.y() - d.y() / std::max(1.0, (double)qobject_cast<QLabel*>(watched)->height()) / std::max(1.0, binary_preview_zoom_), 0.0, 1.0));
+      refreshBinaryPreviewPopupPixmaps();
+      return true;
+    }
+    if (event->type() == QEvent::MouseButtonRelease) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      if (me->button() == Qt::LeftButton) { binary_preview_dragging_ = false; return true; }
+    }
+  }
+
+  if (watched == leftVisImage_) {
+    if (event->type() == QEvent::Wheel) {
+      visual_image_auto_mode_ = false;
+      handleWheel(leftVisImage_, visual_image_zoom_, visual_image_center_, static_cast<QWheelEvent*>(event), [this](){ refreshVisualizationImagePixmap(); });
+      return true;
+    }
+    if (event->type() == QEvent::MouseButtonPress) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      if (me->button() == Qt::LeftButton) { visual_image_dragging_ = true; visual_image_last_pos_ = me->pos(); visual_image_auto_mode_ = false; return true; }
+    }
+    if (event->type() == QEvent::MouseMove && visual_image_dragging_) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      const QPoint d = me->pos() - visual_image_last_pos_;
+      visual_image_last_pos_ = me->pos();
+      visual_image_center_.setX(std::clamp(visual_image_center_.x() - d.x() / std::max(1.0, (double)leftVisImage_->width()) / std::max(1.0, visual_image_zoom_), 0.0, 1.0));
+      visual_image_center_.setY(std::clamp(visual_image_center_.y() - d.y() / std::max(1.0, (double)leftVisImage_->height()) / std::max(1.0, visual_image_zoom_), 0.0, 1.0));
+      refreshVisualizationImagePixmap();
+      return true;
+    }
+    if (event->type() == QEvent::MouseButtonRelease) {
+      auto* me = static_cast<QMouseEvent*>(event);
+      if (me->button() == Qt::LeftButton) { visual_image_dragging_ = false; return true; }
+    }
+  }
+  return QMainWindow::eventFilter(watched, event);
+}
+
+cv::Mat MainWindow::makeObjectBinaryMask(const cv::Mat& src, int* outGlobalThreshold) const {
+  if (src.empty()) return cv::Mat();
+  cv::Mat gray;
+  if (src.channels()==3) cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
+  else if (src.channels()==4) cv::cvtColor(src, gray, cv::COLOR_BGRA2GRAY);
+  else gray = src.clone();
+
+  auto clampT = [](int t){ return std::max(0, std::min(255, t)); };
+  auto hist256 = [&](const cv::Mat& g) {
+    std::vector<double> h(256, 0.0);
+    for (int y=0; y<g.rows; ++y) {
+      const uchar* r = g.ptr<uchar>(y);
+      for (int x=0; x<g.cols; ++x) h[r[x]] += 1.0;
+    }
+    return h;
+  };
+  auto sumHist = [](const std::vector<double>& h){ double s=0; for(double v:h) s+=v; return s; };
+
+  cv::Mat bin;
+  const bool local = cbThreshType_ && cbThreshType_->currentIndex() == 1;
+  if (!local) {
+    int thr = spObjectThresh_ ? spObjectThresh_->value() : 128;
+    QString gm = cbGlobalMethod_ ? cbGlobalMethod_->currentText() : QString("Otsu");
+
+    if (gm == "Otsu") {
+      thr = (int)std::round(cv::threshold(gray, bin, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU));
+    } else if (gm == "Triangle") {
+      thr = (int)std::round(cv::threshold(gray, bin, 0, 255, cv::THRESH_BINARY | cv::THRESH_TRIANGLE));
+    } else if (gm == "Mean" || gm == "Percentile") {
+      cv::Scalar m = cv::mean(gray);
+      thr = (gm == "Mean") ? (int)std::round(m[0]) : (int)std::round(0.5 * 255.0);
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
+    } else if (gm == "IsoData" || gm == "Default") {
+      cv::Scalar m = cv::mean(gray);
+      double t = m[0], prev = -1;
+      for (int i=0;i<64 && std::abs(t-prev)>0.5;i++) {
+        prev = t;
+        cv::Mat a,b;
+        cv::threshold(gray, a, t, 255, cv::THRESH_BINARY_INV);
+        cv::threshold(gray, b, t, 255, cv::THRESH_BINARY);
+        double m1 = cv::mean(gray, a)[0];
+        double m2 = cv::mean(gray, b)[0];
+        t = (m1 + m2) * 0.5;
+      }
+      thr = clampT((int)std::round(t));
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
+    } else if (gm == "Li") {
+      cv::Scalar m = cv::mean(gray);
+      double t = std::max(1.0, m[0]);
+      for (int i=0;i<64;i++) {
+        cv::Mat a,b;
+        cv::threshold(gray, a, t, 255, cv::THRESH_BINARY_INV);
+        cv::threshold(gray, b, t, 255, cv::THRESH_BINARY);
+        double m1 = std::max(1e-6, cv::mean(gray, a)[0]);
+        double m2 = std::max(1e-6, cv::mean(gray, b)[0]);
+        double nt = (m1 - m2) / (std::log(m1) - std::log(m2));
+        if (!std::isfinite(nt) || std::abs(nt - t) < 0.5) break;
+        t = nt;
+      }
+      thr = clampT((int)std::round(t));
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
+    } else if (gm == "Yen" || gm == "MaxEntropy" || gm == "RenyiEntropy" || gm == "Shanbhag" || gm == "Huang" || gm == "Intermodes" || gm == "MinError(I)" || gm == "Minimum" || gm == "Moments") {
+      // Entropy-family and legacy methods: approximation via entropy-max threshold.
+      auto h = hist256(gray);
+      double total = sumHist(h);
+      if (total <= 0) total = 1;
+      for (double& v : h) v /= total;
+      std::vector<double> P1(256,0), P2(256,0), S1(256,0), S2(256,0);
+      P1[0]=h[0]; S1[0]=(h[0]>0? -h[0]*std::log(h[0]):0);
+      for(int i=1;i<256;i++){ P1[i]=P1[i-1]+h[i]; S1[i]=S1[i-1]+(h[i]>0?-h[i]*std::log(h[i]):0); }
+      P2[255]=h[255]; S2[255]=(h[255]>0? -h[255]*std::log(h[255]):0);
+      for(int i=254;i>=0;i--){ P2[i]=P2[i+1]+h[i]; S2[i]=S2[i+1]+(h[i]>0?-h[i]*std::log(h[i]):0); }
+      double best=-1e9; int bestT=thr;
+      for(int t=1;t<255;t++){
+        if (P1[t] <= 1e-12 || P2[t+1] <= 1e-12) continue;
+        double H = std::log(P1[t]) + std::log(P2[t+1]) + S1[t]/P1[t] + S2[t+1]/P2[t+1];
+        if (H>best){ best=H; bestT=t; }
+      }
+      thr = bestT;
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
+    } else {
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
+    }
+
+    const int autoThr = thr;
+    if (object_thresh_manual_ && spObjectThresh_) {
+      thr = spObjectThresh_->value();
+      cv::threshold(gray, bin, thr, 255, cv::THRESH_BINARY);
+    }
+    if (outGlobalThreshold) *outGlobalThreshold = autoThr;
+  } else {
+    int block = spLocalBlockSize_ ? spLocalBlockSize_->value() : 31;
+    if (block % 2 == 0) block += 1;
+    block = std::max(3, block);
+    double c = spLocalK_ ? spLocalK_->value() : 5.0;
+    QString lm = cbLocalMethod_ ? cbLocalMethod_->currentText() : QString("Mean");
+
+    if (lm == "Gaussian") {
+      cv::adaptiveThreshold(gray, bin, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY, block, c);
+    } else if (lm == "Mean") {
+      cv::adaptiveThreshold(gray, bin, 255, cv::ADAPTIVE_THRESH_MEAN_C, cv::THRESH_BINARY, block, c);
+    } else if (lm == "Median") {
+      cv::Mat med;
+      cv::medianBlur(gray, med, std::max(3, block|1));
+      cv::subtract(med, cv::Scalar(c), med);
+      cv::compare(gray, med, bin, cv::CMP_GT);
+    } else if (lm == "MidGrey") {
+      cv::Mat mn,mx;
+      cv::erode(gray, mn, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(block, block)));
+      cv::dilate(gray, mx, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(block, block)));
+      cv::Mat mid; cv::addWeighted(mn,0.5,mx,0.5,0,mid);
+      cv::subtract(mid, cv::Scalar(c), mid);
+      cv::compare(gray, mid, bin, cv::CMP_GT);
+    } else if (lm == "Bernsen" || lm == "Contrast") {
+      cv::Mat mn,mx;
+      cv::erode(gray, mn, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(block, block)));
+      cv::dilate(gray, mx, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(block, block)));
+      cv::Mat contrast; cv::subtract(mx,mn,contrast);
+      cv::Mat mid; cv::addWeighted(mn,0.5,mx,0.5,0,mid);
+      cv::compare(gray, mid, bin, cv::CMP_GT);
+      if (lm == "Contrast") {
+        cv::Mat low; cv::threshold(contrast, low, c, 255, cv::THRESH_BINARY_INV);
+        bin.setTo(0, low);
+      }
+    } else {
+      // Niblack / Sauvola / Phansalkar / Otsu(local) fallback to Mean-style local thresholding.
+      cv::adaptiveThreshold(gray, bin, 255, cv::ADAPTIVE_THRESH_MEAN_C, cv::THRESH_BINARY, block, c);
+    }
+
+    if (outGlobalThreshold) *outGlobalThreshold = spObjectThresh_ ? spObjectThresh_->value() : 128;
+  }
+
+  if (chkInvertBinary_ && chkInvertBinary_->isChecked()) cv::bitwise_not(bin, bin);
+
+  if (!regions_.empty() && !bin.empty()) {
+    cv::Mat regionAllow(bin.size(), CV_8UC1, cv::Scalar(255));
+    bool hasDetect = false;
+    for (const auto& r : regions_) {
+      if (r.poly.size() < 3) continue;
+      std::vector<cv::Point> pts;
+      pts.reserve(r.poly.size());
+      for (const QPointF& q : r.poly) pts.emplace_back((int)std::round(q.x()), (int)std::round(q.y()));
+      std::vector<std::vector<cv::Point>> arr{pts};
+      if (r.include) {
+        if (!hasDetect) { regionAllow.setTo(0); hasDetect = true; }
+        cv::fillPoly(regionAllow, arr, cv::Scalar(255));
+      }
+    }
+    cv::bitwise_and(bin, regionAllow, bin);
+    for (const auto& r : regions_) {
+      if (r.include || r.poly.size() < 3) continue;
+      std::vector<cv::Point> pts;
+      pts.reserve(r.poly.size());
+      for (const QPointF& q : r.poly) pts.emplace_back((int)std::round(q.x()), (int)std::round(q.y()));
+      std::vector<std::vector<cv::Point>> arr{pts};
+      cv::fillPoly(bin, arr, cv::Scalar(0));
+    }
+  }
+
+  return applyBinaryProcessOps(bin);
+}
+
+cv::Mat MainWindow::applyBinaryProcessOps(const cv::Mat& binMask) const {
+  if (binMask.empty()) return cv::Mat();
+  cv::Mat out = binMask.clone();
+  auto fillHoles = [](cv::Mat& m) {
+    cv::Mat flood = m.clone();
+    cv::floodFill(flood, cv::Point(0,0), cv::Scalar(255));
+    cv::bitwise_not(flood, flood);
+    cv::bitwise_or(m, flood, m);
+  };
+  auto skeletonize = [](const cv::Mat& src){
+    cv::Mat skel(src.size(), CV_8UC1, cv::Scalar(0));
+    cv::Mat img = src.clone();
+    cv::Mat temp, eroded;
+    cv::Mat element = cv::getStructuringElement(cv::MORPH_CROSS, cv::Size(3,3));
+    bool done;
+    do {
+      cv::erode(img, eroded, element);
+      cv::dilate(eroded, temp, element);
+      cv::subtract(img, temp, temp);
+      cv::bitwise_or(skel, temp, skel);
+      eroded.copyTo(img);
+      done = (cv::countNonZero(img) == 0);
+    } while(!done);
+    return skel;
+  };
+  auto clearBorder = [](cv::Mat& m) {
+    std::vector<std::vector<cv::Point>> cs;
+    cv::findContours(m.clone(), cs, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    for (const auto& c : cs) {
+      cv::Rect r = cv::boundingRect(c);
+      if (r.x <= 0 || r.y <= 0 || r.br().x >= m.cols-1 || r.br().y >= m.rows-1) {
+        cv::drawContours(m, std::vector<std::vector<cv::Point>>{c}, -1, cv::Scalar(0), cv::FILLED);
+      }
+    }
+  };
+  for (const auto& op : binary_ops_pipeline_) {
+    if (op == "Erode") cv::erode(out, out, cv::Mat(), cv::Point(-1,-1), 1);
+    else if (op == "Dilate") cv::dilate(out, out, cv::Mat(), cv::Point(-1,-1), 1);
+    else if (op == "Open") cv::morphologyEx(out, out, cv::MORPH_OPEN, cv::Mat());
+    else if (op == "Close") cv::morphologyEx(out, out, cv::MORPH_CLOSE, cv::Mat());
+    else if (op == "Fill Holes") fillHoles(out);
+    else if (op == "Skeletonize") out = skeletonize(out);
+    else if (op == "Outline") { cv::Mat e; cv::erode(out, e, cv::Mat()); cv::subtract(out, e, out); }
+    else if (op == "Clear Border") clearBorder(out);
+    else if (op == "Watershed") {
+      cv::Mat dist; cv::distanceTransform(out, dist, cv::DIST_L2, 5);
+      cv::normalize(dist, dist, 0, 1.0, cv::NORM_MINMAX);
+      cv::Mat peaks; cv::threshold(dist, peaks, 0.4, 1.0, cv::THRESH_BINARY);
+      peaks.convertTo(peaks, CV_8U, 255);
+      cv::Mat markers; cv::connectedComponents(peaks, markers);
+      cv::Mat color; cv::cvtColor(out, color, cv::COLOR_GRAY2BGR);
+      cv::watershed(color, markers);
+      out.setTo(0);
+      out.setTo(255, markers > 1);
+    }
+  }
+  return out;
+}
+
+cv::Mat MainWindow::makeObjectBinaryPreview(const cv::Mat& src, int* outGlobalThreshold) const {
+  cv::Mat mask = makeObjectBinaryMask(src, outGlobalThreshold);
+  if (mask.empty()) return cv::Mat();
+  cv::Mat bgr; cv::cvtColor(mask, bgr, cv::COLOR_GRAY2BGR);
+  return bgr;
+}
+
+std::vector<std::vector<cv::Point>> MainWindow::detectBinaryContours(const cv::Mat& src, int* outGlobalThreshold) const {
+  cv::Mat mask = makeObjectBinaryMask(src, outGlobalThreshold);
+  std::vector<std::vector<cv::Point>> contours;
+  int chain = cv::CHAIN_APPROX_SIMPLE;
+  if (cbBinaryPreviewContourMode_) {
+    const QString m = cbBinaryPreviewContourMode_->currentText();
+    if (m == "ContourNone") chain = cv::CHAIN_APPROX_NONE;
+  }
+  if (!mask.empty()) cv::findContours(mask, contours, cv::RETR_EXTERNAL, chain);
+  return contours;
+}
+
+void MainWindow::onSelectBinaryOp() {
+  if (!cbBinaryOp_) return;
+  const QString op = cbBinaryOp_->currentText();
+  if (op.isEmpty()) return;
+  binary_ops_pipeline_.push_back(op);
+  if (lblBinaryOps_) {
+    QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o;
+    lblBinaryOps_->setText(QString("Pipeline: %1").arg(ops.join(" -> ")));
+  }
+  onObjectThresholdParamsChanged();
+}
+
+void MainWindow::onUndoBinaryOp() {
+  if (!binary_ops_pipeline_.empty()) binary_ops_pipeline_.pop_back();
+  if (lblBinaryOps_) {
+    if (binary_ops_pipeline_.empty()) lblBinaryOps_->setText("Pipeline: (none)");
+    else { QStringList ops; for (const auto& o : binary_ops_pipeline_) ops << o; lblBinaryOps_->setText(QString("Pipeline: %1").arg(ops.join(" -> "))); }
+  }
+  onObjectThresholdParamsChanged();
+}
+
+void MainWindow::onAnalyzeParticles() {
+  updatePlaybackParams();
+  int totalFrames = progressSlider_ ? (progressSlider_->maximum() + 1) : 0;
+  if (totalFrames <= 0) totalFrames = (int)play_end_frame_;
+  if (totalFrames <= 0) {
+    QMessageBox::information(this, "Analyze", "No frames available.");
+    return;
+  }
+
+  analyzed_contours_.clear();
+  analyzed_contours_by_frame_.assign(totalFrames, {});
+  analyzed_measures_by_frame_.assign(totalFrames, {});
+  tracked_contours_by_frame_.clear();
+  target_meas_rows_.clear();
+  meas_rows_.clear();
+  confirmed_hist_rules_.clear();
+
+  int srcIdx = -1;
+  if (!active_view_source_indices_.empty()) srcIdx = active_view_source_indices_.front();
+  else {
+    for (int i=0;i<(int)sources_.size();++i) { if (!sources_[i].is_cam) { srcIdx = i; break; } }
+  }
+  if (srcIdx < 0 || srcIdx >= (int)sources_.size()) {
+    QMessageBox::information(this, "Analyze", "No valid source for analysis.");
+    return;
+  }
+
+  InputSource& src = sources_[srcIdx];
+  const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
+
+  suppress_histogram_updates_ = true;
+  QProgressDialog progress("Analyzing all frames...", "Cancel", 0, totalFrames, this);
+  progress.setWindowModality(Qt::NonModal);
+  progress.show();
+  progress.setMinimumDuration(0);
+  progress.setAutoClose(false);
+  progress.setAutoReset(false);
+
+  int processedFrames = 0;
+  bool canceled = false;
+  for (int i=0;i<totalFrames;++i) {
+    progress.setValue(i);
+    progress.setLabelText(QString("Analyze Particles... %1/%2").arg(i+1).arg(totalFrames));
+    qApp->processEvents();
+    if (progress.wasCanceled()) { canceled = true; break; }
+
+    cv::Mat f;
+    if (!src.is_image_seq) {
+      if (!src.cap.isOpened()) continue;
+      src.cap.set(cv::CAP_PROP_POS_FRAMES, i);
+      if (!src.cap.read(f) || f.empty()) continue;
+    } else {
+      if (i < 0 || i >= (int)src.seq_files.size()) continue;
+      f = imreadUnicodePath(src.seq_files[(size_t)i], cv::IMREAD_COLOR);
+    }
+
+    if (f.empty()) continue;
+    f = applyPreprocess(f);
+    auto contours = detectBinaryContours(f);
+    const QString fitMethod = cbBinaryPreviewFitMethod_ ? cbBinaryPreviewFitMethod_->currentText() : QString("HullRepairEllipseFit");
+    std::vector<std::vector<cv::Point>> fittedContours;
+
+    for (const auto& c : contours) {
+      if (c.size() < 5) continue;
+      cv::Mat singleMask(f.rows, f.cols, CV_8UC1, cv::Scalar(0));
+      cv::drawContours(singleMask, std::vector<std::vector<cv::Point>>{c}, -1, cv::Scalar(255), cv::FILLED);
+      cv::RotatedRect fitted = fitEllipseByMethod(singleMask, fitMethod);
+      std::vector<cv::Point> fitContour = contourFromEllipse(fitted);
+      if (fitContour.empty()) continue;
+
+      MeasureRow row;
+      row.key = i;
+      row.area = std::abs(cv::contourArea(fitContour)) * scale * scale;
+      row.perim = cv::arcLength(fitContour, true) * scale;
+      cv::RotatedRect rr = cv::minAreaRect(fitContour);
+      row.major = std::max(rr.size.width, rr.size.height) * scale;
+      row.minor = std::min(rr.size.width, rr.size.height) * scale;
+      row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
+      analyzed_measures_by_frame_[i].push_back(AnalyzedContourMeasure{fitContour, row, true});
+      target_meas_rows_.push_back(TargetMeasureRow{-1, row});
+      fittedContours.push_back(fitContour);
+    }
+    analyzed_contours_by_frame_[i] = std::move(fittedContours);
+    processedFrames = i + 1;
+  }
+
+  progress.setValue(processedFrames);
+  suppress_histogram_updates_ = false;
+  if ((int)play_frame_ >= 0 && (int)play_frame_ < (int)analyzed_contours_by_frame_.size()) {
+    analyzed_contours_ = analyzed_contours_by_frame_[(int)play_frame_];
+  }
+
+  measurements_frozen_ = true;
+  stepDone_[2] = !target_meas_rows_.empty();
+  updateStepAvailability();
+  updateHistogramPlot();
+  updateLeftVisualDashboard();
+  onTick();
+  updateDetectParticlePanel();
+  logLine(QString("Analyze Particles: processed %1/%2 frames%3.").arg(processedFrames).arg(totalFrames).arg(canceled ? " (canceled)" : ""));
+}
+
+void MainWindow::onToggleTrackBinary() {
+  track_binary_enabled_ = btnTrackBinary_ && btnTrackBinary_->isChecked();
+  tracked_centroids_.clear();
+  tracked_contours_.clear();
+  next_track_id_ = 1;
+  if (!track_binary_enabled_) {
+    measurements_frozen_ = false;
+    tracked_contours_by_frame_.clear();
+    updateStepAvailability();
+    logLine("Binary contour tracking disabled.");
+    onTick();
+    return;
+  }
+
+  if (analyzed_contours_by_frame_.empty()) onAnalyzeParticles();
+  if (analyzed_contours_by_frame_.empty()) return;
+
+  // Hungarian assignment based on centroid distance for inter-frame association.
+  std::vector<TargetMeasureRow> newTrackedRows;
+  std::vector<std::vector<TrackedContour>> newTrackedContours(analyzed_contours_by_frame_.size());
+  std::unordered_map<int, cv::Point2f> id_prev;
+  std::unordered_map<int, double> id_prev_speed;
+  int nextId = 1;
+  const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
+  const double maxDist = 60.0;
+
+  auto hungarian = [](const std::vector<std::vector<double>>& a)->std::vector<int> {
+    int n = (int)a.size();
+    if (n == 0) return {};
+    int m = (int)a[0].size();
+    int N = std::max(n, m);
+    std::vector<std::vector<double>> cost(N, std::vector<double>(N, 1e6));
+    for (int i=0;i<n;++i) for (int j=0;j<m;++j) cost[i][j]=a[i][j];
+    std::vector<double> u(N+1), v(N+1);
+    std::vector<int> p(N+1), way(N+1);
+    for (int i=1;i<=N;++i) {
+      p[0] = i;
+      int j0 = 0;
+      std::vector<double> minv(N+1, 1e18);
+      std::vector<char> used(N+1, false);
+      do {
+        used[j0] = true;
+        int i0 = p[j0], j1 = 0;
+        double delta = 1e18;
+        for (int j=1;j<=N;++j) if (!used[j]) {
+          double cur = cost[i0-1][j-1]-u[i0]-v[j];
+          if (cur < minv[j]) { minv[j] = cur; way[j] = j0; }
+          if (minv[j] < delta) { delta = minv[j]; j1 = j; }
+        }
+        for (int j=0;j<=N;++j) {
+          if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
+          else minv[j] -= delta;
+        }
+        j0 = j1;
+      } while (p[j0] != 0);
+      do {
+        int j1 = way[j0];
+        p[j0] = p[j1];
+        j0 = j1;
+      } while (j0);
+    }
+    std::vector<int> ans(n, -1);
+    for (int j=1;j<=N;++j) if (p[j] && p[j] <= n && j <= m) ans[p[j]-1] = j-1;
+    return ans;
+  };
+
+  for (int i=0;i<(int)analyzed_measures_by_frame_.size();++i) {
+    std::vector<cv::Point2f> currCtrs;
+    std::vector<std::vector<cv::Point>> validContours;
+    std::vector<MeasureRow> preRows;
+    for (const auto& am : analyzed_measures_by_frame_[i]) {
+      if (!am.enabled) continue;
+      const auto& c = am.contour;
+      if (c.empty()) continue;
+      cv::Moments m = cv::moments(c);
+      if (std::abs(m.m00) < 1e-9) continue;
+      MeasureRow mr = am.m;
+      mr.key = i;
+      currCtrs.push_back(cv::Point2f((float)(m.m10/m.m00), (float)(m.m01/m.m00)));
+      validContours.push_back(c);
+      preRows.push_back(mr);
+    }
+
+    std::vector<int> prevIds;
+    std::vector<cv::Point2f> prevCtrs;
+    prevIds.reserve(id_prev.size()); prevCtrs.reserve(id_prev.size());
+    for (const auto& kv : id_prev) { prevIds.push_back(kv.first); prevCtrs.push_back(kv.second); }
+
+    std::vector<int> assignedCurr(currCtrs.size(), -1);
+    if (!prevCtrs.empty() && !currCtrs.empty()) {
+      std::vector<std::vector<double>> cost(prevCtrs.size(), std::vector<double>(currCtrs.size(), 1e6));
+      for (int r=0;r<(int)prevCtrs.size();++r) {
+        for (int c=0;c<(int)currCtrs.size();++c) {
+          cost[r][c] = cv::norm(prevCtrs[r] - currCtrs[c]);
+        }
+      }
+      auto match = hungarian(cost);
+      for (int r=0;r<(int)match.size();++r) {
+        int cidx = match[r];
+        if (cidx >= 0 && cidx < (int)currCtrs.size() && cost[r][cidx] <= maxDist) {
+          assignedCurr[cidx] = prevIds[r];
+        }
+      }
+    }
+
+    std::unordered_map<int, cv::Point2f> id_curr;
+    for (int c=0;c<(int)currCtrs.size();++c) {
+      int id = assignedCurr[c];
+      if (id < 0) id = nextId++;
+      id_curr[id] = currCtrs[c];
+      const auto& contour = validContours[c];
+      newTrackedContours[i].push_back(TrackedContour{id, contour, currCtrs[c]});
+
+      MeasureRow row = preRows[c];
+      if (id_prev.count(id)) {
+        row.disp = cv::norm(currCtrs[c] - id_prev[id]) * scale;
+        const double fps = std::max(1.0, play_fps_);
+        row.speed = row.disp * fps;
+        row.accel = (row.speed - id_prev_speed[id]) * fps;
+      }
+      id_prev_speed[id] = row.speed;
+      newTrackedRows.push_back(TargetMeasureRow{id, row});
+    }
+    id_prev = id_curr;
+  }
+
+  if (!newTrackedRows.empty()) {
+    // Apply tiered smoothing:
+    // 1st-order geometry metrics: median(window)
+    // 2nd-order speed: EMA(alpha_speed)
+    // 3rd-order acceleration: EMA(alpha_accel)
+    std::unordered_map<int, std::vector<size_t>> idToIdx;
+    for (size_t k=0;k<newTrackedRows.size();++k) idToIdx[newTrackedRows[k].id].push_back(k);
+    int medWindow = spSmoothMedianWindow_ ? spSmoothMedianWindow_->value() : 3;
+    if (medWindow < 3) medWindow = 3;
+    if ((medWindow % 2) == 0) medWindow += 1;
+    const int halfWin = medWindow / 2;
+    for (auto& kv : idToIdx) {
+      auto& idxs = kv.second;
+      if (idxs.empty()) continue;
+      auto medFilter = [&](auto getter, auto setter) {
+        if ((int)idxs.size() < medWindow) return;
+        std::vector<double> src(idxs.size()), out(idxs.size());
+        for (size_t t=0;t<idxs.size();++t) src[t] = getter(newTrackedRows[idxs[t]].m);
+        out = src;
+        for (size_t t=0;t<idxs.size();++t) {
+          const int l = std::max<int>(0, (int)t - halfWin);
+          const int r = std::min<int>((int)idxs.size() - 1, (int)t + halfWin);
+          std::vector<double> win;
+          win.reserve((size_t)(r - l + 1));
+          for (int j=l;j<=r;++j) win.push_back(src[(size_t)j]);
+          std::nth_element(win.begin(), win.begin() + (win.size()/2), win.end());
+          out[t] = win[win.size()/2];
+        }
+        for (size_t t=0;t<idxs.size();++t) setter(newTrackedRows[idxs[t]].m, out[t]);
+      };
+      medFilter([](const MeasureRow& r){ return r.disp; }, [](MeasureRow& r,double v){ r.disp=v; });
+      medFilter([](const MeasureRow& r){ return r.area; }, [](MeasureRow& r,double v){ r.area=v; });
+      medFilter([](const MeasureRow& r){ return r.perim; }, [](MeasureRow& r,double v){ r.perim=v; });
+      medFilter([](const MeasureRow& r){ return r.major; }, [](MeasureRow& r,double v){ r.major=v; });
+      medFilter([](const MeasureRow& r){ return r.minor; }, [](MeasureRow& r,double v){ r.minor=v; });
+      medFilter([](const MeasureRow& r){ return r.circ; }, [](MeasureRow& r,double v){ r.circ=v; });
+
+      const double alphaSpeed = spSmoothAlphaSpeed_ ? spSmoothAlphaSpeed_->value() : 0.35;
+      for (size_t t=1;t<idxs.size();++t) {
+        auto& cur = newTrackedRows[idxs[t]].m;
+        const auto& prev = newTrackedRows[idxs[t-1]].m;
+        cur.speed = alphaSpeed * cur.speed + (1.0 - alphaSpeed) * prev.speed;
+      }
+      const double alphaAccel = spSmoothAlphaAccel_ ? spSmoothAlphaAccel_->value() : 0.20;
+      for (size_t t=1;t<idxs.size();++t) {
+        auto& cur = newTrackedRows[idxs[t]].m;
+        const auto& prev = newTrackedRows[idxs[t-1]].m;
+        cur.accel = alphaAccel * cur.accel + (1.0 - alphaAccel) * prev.accel;
+      }
+    }
+
+    target_meas_rows_ = std::move(newTrackedRows);
+    tracked_contours_by_frame_ = std::move(newTrackedContours);
+    pending_visual_fit_ = true;
+  }
+
+  measurements_frozen_ = true;
+  stepDone_[2] = !target_meas_rows_.empty();
+  updateStepAvailability();
+  updateLeftVisualDashboard();
+  fitAllVisualPlots();
+  updateHistogramPlot();
+  onTick();
+  logLine("Track completed using Hungarian association on analyzed contours.");
+  QMessageBox::information(this, "Track", "Track completed.");
+}
+
+void MainWindow::fitAllVisualPlots() {
+  for (QCustomPlot* p : {leftDispPlot_, leftSpeedPlot_, leftAreaPlot_, leftPerimPlot_, leftCircPlot_}) {
+    if (!p) continue;
+    p->rescaleAxes(true);
+    p->replot();
+  }
+}
+
+void MainWindow::refreshRegionTable() {
+  if (!tblRegions_) return;
+  tblRegions_->setRowCount((int)regions_.size());
+  for (int i=0;i<(int)regions_.size();++i) {
+    const auto& r = regions_[i];
+    auto* typeItem = new QTableWidgetItem(r.include ? "Detect" : "Mask");
+    auto* pointsItem = new QTableWidgetItem(QString("%1 pts").arg(r.poly.size()));
+    typeItem->setTextAlignment(Qt::AlignCenter);
+    pointsItem->setTextAlignment(Qt::AlignCenter);
+    tblRegions_->setItem(i, 0, typeItem);
+    tblRegions_->setItem(i, 1, pointsItem);
+
+    auto* btnDel = new QToolButton(tblRegions_);
+    QSize btnIconSize(20, 20);
+    btnDel->setIcon(QIcon(":/icons/delete.png"));
+    btnDel->setIconSize(btnIconSize);
+    btnDel->setFixedSize(btnIconSize);
+    btnDel->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    btnDel->setStyleSheet("QToolButton { padding: 0px; border: none; }");
+    btnDel->setProperty("row", i);
+    connect(btnDel, &QToolButton::clicked, this, [this, btnDel]() {
+      int row = btnDel->property("row").toInt();
+      if (row < 0 || row >= (int)regions_.size()) return;
+      regions_.erase(regions_.begin() + row);
+      if (editing_region_index_ == row) editing_region_index_ = -1;
+      else if (editing_region_index_ > row) editing_region_index_--;
+      refreshRegionTable();
+      refreshRegionOverlays(tblRegions_ ? tblRegions_->currentRow() : -1, editing_region_index_);
+    });
+    auto* btnHost = new QWidget(tblRegions_);
+    auto* btnLay = new QHBoxLayout(btnHost);
+    btnLay->setContentsMargins(0, 0, 0, 0);
+    btnLay->addStretch();
+    btnLay->addWidget(btnDel, 0, Qt::AlignCenter);
+    btnLay->addStretch();
+    tblRegions_->setCellWidget(i, 2, btnHost);
+    tblRegions_->setRowHeight(i, 40);
+  }
+}
+
+void MainWindow::refreshRegionOverlays(int highlightedIndex, int editingIndex) {
+  std::vector<QPolygonF> polys; std::vector<bool> includes;
+  polys.reserve(regions_.size()); includes.reserve(regions_.size());
+  for (const auto& r : regions_) { polys.push_back(r.poly); includes.push_back(r.include); }
+  for (auto* sv : sourceViews_) {
+    if (!sv) continue;
+    sv->setRegionEditIndex(editingIndex);
+    sv->setRegionPolygons(polys, includes, highlightedIndex);
+  }
+}
+
+void MainWindow::onRegionTableSelectionChanged() {
+  if (!tblRegions_) return;
+  int r = tblRegions_->currentRow();
+  editing_region_index_ = r;
+  refreshRegionOverlays(r, editing_region_index_);
+}
+
+void MainWindow::onAddMaskRegion() {
+  drawing_region_type_ = 2;
+  editing_region_index_ = -1;
+  for (auto* v : sourceViews_) if (v) { v->setAnnotationsVisible(true); v->setToolMode(ImageViewer::PolygonTool); }
+  logLine("Draw mask polygon on left view, right click to finish.");
+}
+
+void MainWindow::onToggleMaskEditEnabled(bool on) {
+  if (btnAddMaskContour_) btnAddMaskContour_->setEnabled(on);
+  if (btnModifyMaskContour_) btnModifyMaskContour_->setEnabled(on);
+  if (btnDeleteMaskContour_) btnDeleteMaskContour_->setEnabled(on);
+  contour_mask_mode_ = ContourMaskNone;
+  contour_mask_add_path_.clear();
+  contour_mask_add_snap_points_.clear();
+  for (auto* v : sourceViews_) if (v) {
+    v->setPointClickCallback(on ? std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskPointClicked(p); })
+                                : std::function<void(const QPointF&)>());
+    v->setPointRightClickCallback(on ? std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskRightClicked(p); })
+                                   : std::function<void(const QPointF&)>());
+    v->setToolMode(on ? ImageViewer::PointTool : ImageViewer::PanTool);
+  }
+  if (!on) {
+    contour_mask_selected_index_ = -1;
+    if (btnAddMaskContour_) btnAddMaskContour_->setChecked(false);
+    if (btnModifyMaskContour_) btnModifyMaskContour_->setChecked(false);
+    if (btnDeleteMaskContour_) btnDeleteMaskContour_->setChecked(false);
+  }
+  onTick();
+}
+
+void MainWindow::onStartAddMaskContour() {
+  if (!chkEnableMaskEdit_ || !chkEnableMaskEdit_->isChecked()) return;
+  contour_mask_mode_ = ContourMaskAdd;
+  contour_mask_add_path_.clear();
+  contour_mask_add_snap_points_.clear();
+  for (auto* v : sourceViews_) if (v) {
+    v->setPointClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskPointClicked(p); }));
+    v->setPointRightClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskRightClicked(p); }));
+    v->setToolMode(ImageViewer::PointTool);
+  }
+  logLine("Add Mask enabled: click points with snapping to build contour path.");
+}
+
+void MainWindow::onStartModifyMaskContour() {
+  if (!chkEnableMaskEdit_ || !chkEnableMaskEdit_->isChecked()) return;
+  if (contour_mask_selected_index_ < 0) {
+    logLine("Modify Mask: select a contour on the left first.");
+    return;
+  }
+  contour_mask_mode_ = ContourMaskModify;
+  for (auto* v : sourceViews_) if (v) {
+    v->setPointClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskPointClicked(p); }));
+    v->setPointRightClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskRightClicked(p); }));
+    v->setToolMode(ImageViewer::PointTool);
+  }
+  logLine("Modify Mask enabled: click new position to modify selected contour.");
+}
+
+void MainWindow::onStartDeleteMaskContour() {
+  if (!chkEnableMaskEdit_ || !chkEnableMaskEdit_->isChecked()) return;
+  if (contour_mask_selected_index_ >= 0 && contour_mask_selected_index_ < (int)contour_mask_working_contours_.size()) {
+    contour_mask_working_contours_.erase(contour_mask_working_contours_.begin() + contour_mask_selected_index_);
+    contour_mask_selected_index_ = -1;
+    logLine("Delete Mask: selected contour removed.");
+    onTick();
+    updateDetectParticlePanel();
+    return;
+  }
+  contour_mask_mode_ = ContourMaskNone;
+  logLine("Delete Mask: click contour on left to select, then click Delete again.");
+}
+
+void MainWindow::onContourMaskPointClicked(const QPointF& p) {
+  if (!chkEnableMaskEdit_ || !chkEnableMaskEdit_->isChecked()) return;
+  const int64_t frameKey = std::max<int64_t>(0, play_frame_);
+
+  std::vector<cv::Mat> frames;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    frames = last_frames_;
+  }
+  cv::Mat frame;
+  for (const auto& f : frames) { if (!f.empty()) { frame = f; break; } }
+  if (frame.empty()) return;
+
+  cv::Mat pre = applyPreprocess(frame);
+  if (contour_mask_frame_key_ != frameKey) {
+    contour_mask_working_contours_.clear();
+    contour_mask_frame_key_ = frameKey;
+    contour_mask_selected_index_ = -1;
+    contour_mask_add_path_.clear();
+    contour_mask_add_snap_points_.clear();
+  }
+
+  cv::Mat gray;
+  if (pre.channels() == 3) cv::cvtColor(pre, gray, cv::COLOR_BGR2GRAY);
+  else if (pre.channels() == 4) cv::cvtColor(pre, gray, cv::COLOR_BGRA2GRAY);
+  else gray = pre.clone();
+  if (gray.type() != CV_8UC1) gray.convertTo(gray, CV_8UC1);
+
+  cv::Mat gx, gy, gradMag, gradNorm, gxN, gyN;
+  cv::Sobel(gray, gx, CV_32F, 1, 0, 3);
+  cv::Sobel(gray, gy, CV_32F, 0, 1, 3);
+  cv::magnitude(gx, gy, gradMag);
+  {
+    double mn=0.0, mx=0.0;
+    cv::minMaxLoc(gradMag, &mn, &mx);
+    if (mx - mn > 1e-6) gradNorm = (gradMag - mn) / (mx - mn);
+    else gradNorm = cv::Mat::zeros(gradMag.size(), CV_32F);
+  }
+  cv::Mat denom = gradMag + 1e-6f;
+  cv::divide(gx, denom, gxN);
+  cv::divide(gy, denom, gyN);
+
+  cv::Mat ux, uy, dirConsistency;
+  cv::blur(gxN, ux, cv::Size(5,5));
+  cv::blur(gyN, uy, cv::Size(5,5));
+  cv::magnitude(ux, uy, dirConsistency);
+  cv::threshold(dirConsistency, dirConsistency, 1.0, 1.0, cv::THRESH_TRUNC);
+  cv::max(dirConsistency, 0.0, dirConsistency);
+
+  cv::Mat edgeScore = 0.7f * gradNorm + 0.3f * dirConsistency;
+
+  auto ensureWorkingContoursForEdit = [&]() {
+    if (!contour_mask_working_contours_.empty()) return;
+    int frameIdx = std::max(0, (int)frameKey);
+    if (frameIdx < (int)analyzed_measures_by_frame_.size() && !analyzed_measures_by_frame_[(size_t)frameIdx].empty()) {
+      for (const auto& am : analyzed_measures_by_frame_[(size_t)frameIdx]) {
+        if (am.enabled && am.contour.size() >= 3) contour_mask_working_contours_.push_back(am.contour);
+      }
+    } else if (frameIdx < (int)analyzed_contours_by_frame_.size() && !analyzed_contours_by_frame_[(size_t)frameIdx].empty()) {
+      contour_mask_working_contours_ = analyzed_contours_by_frame_[(size_t)frameIdx];
+    } else if (!analyzed_contours_.empty()) {
+      contour_mask_working_contours_ = analyzed_contours_;
+    }
+  };
+
+  const cv::Point click((int)std::round(p.x()), (int)std::round(p.y()));
+  auto findNearestContourPoint = [&](int& bestContour, int& bestPoint, double& bestDist) {
+    bestContour = -1;
+    bestPoint = -1;
+    bestDist = 1e18;
+    for (int ci=0; ci<(int)contour_mask_working_contours_.size(); ++ci) {
+      const auto& c = contour_mask_working_contours_[(size_t)ci];
+      for (int i=0; i<(int)c.size(); ++i) {
+        double d = cv::norm(click - c[(size_t)i]);
+        if (d < bestDist) { bestDist = d; bestContour = ci; bestPoint = i; }
+      }
+    }
+  };
+
+  int bestContour = -1;
+  int bestPoint = -1;
+  double bestDist = 1e18;
+  if (contour_mask_mode_ != ContourMaskAdd) {
+    ensureWorkingContoursForEdit();
+    findNearestContourPoint(bestContour, bestPoint, bestDist);
+  }
+
+  if (contour_mask_mode_ == ContourMaskAdd) {
+    const int snapRadius = spMaskSnapRadius_ ? spMaskSnapRadius_->value() : 10;
+    cv::Point snapped = click;
+
+    float bestLocalScore = -1.0f;
+    for (int dy=-snapRadius; dy<=snapRadius; ++dy) {
+      for (int dx=-snapRadius; dx<=snapRadius; ++dx) {
+        if (dx*dx + dy*dy > snapRadius*snapRadius) continue;
+        int x = click.x + dx;
+        int y = click.y + dy;
+        if (x < 0 || y < 0 || x >= edgeScore.cols || y >= edgeScore.rows) continue;
+        float sc = edgeScore.at<float>(y, x);
+        if (sc > bestLocalScore) {
+          bestLocalScore = sc;
+          snapped = cv::Point(x, y);
+        }
+      }
+    }
+    if (bestLocalScore < 0.05f) {
+      logLine("Add Mask: no nearby edge candidate found within snap radius.");
+      return;
+    }
+
+    contour_mask_add_snap_points_.push_back(snapped);
+    if (contour_mask_add_path_.empty()) {
+      contour_mask_add_path_.push_back(snapped);
+      onTick();
+      updateDetectParticlePanel();
+      return;
+    }
+
+    cv::Point prev = contour_mask_add_snap_points_[contour_mask_add_snap_points_.size() - 2];
+
+    const int W = edgeScore.cols;
+    const int H = edgeScore.rows;
+    auto idx=[&](int x,int y){ return y*W+x; };
+    std::vector<float> dist((size_t)W*H, std::numeric_limits<float>::infinity());
+    std::vector<int> prevNode((size_t)W*H, -1);
+    using QN = std::pair<float,int>;
+    std::priority_queue<QN, std::vector<QN>, std::greater<QN>> pq;
+
+    bool appended = false;
+    if (prev.x>=0 && prev.y>=0 && prev.x<W && prev.y<H && snapped.x>=0 && snapped.y>=0 && snapped.x<W && snapped.y<H) {
+      const int sNode = idx(prev.x, prev.y);
+      const int tNode = idx(snapped.x, snapped.y);
+      dist[(size_t)sNode] = 0.f;
+      pq.push({0.f, sNode});
+
+      const int dx8[8] = {1,1,0,-1,-1,-1,0,1};
+      const int dy8[8] = {0,1,1,1,0,-1,-1,-1};
+      while (!pq.empty()) {
+        auto [d,u] = pq.top();
+        pq.pop();
+        if (d != dist[(size_t)u]) continue;
+        if (u == tNode) break;
+        int ux = u % W;
+        int uy = u / W;
+
+        for (int k=0; k<8; ++k) {
+          int vx = ux + dx8[k];
+          int vy = uy + dy8[k];
+          if (vx < 0 || vy < 0 || vx >= W || vy >= H) continue;
+
+          float g = gradNorm.at<float>(vy, vx);
+          float gxv = gxN.at<float>(vy, vx);
+          float gyv = gyN.at<float>(vy, vx);
+          float sx = (float)dx8[k];
+          float sy = (float)dy8[k];
+          float sl = std::sqrt(sx*sx + sy*sy);
+          sx /= sl; sy /= sl;
+          // prefer movement along edge tangent (perpendicular to gradient)
+          float tx = -gyv;
+          float ty = gxv;
+          float dirAlign = std::abs(tx*sx + ty*sy);
+          dirAlign = std::max(0.0f, std::min(1.0f, dirAlign));
+
+          float w = (1.0f - g) * 0.7f + (1.0f - dirAlign) * 0.3f + 0.001f;
+          if (k % 2 == 1) w *= 1.4142f;
+
+          int v = idx(vx, vy);
+          if (dist[(size_t)u] + w < dist[(size_t)v]) {
+            dist[(size_t)v] = dist[(size_t)u] + w;
+            prevNode[(size_t)v] = u;
+            pq.push({dist[(size_t)v], v});
+          }
+        }
+      }
+
+      std::vector<cv::Point> path;
+      for (int cur=tNode; cur!=-1; cur=prevNode[(size_t)cur]) {
+        path.emplace_back(cur % W, cur / W);
+        if (cur == sNode) break;
+      }
+      if (!path.empty() && path.back() == prev) {
+        std::reverse(path.begin(), path.end());
+        for (size_t i=1; i<path.size(); ++i) contour_mask_add_path_.push_back(path[i]);
+        appended = true;
+      }
+    }
+
+    if (!appended) contour_mask_add_path_.push_back(snapped);
+
+    if (contour_mask_add_path_.size() > 8 && cv::norm(contour_mask_add_path_.front() - snapped) <= std::max(4, snapRadius)) {
+      if (contour_mask_add_path_.front() != contour_mask_add_path_.back()) contour_mask_add_path_.push_back(contour_mask_add_path_.front());
+      contour_mask_working_contours_.push_back(contour_mask_add_path_);
+      contour_mask_selected_index_ = (int)contour_mask_working_contours_.size()-1;
+      contour_mask_add_path_.clear();
+      contour_mask_add_snap_points_.clear();
+      logLine("Add Mask: new contour completed and added.");
+    }
+  } else if (contour_mask_mode_ == ContourMaskModify) {
+    if (contour_mask_selected_index_ < 0 || contour_mask_selected_index_ >= (int)contour_mask_working_contours_.size()) {
+      logLine("Modify Mask: select a contour on the left first.");
+      return;
+    }
+    auto& c = contour_mask_working_contours_[(size_t)contour_mask_selected_index_];
+    if (c.empty()) return;
+    int pi = 0;
+    double pd = 1e18;
+    for (int i=0; i<(int)c.size(); ++i) {
+      double d = cv::norm(click - c[(size_t)i]);
+      if (d < pd) { pd = d; pi = i; }
+    }
+    c[(size_t)pi] = click;
+    contour_mask_mode_ = ContourMaskNone;
+    if (btnModifyMaskContour_) btnModifyMaskContour_->setChecked(false);
+    logLine("Modify Mask: selected contour updated.");
+  } else {
+    if (bestContour >= 0 && bestDist <= 60.0) contour_mask_selected_index_ = bestContour;
+  }
+
+  onTick();
+  updateDetectParticlePanel();
+}
+
+void MainWindow::onClearDetectedContours() {
+  analyzed_contours_.clear();
+  analyzed_contours_by_frame_.clear();
+  analyzed_measures_by_frame_.clear();
+  contour_mask_working_contours_.clear();
+  contour_mask_add_path_.clear();
+  contour_mask_add_snap_points_.clear();
+  contour_mask_selected_index_ = -1;
+  contour_mask_frame_key_ = -1;
+  updateDetectParticlePanel();
+  onTick();
+  logLine("All detected contours cleared.");
+}
+
+void MainWindow::onContourMaskRightClicked(const QPointF&) {
+  if (!chkEnableMaskEdit_ || !chkEnableMaskEdit_->isChecked()) return;
+  if (contour_mask_mode_ != ContourMaskAdd) return;
+  if (contour_mask_add_path_.size() >= 3) {
+    if (contour_mask_add_path_.front() != contour_mask_add_path_.back()) contour_mask_add_path_.push_back(contour_mask_add_path_.front());
+    contour_mask_working_contours_.push_back(contour_mask_add_path_);
+    contour_mask_selected_index_ = (int)contour_mask_working_contours_.size() - 1;
+    logLine("Add Mask: contour finalized by right click.");
+  }
+  contour_mask_add_path_.clear();
+  contour_mask_add_snap_points_.clear();
+  onTick();
+  updateDetectParticlePanel();
+}
+
+void MainWindow::onAddDetectRegion() {
+  drawing_region_type_ = 1;
+  editing_region_index_ = -1;
+  for (auto* v : sourceViews_) if (v) { v->setAnnotationsVisible(true); v->setToolMode(ImageViewer::PolygonTool); }
+  logLine("Draw detect polygon on left view, right click to finish.");
+}
+
+void MainWindow::onDeleteRegion() {
+  if (!tblRegions_) return;
+  int r = tblRegions_->currentRow();
+  if (r < 0 || r >= (int)regions_.size()) return;
+  regions_.erase(regions_.begin() + r);
+  if (editing_region_index_ == r) editing_region_index_ = -1;
+  else if (editing_region_index_ > r) editing_region_index_--;
+  refreshRegionTable();
+  refreshRegionOverlays(tblRegions_->currentRow(), editing_region_index_);
+  logLine("Region deleted.");
+}
+
+void MainWindow::onStartScaleLine() {
+  if (chkShowLines_ && !chkShowLines_->isChecked()) chkShowLines_->setChecked(true);
+  for (auto* v : sourceViews_) {
+    if (!v) continue;
+    v->clearAllLines(); // only one line allowed
+    v->setAnnotationsVisible(true);
+    v->setToolMode(ImageViewer::LineTool);
+  }
+  if (gbLineProps_) gbLineProps_->setVisible(true);
+  logLine("Scale line drawing mode enabled (single line).");
+}
+
+void MainWindow::onDeleteScaleLine() {
+  for (auto* v : sourceViews_) {
+    if (v) v->clearAllLines();
+  }
+  mm_per_pixel_ = 0.0;
+  if (lblScaleInfo_) lblScaleInfo_->setText("<b><span style=\"color:#ef4444;\">Scale: not calibrated</span></b>");
+  logLine("Scale line deleted.");
+}
+
+void MainWindow::onApplyScaleFromInput() {
+  double px = 0.0;
+  for (auto* v : sourceViews_) {
+    if (!v) continue;
+    px = std::max(px, v->anyLineLength());
+  }
+  if (px <= 1e-9) {
+    QMessageBox::information(this, "Scale", "Please draw one scale line first.");
+    return;
+  }
+  double mm = 0.0;
+  if (editPhysicalMm_) mm = editPhysicalMm_->text().toDouble();
+  if (mm <= 0.0) {
+    QMessageBox::information(this, "Scale", "Please input physical distance (mm) > 0.");
+    return;
+  }
+  mm_per_pixel_ = mm / px;
+  pre_scale_calculated_ = true;
+  stepDone_[1] = pre_scale_line_drawn_ && pre_scale_calculated_;
+  updateStepAvailability();
+  updateScaleStatus(px);
+  logLine(QString("Scale calibrated: %1 mm / %2 px = %3 mm/px")
+          .arg(mm,0,'f',6).arg(px,0,'f',3).arg(mm_per_pixel_,0,'f',9));
+}
+
+void MainWindow::onTryAllGlobalMethods() {
+  std::vector<cv::Mat> frames;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    frames = last_frames_;
+  }
+  cv::Mat src;
+  for (auto& f: frames) { if (!f.empty()) { src = applyPreprocess(f); break; } }
+  if (src.empty()) {
+    QMessageBox::information(this, "Try All", "No image available.");
+    return;
+  }
+
+  QString oldMethod = cbGlobalMethod_ ? cbGlobalMethod_->currentText() : QString();
+  const int n = cbGlobalMethod_ ? cbGlobalMethod_->count() : 0;
+
+  QDialog* dlg = new QDialog(this);
+  dlg->setWindowTitle("Try All Global Methods");
+  QVBoxLayout* outer = new QVBoxLayout(dlg);
+  QRect ar = QGuiApplication::primaryScreen()->availableGeometry();
+  dlg->resize((int)(ar.width()*0.9), (int)(ar.height()*0.9));
+  int pickedIdx = -1;
+  QScrollArea* scroll = new QScrollArea(dlg);
+  QWidget* wrap = new QWidget(scroll);
+  QGridLayout* grid = new QGridLayout();
+  auto tiles = std::make_shared<std::vector<ThumbnailLabel*>>();
+  auto tileImages = std::make_shared<std::vector<QImage>>();
+  const int thumbW = std::max(320, (int)(ar.width()*0.28));
+  const int thumbH = std::max(220, (int)(ar.height()*0.26));
+  const int cols = 3;
+  double zoom = 1.0;
+
+  for (int i = 0; i < n; ++i) {
+    if (cbGlobalMethod_) cbGlobalMethod_->setCurrentIndex(i);
+    cv::Mat b = makeObjectBinaryPreview(src);
+    if (b.empty()) continue;
+    cv::resize(b, b, cv::Size(thumbW, thumbH));
+    const QString methodName = cbGlobalMethod_->itemText(i);
+    cv::putText(b, methodName.toStdString(), cv::Point(8, 20), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,0,255), 2, cv::LINE_AA);
+
+    auto* tile = new ThumbnailLabel(i, dlg);
+    const QImage tileImg = matToQImage(b);
+    tile->setFixedSize(thumbW, thumbH);
+    tile->setPixmap(QPixmap::fromImage(tileImg));
+    tile->setScaledContents(true);
+    tile->setToolTip(methodName + "\nDouble-click to use this method");
+    tiles->push_back(tile);
+    tileImages->push_back(tileImg);
+    tile->onClicked = [tiles, tile, &pickedIdx](int idx) {
+      for (auto* t : *tiles) if (t) t->setSelected(false);
+      if (tile) tile->setSelected(true);
+      pickedIdx = idx;
+    };
+    tile->onDoubleClick = [this, dlg](int idx) {
+      if (cbGlobalMethod_ && idx >= 0 && idx < cbGlobalMethod_->count()) cbGlobalMethod_->setCurrentIndex(idx);
+      dlg->accept();
+    };
+    grid->addWidget(tile, i / cols, i % cols);
+  }
+
+  if (cbGlobalMethod_) {
+    int idx = cbGlobalMethod_->findText(oldMethod);
+    if (idx >= 0) cbGlobalMethod_->setCurrentIndex(idx);
+  }
+
+  auto applyThumbZoom = [tiles, tileImages, thumbW, thumbH, &zoom]() {
+    if (!tiles || !tileImages) return;
+    const int w = std::max(96, (int)std::round(thumbW * zoom));
+    const int h = std::max(72, (int)std::round(thumbH * zoom));
+    const int n = std::min(tiles->size(), tileImages->size());
+    for (int k=0; k<n; ++k) {
+      auto* t = (*tiles)[k];
+      const QImage& im = (*tileImages)[k];
+      if (!t || im.isNull()) continue;
+      t->setFixedSize(w, h);
+      t->setPixmap(QPixmap::fromImage(im));
+      t->setScaledContents(true);
+    }
+  };
+
+  QHBoxLayout* zoomCtl = new QHBoxLayout();
+  QPushButton* btnZoomOut = new QPushButton("-", dlg);
+  QPushButton* btnZoomIn = new QPushButton("+", dlg);
+  QSlider* slZoom = new QSlider(Qt::Horizontal, dlg);
+  slZoom->setRange(50, 250);
+  slZoom->setValue(100);
+  QLabel* lblZoom = new QLabel("Zoom", dlg);
+  zoomCtl->addWidget(lblZoom);
+  zoomCtl->addWidget(btnZoomOut);
+  zoomCtl->addWidget(slZoom, 1);
+  zoomCtl->addWidget(btnZoomIn);
+  outer->addLayout(zoomCtl);
+
+  wrap->setLayout(grid);
+  scroll->setWidget(wrap);
+  scroll->setWidgetResizable(true);
+  outer->addWidget(scroll, 1);
+  auto setZoom = [&zoom, slZoom, applyThumbZoom](int v) {
+    zoom = std::max(0.5, std::min(2.5, v / 100.0));
+    applyThumbZoom();
+  };
+  QObject::connect(slZoom, &QSlider::valueChanged, dlg, setZoom);
+  QObject::connect(btnZoomIn, &QPushButton::clicked, dlg, [slZoom]() { slZoom->setValue(std::min(250, slZoom->value() + 10)); });
+  QObject::connect(btnZoomOut, &QPushButton::clicked, dlg, [slZoom]() { slZoom->setValue(std::max(50, slZoom->value() - 10)); });
+
+  QDialogButtonBox* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dlg);
+  connect(box, &QDialogButtonBox::accepted, dlg, &QDialog::accept);
+  connect(box, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
+  outer->addWidget(box);
+  if (dlg->exec() == QDialog::Accepted) {
+    if (pickedIdx >= 0 && cbGlobalMethod_) cbGlobalMethod_->setCurrentIndex(pickedIdx);
+  } else {
+    if (cbGlobalMethod_) {
+      int idx = cbGlobalMethod_->findText(oldMethod);
+      if (idx >= 0) cbGlobalMethod_->setCurrentIndex(idx);
+    }
+  }
+}
+
+void MainWindow::onTryAllLocalMethods() {
+  std::vector<cv::Mat> frames;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    frames = last_frames_;
+  }
+  cv::Mat src;
+  for (auto& f: frames) { if (!f.empty()) { src = applyPreprocess(f); break; } }
+  if (src.empty()) {
+    QMessageBox::information(this, "Try All", "No image available.");
+    return;
+  }
+
+  QString oldMethod = cbLocalMethod_ ? cbLocalMethod_->currentText() : QString();
+  int oldType = cbThreshType_ ? cbThreshType_->currentIndex() : 1;
+  if (cbThreshType_) cbThreshType_->setCurrentIndex(1);
+  const int n = cbLocalMethod_ ? cbLocalMethod_->count() : 0;
+
+  QDialog* dlg = new QDialog(this);
+  dlg->setWindowTitle("Try All Local Methods");
+  QVBoxLayout* outer = new QVBoxLayout(dlg);
+  QRect ar = QGuiApplication::primaryScreen()->availableGeometry();
+  dlg->resize((int)(ar.width()*0.9), (int)(ar.height()*0.9));
+  int pickedIdx = -1;
+  QScrollArea* scroll = new QScrollArea(dlg);
+  QWidget* wrap = new QWidget(scroll);
+  QGridLayout* grid = new QGridLayout();
+  auto tiles = std::make_shared<std::vector<ThumbnailLabel*>>();
+  auto tileImages = std::make_shared<std::vector<QImage>>();
+  const int thumbW = std::max(320, (int)(ar.width()*0.28));
+  const int thumbH = std::max(220, (int)(ar.height()*0.26));
+  const int cols = 3;
+  double zoom = 1.0;
+
+  for (int i = 0; i < n; ++i) {
+    if (cbLocalMethod_) cbLocalMethod_->setCurrentIndex(i);
+    cv::Mat b = makeObjectBinaryPreview(src);
+    if (b.empty()) continue;
+    cv::resize(b, b, cv::Size(thumbW, thumbH));
+    const QString methodName = cbLocalMethod_->itemText(i);
+    cv::putText(b, methodName.toStdString(), cv::Point(8, 20), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0,0,255), 2, cv::LINE_AA);
+
+    auto* tile = new ThumbnailLabel(i, dlg);
+    const QImage tileImg = matToQImage(b);
+    tile->setFixedSize(thumbW, thumbH);
+    tile->setPixmap(QPixmap::fromImage(tileImg));
+    tile->setScaledContents(true);
+    tile->setToolTip(methodName + "\nDouble-click to use this method");
+    tiles->push_back(tile);
+    tileImages->push_back(tileImg);
+    tile->onClicked = [tiles, tile, &pickedIdx](int idx) {
+      for (auto* t : *tiles) if (t) t->setSelected(false);
+      if (tile) tile->setSelected(true);
+      pickedIdx = idx;
+    };
+    tile->onDoubleClick = [this, dlg](int idx) {
+      if (cbLocalMethod_ && idx >= 0 && idx < cbLocalMethod_->count()) cbLocalMethod_->setCurrentIndex(idx);
+      dlg->accept();
+    };
+    grid->addWidget(tile, i / cols, i % cols);
+  }
+
+  auto applyThumbZoom = [tiles, tileImages, thumbW, thumbH, &zoom]() {
+    if (!tiles || !tileImages) return;
+    const int w = std::max(96, (int)std::round(thumbW * zoom));
+    const int h = std::max(72, (int)std::round(thumbH * zoom));
+    const int n = std::min(tiles->size(), tileImages->size());
+    for (int k=0; k<n; ++k) {
+      auto* t = (*tiles)[k];
+      const QImage& im = (*tileImages)[k];
+      if (!t || im.isNull()) continue;
+      t->setFixedSize(w, h);
+      t->setPixmap(QPixmap::fromImage(im));
+      t->setScaledContents(true);
+    }
+  };
+
+  QHBoxLayout* zoomCtl = new QHBoxLayout();
+  QPushButton* btnZoomOut = new QPushButton("-", dlg);
+  QPushButton* btnZoomIn = new QPushButton("+", dlg);
+  QSlider* slZoom = new QSlider(Qt::Horizontal, dlg);
+  slZoom->setRange(50, 250);
+  slZoom->setValue(100);
+  QLabel* lblZoom = new QLabel("Zoom", dlg);
+  zoomCtl->addWidget(lblZoom);
+  zoomCtl->addWidget(btnZoomOut);
+  zoomCtl->addWidget(slZoom, 1);
+  zoomCtl->addWidget(btnZoomIn);
+  outer->addLayout(zoomCtl);
+
+  wrap->setLayout(grid);
+  scroll->setWidget(wrap);
+  scroll->setWidgetResizable(true);
+  outer->addWidget(scroll, 1);
+  auto setZoom = [&zoom, slZoom, applyThumbZoom](int v) {
+    zoom = std::max(0.5, std::min(2.5, v / 100.0));
+    applyThumbZoom();
+  };
+  QObject::connect(slZoom, &QSlider::valueChanged, dlg, setZoom);
+  QObject::connect(btnZoomIn, &QPushButton::clicked, dlg, [slZoom]() { slZoom->setValue(std::min(250, slZoom->value() + 10)); });
+  QObject::connect(btnZoomOut, &QPushButton::clicked, dlg, [slZoom]() { slZoom->setValue(std::max(50, slZoom->value() - 10)); });
+
+  QDialogButtonBox* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dlg);
+  connect(box, &QDialogButtonBox::accepted, dlg, &QDialog::accept);
+  connect(box, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
+  outer->addWidget(box);
+  if (dlg->exec() == QDialog::Accepted) {
+    if (pickedIdx >= 0 && cbLocalMethod_) cbLocalMethod_->setCurrentIndex(pickedIdx);
+  } else {
+    if (cbLocalMethod_) {
+      int idx = cbLocalMethod_->findText(oldMethod);
+      if (idx >= 0) cbLocalMethod_->setCurrentIndex(idx);
+    }
+  }
+  if (cbThreshType_) cbThreshType_->setCurrentIndex(oldType);
+}
+
+void MainWindow::onPreprocessAuto() {
+  cv::Mat frame;
+  {
+    QMutexLocker locker(&frames_mutex_);
+    for (const auto& f : last_frames_) {
+      if (!f.empty()) { frame = f; break; }
+    }
+  }
+  if (frame.empty()) {
+    QMessageBox::information(this, "Auto", "No image available for auto adjustment.");
+    return;
+  }
+
+  cv::Mat gray;
+  if (frame.channels() == 3) cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+  else gray = frame;
+
+  const int histSize = 256;
+  float range[] = {0, 256};
+  const float* histRange = {range};
+  cv::Mat hist;
+  cv::calcHist(&gray, 1, 0, cv::Mat(), hist, 1, &histSize, &histRange, true, false);
+
+  const double total = static_cast<double>(gray.total());
+  const double clip = total * 0.0035; // small clipping, similar to ImageJ Auto
+
+  int lo = 0, hi = 255;
+  double acc = 0.0;
+  for (int i = 0; i < 256; ++i) {
+    acc += hist.at<float>(i);
+    if (acc >= clip) { lo = i; break; }
+  }
+  acc = 0.0;
+  for (int i = 255; i >= 0; --i) {
+    acc += hist.at<float>(i);
+    if (acc >= clip) { hi = i; break; }
+  }
+  if (hi <= lo) { lo = 0; hi = 255; }
+
+  // Basic brightness/contrast model: dst = alpha * src + beta
+  const double alpha = 255.0 / std::max(1, hi - lo);
+  const double beta = -alpha * lo;
+
+  int contrast = (int)std::round(alpha * 128.0);
+  int brightness = (int)std::round(beta + 128.0);
+  contrast = std::max(0, std::min(255, contrast));
+  brightness = std::max(0, std::min(255, brightness));
+
+  if (slContrast_) slContrast_->setValue(contrast);
+  if (slBrightness_) slBrightness_->setValue(brightness);
+
+  logLine(QString("Auto brightness/contrast: lo=%1 hi=%2 => alpha=%3 beta=%4, contrast=%5 brightness=%6")
+          .arg(lo).arg(hi)
+          .arg(alpha, 0, 'f', 4)
+          .arg(beta, 0, 'f', 4)
+          .arg(contrast)
+          .arg(brightness));
+}
+
+void MainWindow::updateScaleStatus(double pxLen) {
+  if (!lblScaleInfo_) return;
+  if (mm_per_pixel_ > 0.0) {
+    lblScaleInfo_->setText(QString("<b><span style=\"color:#facc15;\">Scale: %1 mm/px</span></b>")
+                           .arg(mm_per_pixel_,0,'f',9));
+  } else {
+    lblScaleInfo_->setText(QString("<b><span style=\"color:#ef4444;\">Scale: line length %1 px (double click line to set real distance, then click Calculate)</span></b>").arg(pxLen,0,'f',2));
+  }
 }
 
 bool MainWindow::readFrames(std::vector<cv::Mat>& frames) {
@@ -1429,12 +4349,38 @@ void MainWindow::overlayTracking(std::vector<cv::Mat>& vis, const std::vector<cv
   }
 }
 
-void MainWindow::updateStatus() {
-  lblCaptured_->setText(QString("Captured: %1").arg(calibrator_->captured()));
-  lblInliers_->setText(QString("Inliers: %1").arg(last_inliers_));
+cv::Mat MainWindow::applyPreprocess(const cv::Mat& src) const {
+  if (src.empty()) return src;
+  cv::Mat out = src.clone();
 
-  QString m = (mode_==CAPTURE) ? "Capture" : ((mode_==CALIB) ? "Calibration" : "Tracking");
-  statusBar()->showMessage(QString("Mode: %1 | Sources: %2 | Captured: %3 | Inliers: %4 | FPS: %5")
+  if (cbPreColor_ && cbPreColor_->currentIndex() == 0) {
+    cv::Mat gray;
+    cv::cvtColor(out, gray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(gray, out, cv::COLOR_GRAY2BGR);
+  }
+
+  const int brightness = slBrightness_ ? slBrightness_->value() : 128;
+  const int contrastSlider = slContrast_ ? slContrast_->value() : 128;
+  // Basic formula: dst = alpha * src + beta, slider range [0,255]
+  const double alpha = static_cast<double>(contrastSlider) / 128.0; // 128 => neutral
+  const double beta = static_cast<double>(brightness - 128);        // 128 => neutral
+  out.convertTo(out, -1, alpha, beta);
+  return out;
+}
+
+void MainWindow::updateStatus() {
+  updateStepAvailability();
+  if (lblCaptured_) lblCaptured_->setText(QString("Captured: %1").arg(calibrator_->captured()));
+  if (lblInliers_) lblInliers_->setText(QString("Inliers: %1").arg(last_inliers_));
+
+  QString m = "Source";
+  if (stepTabs_) {
+    const int si = tabIndexToStep(stepTabs_->currentIndex());
+    if (si == 1) m = "PreProcess";
+    else if (si == 2) m = "Detect";
+    else if (si == 3) m = "Visualization";
+  }
+  statusBar()->showMessage(QString("Mode: %1 | Source: %2 | Captured: %3 | Inliers: %4 | FPS: %5")
     .arg(m)
     .arg((int)sources_.size())
     .arg(calibrator_->captured())
@@ -1459,6 +4405,10 @@ void MainWindow::onTick() {
   // Note: some sources may not have frames yet; mosaic will show placeholders.
 
   std::vector<cv::Mat> vis = frames;
+  for (auto& f : vis) {
+    if (!f.empty()) f = applyPreprocess(f);
+  }
+  std::vector<cv::Mat> preVis = vis;
   // If sources count changed, rebuild calibrator to match to avoid crash
   if (mode_==CALIB) {
     int n = (int)frames.size();
@@ -1472,7 +4422,148 @@ void MainWindow::onTick() {
   // Tracking overlay is triggered by the explicit Detect button to avoid
   // repeatedly accumulating visual detections on static frames.
 
+  auto previewPassForMeasure = [this](const MeasureRow& r)->bool {
+    if (!cbHistMetric_ || !spHistMin_ || !spHistMax_) return true;
+    const double v = metricValueForHist(r, cbHistMetric_->currentText());
+    if (!std::isfinite(v)) return false;
+    return (v >= spHistMin_->value() && v <= spHistMax_->value());
+  };
+
+  auto contourMetricPass = [this, &previewPassForMeasure](const std::vector<cv::Point>& c)->bool {
+    if (c.empty()) return false;
+    const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
+    MeasureRow r;
+    r.area = std::abs(cv::contourArea(c)) * scale * scale;
+    r.perim = cv::arcLength(c, true) * scale;
+    cv::RotatedRect rr = cv::minAreaRect(c);
+    r.major = std::max(rr.size.width, rr.size.height) * scale;
+    r.minor = std::min(rr.size.width, rr.size.height) * scale;
+    r.circ = (r.perim > 1e-9) ? (4.0 * std::acos(-1.0) * r.area / (r.perim * r.perim)) : 0.0;
+    return previewPassForMeasure(r);
+  };
+
+  int frameIdx = std::max(0, (int)play_frame_);
+  const bool maskOverlayActive = (chkEnableMaskEdit_ && chkEnableMaskEdit_->isChecked() && contour_mask_frame_key_ == frameIdx && !contour_mask_working_contours_.empty());
+  if (!maskOverlayActive && track_binary_enabled_ && frameIdx < (int)tracked_contours_by_frame_.size()) {
+    for (auto& f : vis) {
+      if (f.empty()) continue;
+      for (const auto& tc : tracked_contours_by_frame_[frameIdx]) {
+        if (!contourMetricPass(tc.contour)) continue;
+        cv::drawContours(f, std::vector<std::vector<cv::Point>>{tc.contour}, -1, cv::Scalar(0,255,0), 1);
+        cv::putText(f, std::string("ID:")+std::to_string(tc.id), tc.centroid + cv::Point2f(3.f,-3.f),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2, cv::LINE_AA);
+      }
+    }
+  } else if (!maskOverlayActive && frameIdx < (int)analyzed_measures_by_frame_.size()) {
+    for (auto& f : vis) {
+      if (f.empty()) continue;
+      std::vector<std::vector<cv::Point>> show;
+      int particleIdx = 1;
+      for (const auto& am : analyzed_measures_by_frame_[frameIdx]) {
+        if (!(am.enabled && previewPassForMeasure(am.m))) continue;
+        show.push_back(am.contour);
+        cv::Moments mm = cv::moments(am.contour);
+        if (std::abs(mm.m00) > 1e-9) {
+          cv::Point2f c((float)(mm.m10/mm.m00), (float)(mm.m01/mm.m00));
+          cv::putText(f, std::to_string(particleIdx++), c, cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0,0,255), 1, cv::LINE_AA);
+        }
+      }
+      if (!show.empty()) cv::drawContours(f, show, -1, cv::Scalar(0,255,0), 1);
+    }
+  } else if (!maskOverlayActive && !analyzed_contours_.empty()) {
+    for (auto& f : vis) {
+      if (f.empty()) continue;
+      std::vector<std::vector<cv::Point>> show;
+      int particleIdx = 1;
+      for (const auto& c : analyzed_contours_) {
+        show.push_back(c);
+        cv::Moments mm = cv::moments(c);
+        if (std::abs(mm.m00) > 1e-9) {
+          cv::Point2f ctr((float)(mm.m10/mm.m00), (float)(mm.m01/mm.m00));
+          cv::putText(f, std::to_string(particleIdx++), ctr, cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0,0,255), 1, cv::LINE_AA);
+        }
+      }
+      if (!show.empty()) cv::drawContours(f, show, -1, cv::Scalar(0,255,0), 1);
+    }
+  }
+
+  if (contour_mask_frame_key_ != frameIdx) {
+    contour_mask_working_contours_.clear();
+    contour_mask_frame_key_ = -1;
+    contour_mask_selected_index_ = -1;
+    contour_mask_add_path_.clear();
+    contour_mask_add_snap_points_.clear();
+    contour_mask_mode_ = ContourMaskNone;
+    for (auto* v : sourceViews_) if (v) {
+      if (!chkEnableMaskEdit_ || !chkEnableMaskEdit_->isChecked()) {
+        v->setPointClickCallback(std::function<void(const QPointF&)>());
+        v->setToolMode(ImageViewer::PanTool);
+      } else {
+        v->setPointClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskPointClicked(p); }));
+        v->setPointRightClickCallback(std::function<void(const QPointF&)>([this](const QPointF& p){ onContourMaskRightClicked(p); }));
+        v->setToolMode(ImageViewer::PointTool);
+      }
+    }
+  }
+  if (contour_mask_frame_key_ == frameIdx && !contour_mask_working_contours_.empty()) {
+    for (auto& f : vis) {
+      if (f.empty()) continue;
+      cv::drawContours(f, contour_mask_working_contours_, -1, cv::Scalar(0, 180, 255), 1, cv::LINE_AA);
+      if (contour_mask_selected_index_ >= 0 && contour_mask_selected_index_ < (int)contour_mask_working_contours_.size()) {
+        cv::drawContours(f, std::vector<std::vector<cv::Point>>{contour_mask_working_contours_[(size_t)contour_mask_selected_index_]}, -1, cv::Scalar(255, 120, 0), 1, cv::LINE_AA);
+      }
+      if (!contour_mask_add_path_.empty()) {
+        cv::polylines(f, std::vector<std::vector<cv::Point>>{contour_mask_add_path_}, false, cv::Scalar(255, 255, 0), 1, cv::LINE_AA);
+      }
+      for (int i=0; i<(int)contour_mask_working_contours_.size(); ++i) {
+        cv::Moments mm = cv::moments(contour_mask_working_contours_[(size_t)i]);
+        if (std::abs(mm.m00) <= 1e-9) continue;
+        cv::Point2f c((float)(mm.m10/mm.m00), (float)(mm.m01/mm.m00));
+        cv::putText(f, std::to_string(i+1), c, cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0,0,255), 1, cv::LINE_AA);
+      }
+    }
+  }
+
   updateSourceViews(vis);
+
+  for (const auto& f : preVis) {
+    if (f.empty()) continue;
+    if (!measurements_frozen_) updateMeasurementFromFrame(f);
+    if (visImageLabel_) {
+      QImage qi = matToQImage(f);
+      visImageLabel_->setPixmap(QPixmap::fromImage(qi).scaled(visImageLabel_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+    if (leftVisImage_) {
+      visual_image_base_ = matToQImage(f);
+      refreshVisualizationImagePixmap();
+    }
+    break;
+  }
+  refreshTrajectoryPlot();
+  updateLeftVisualDashboard();
+  updateDetectParticlePanel();
+
+  // ObjectDefine small binary preview
+  if (lblBinaryPreview_) {
+    for (const auto& f : preVis) {
+      if (f.empty()) continue;
+      int autoT = spObjectThresh_ ? spObjectThresh_->value() : 128;
+      cv::Mat bin = makeObjectBinaryPreview(f, &autoT);
+      if (!bin.empty()) {
+        if (!object_thresh_manual_ && slObjectThresh_ && cbThreshType_ && cbThreshType_->currentIndex()==0) {
+          if (slObjectThresh_->value() != autoT) slObjectThresh_->setValue(autoT);
+          if (spObjectThresh_ && spObjectThresh_->value() != autoT) spObjectThresh_->setValue(autoT);
+        }
+        QImage qi = matToQImage(bin);
+        lblBinaryPreview_->setPixmap(QPixmap::fromImage(qi).scaled(lblBinaryPreview_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        if (lblBinaryPreviewPopup_) {
+          binary_preview_mask_img_ = qi;
+          refreshBinaryPreviewPopupPixmaps();
+        }
+      }
+      break;
+    }
+  }
 
   if (show_docks_) updateSourceDocks(frames);
   updateStatus();
@@ -1524,6 +4615,18 @@ QJsonObject MainWindow::toProjectJson() const {
   }
   o["sources"] = srcs;
 
+  // ObjectDefine settings persistence
+  if (cbThreshType_) o["obj_thresh_type"] = cbThreshType_->currentIndex();
+  if (cbGlobalMethod_) o["obj_global_method"] = cbGlobalMethod_->currentText();
+  if (spObjectThresh_) o["obj_threshold"] = spObjectThresh_->value();
+  if (chkInvertBinary_) o["obj_invert"] = chkInvertBinary_->isChecked();
+  {
+    QJsonArray ops;
+    for (const auto& op : binary_ops_pipeline_) ops.append(op);
+    o["obj_binary_ops"] = ops;
+  }
+  o["obj_track_enabled"] = track_binary_enabled_;
+
   o["tagmap_path"] = tagmap_path_;
   o["calib_path"] = calib_path_;
   o["layout_geometry_b64"] = QString(saveGeometry().toBase64());
@@ -1532,18 +4635,42 @@ QJsonObject MainWindow::toProjectJson() const {
 }
 
 bool MainWindow::fromProjectJson(const QJsonObject& o) {
-  if (o.contains("board_w")) spBoardW_->setValue(o["board_w"].toInt(board_w_));
-  if (o.contains("board_h")) spBoardH_->setValue(o["board_h"].toInt(board_h_));
-  if (o.contains("square")) spSquare_->setValue(o["square"].toDouble(square_));
-  if (o.contains("ransac_iters")) spRansacIters_->setValue(o["ransac_iters"].toInt(ransac_iters_));
-  if (o.contains("inlier_thresh_px")) spInlierThresh_->setValue(o["inlier_thresh_px"].toDouble(inlier_thresh_px_));
-  if (o.contains("tag_dict_id")) {
+  if (o.contains("board_w") && spBoardW_) spBoardW_->setValue(o["board_w"].toInt(board_w_));
+  if (o.contains("board_h") && spBoardH_) spBoardH_->setValue(o["board_h"].toInt(board_h_));
+  if (o.contains("square") && spSquare_) spSquare_->setValue(o["square"].toDouble(square_));
+  if (o.contains("ransac_iters") && spRansacIters_) spRansacIters_->setValue(o["ransac_iters"].toInt(ransac_iters_));
+  if (o.contains("inlier_thresh_px") && spInlierThresh_) spInlierThresh_->setValue(o["inlier_thresh_px"].toDouble(inlier_thresh_px_));
+  if (o.contains("tag_dict_id") && cbTagDict_) {
     int did = o["tag_dict_id"].toInt(tag_dict_id_);
-    // set combo if present
     for (int i=0;i<cbTagDict_->count();++i) {
       if (cbTagDict_->itemData(i).toInt() == did) { cbTagDict_->setCurrentIndex(i); break; }
     }
   }
+
+  if (o.contains("obj_thresh_type") && cbThreshType_) cbThreshType_->setCurrentIndex(o["obj_thresh_type"].toInt(cbThreshType_->currentIndex()));
+  if (o.contains("obj_global_method") && cbGlobalMethod_) {
+    int idx = cbGlobalMethod_->findText(o["obj_global_method"].toString());
+    if (idx >= 0) cbGlobalMethod_->setCurrentIndex(idx);
+  }
+  if (o.contains("obj_threshold")) {
+    int t = o["obj_threshold"].toInt(spObjectThresh_ ? spObjectThresh_->value() : 128);
+    if (spObjectThresh_) spObjectThresh_->setValue(t);
+    if (slObjectThresh_) slObjectThresh_->setValue(t);
+    object_thresh_manual_ = true;
+  }
+  if (o.contains("obj_invert") && chkInvertBinary_) chkInvertBinary_->setChecked(o["obj_invert"].toBool(false));
+  binary_ops_pipeline_.clear();
+  if (o.contains("obj_binary_ops") && o["obj_binary_ops"].isArray()) {
+    for (const auto& v : o["obj_binary_ops"].toArray()) {
+      if (v.isString()) binary_ops_pipeline_.push_back(v.toString());
+    }
+  }
+  if (lblBinaryOps_) {
+    if (binary_ops_pipeline_.empty()) lblBinaryOps_->setText("Pipeline: (none)");
+    else { QStringList ops; for (const auto& op : binary_ops_pipeline_) ops << op; lblBinaryOps_->setText(QString("Pipeline: %1").arg(ops.join(" -> "))); }
+  }
+  track_binary_enabled_ = o["obj_track_enabled"].toBool(false);
+  if (btnTrackBinary_) btnTrackBinary_->setChecked(track_binary_enabled_);
 
   // Rebuild sources
   timer_.stop();
@@ -1572,7 +4699,7 @@ bool MainWindow::fromProjectJson(const QJsonObject& o) {
         s.mode_owner = owner;
         s.is_image_seq = false;
         s.video_path = si["path"].toString();
-        s.cap.open(s.video_path.toStdString());
+        openVideoCaptureUnicode(s.cap, s.video_path);
       } else if (type == "imgseq") {
         s.is_cam = false;
         s.mode_owner = owner;
@@ -1665,131 +4792,8 @@ void MainWindow::onResetFrames() {
 }
 
 void MainWindow::onComputeCalibration() {
-  if (cbCalibMethod_ && cbCalibMethod_->currentIndex() != 0) {
-    QMessageBox::information(this, "Calibration", "This calibration method is reserved and not implemented yet.");
-    return;
-  }
-  // Use all frames from the two Calibration-tab sources (no Grab required).
-  std::vector<int> idx;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    for (int i=0;i<(int)sources_.size();++i) {
-      if (sources_[i].mode_owner == (int)CALIB && !sources_[i].is_cam) idx.push_back(i);
-    }
-  }
-  if (idx.size() != 2) {
-    QMessageBox::warning(this, "Calibration", "Calibration tab must have exactly 2 video/image-sequence sources.");
-    return;
-  }
-
-  has_computed_calib_ = false;
-  if (btnSaveCalib_) btnSaveCalib_->setEnabled(false);
-  calib_pairs_.clear();
-  calib_pair_rmse_.clear();
-  if (calibErrorTable_) calibErrorTable_->setRowCount(0);
-  if (calibProgressBar_) {
-    calibProgressBar_->setRange(0, 100);
-    calibProgressBar_->setValue(0);
-  }
-  if (lblCalibProgress_) lblCalibProgress_->setText("Progress: preparing...");
-
-  stopCaptureBlocking();
-  detect_overlay_cache_.clear();
-
-  int totalFrames = 0;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    for (int k : idx) {
-      if (k < 0 || k >= (int)sources_.size()) continue;
-      if (sources_[k].is_image_seq) sources_[k].seq_idx = 0;
-      else if (sources_[k].cap.isOpened()) {
-        sources_[k].cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-      }
-    }
-    auto frameCount = [&](const InputSource& s)->int {
-      if (s.is_image_seq) return s.seq_files.size();
-      if (!s.cap.isOpened()) return 0;
-      return std::max(0, (int)s.cap.get(cv::CAP_PROP_FRAME_COUNT));
-    };
-    int c0 = frameCount(sources_[idx[0]]);
-    int c1 = frameCount(sources_[idx[1]]);
-    totalFrames = (c0 > 0 && c1 > 0) ? std::min(c0, c1) : 0;
-  }
-  if (calibProgressBar_ && totalFrames > 0) calibProgressBar_->setRange(0, totalFrames);
-
-  auto readNext = [](InputSource& s, cv::Mat& out)->bool {
-    if (s.is_image_seq) {
-      if (s.seq_files.isEmpty() || s.seq_idx >= s.seq_files.size()) return false;
-      out = cv::imread(s.seq_files[s.seq_idx].toStdString(), cv::IMREAD_COLOR);
-      s.seq_idx++;
-      return !out.empty();
-    }
-    if (!s.cap.isOpened()) return false;
-    return s.cap.read(out) && !out.empty();
-  };
-
-  int frameId = 0;
-  MultiCamCalibrator previewCalib(2, cv::Size(board_w_, board_h_), square_);
-  while (true) {
-    cv::Mat a, b;
-    {
-      QMutexLocker lock(&sources_mutex_);
-      if (!readNext(sources_[idx[0]], a) || !readNext(sources_[idx[1]], b)) break;
-    }
-    CalibrationPair p;
-    p.frame_id = frameId;
-    p.left = a;
-    p.right = b;
-    calib_pairs_.push_back(std::move(p));
-
-    // Preview current frame and chessboard detection on the left viewer while scanning.
-    std::vector<cv::Mat> pair = {a, b};
-    std::vector<std::vector<cv::Point2f>> corners;
-    std::vector<bool> ok;
-    previewCalib.detectAndMaybeStore(pair, false, &corners, &ok);
-    cv::Mat visA = a.clone();
-    cv::Mat visB = b.clone();
-    if (!corners.empty() && corners.size() >= 2) {
-      cv::drawChessboardCorners(visA, cv::Size(board_w_, board_h_), corners[0], !ok.empty() && ok[0]);
-      cv::drawChessboardCorners(visB, cv::Size(board_w_, board_h_), corners[1], ok.size() > 1 && ok[1]);
-    }
-    {
-      QMutexLocker frameLock(&frames_mutex_);
-      if (idx[0] >= 0 && idx[0] < (int)last_frames_.size()) last_frames_[idx[0]] = visA;
-      if (idx[1] >= 0 && idx[1] < (int)last_frames_.size()) last_frames_[idx[1]] = visB;
-      updateSourceViews(last_frames_);
-    }
-
-    frameId++;
-
-    if (calibProgressBar_ && totalFrames > 0) calibProgressBar_->setValue(std::min(frameId, totalFrames));
-    play_frame_ = std::max<int64_t>(0, frameId - 1);
-    updateProgressUI(play_frame_, std::max<int64_t>(1, totalFrames));
-    if (lblCalibProgress_) lblCalibProgress_->setText(QString("Progress: scanning %1 / %2").arg(frameId).arg(std::max(totalFrames, frameId)));
-    QApplication::processEvents();
-  }
-
-  if (calib_pairs_.empty()) {
-    QMessageBox::warning(this, "Calibration", "No frame pairs found from the selected sources.");
-    return;
-  }
-
-  if (calibErrorTable_) {
-    calibErrorTable_->setRowCount((int)calib_pairs_.size());
-    for (int i = 0; i < (int)calib_pairs_.size(); ++i) {
-      QTableWidgetItem* useItem = new QTableWidgetItem();
-      useItem->setCheckState(Qt::Checked);
-      useItem->setFlags(useItem->flags() | Qt::ItemIsUserCheckable);
-      calibErrorTable_->setItem(i, 0, useItem);
-      calibErrorTable_->setItem(i, 1, new QTableWidgetItem(QString::number(calib_pairs_[i].frame_id)));
-      calibErrorTable_->setItem(i, 2, new QTableWidgetItem("-"));
-    }
-  }
-
-  std::vector<int> selected;
-  selected.reserve(calib_pairs_.size());
-  for (int i = 0; i < (int)calib_pairs_.size(); ++i) selected.push_back(i);
-  if (!runCalibrationOnPairs(selected, true)) return;
+  QMessageBox::information(this, "Preprocess", "Calibration solving is removed. Use this tab for preprocessing only.");
+  logLine("Calibration solver removed in monocular preprocess mode.");
 }
 
 bool MainWindow::runCalibrationOnPairs(const std::vector<int>& pairIndices, bool updateTable) {
@@ -1950,143 +4954,8 @@ void MainWindow::onLoadCalibYaml() {
 //}
 
 void MainWindow::onDetectAllTrackingFrames() {
-  if (mode_ != TRACK) {
-    QMessageBox::information(this, "Tracking", "Switch to Tracking mode first.");
-    return;
-  }
-  if (!tagmap_loaded_) {
-    QMessageBox::warning(this, "Tracking", "Load Tag Map first.");
-    return;
-  }
-
-  std::vector<int> idx;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    for (int i = 0; i < (int)sources_.size(); ++i) {
-      if (sources_[i].mode_owner == (int)TRACK && !sources_[i].is_cam) idx.push_back(i);
-    }
-  }
-  if (idx.empty()) {
-    QMessageBox::warning(this, "Tracking", "No video/image-sequence sources found in Tracking mode.");
-    return;
-  }
-
-  stopCaptureBlocking();
-  detect_overlay_cache_.clear();
-
-  int totalFrames = 0;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    auto frameCount = [&](const InputSource& s)->int {
-      if (s.is_image_seq) return s.seq_files.size();
-      if (!s.cap.isOpened()) return 0;
-      return std::max(0, (int)s.cap.get(cv::CAP_PROP_FRAME_COUNT));
-    };
-    totalFrames = INT_MAX;
-    for (int k : idx) {
-      if (sources_[k].is_image_seq) sources_[k].seq_idx = 0;
-      else if (sources_[k].cap.isOpened()) sources_[k].cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-      int c = frameCount(sources_[k]);
-      if (c > 0) totalFrames = std::min(totalFrames, c);
-    }
-    if (totalFrames == INT_MAX) totalFrames = 0;
-  }
-
-  if (calibProgressBar_) {
-    calibProgressBar_->setRange(0, totalFrames > 0 ? totalFrames : 0);
-    calibProgressBar_->setValue(0);
-  }
-  if (lblCalibProgress_) lblCalibProgress_->setText("Progress: tracking detect...");
-
-  auto readNext = [](InputSource& s, cv::Mat& out)->bool {
-    if (s.is_image_seq) {
-      if (s.seq_files.isEmpty() || s.seq_idx >= s.seq_files.size()) return false;
-      out = cv::imread(s.seq_files[s.seq_idx].toStdString(), cv::IMREAD_COLOR);
-      s.seq_idx++;
-      return !out.empty();
-    }
-    if (!s.cap.isOpened()) return false;
-    return s.cap.read(out) && !out.empty();
-  };
-
-  int processed = 0;
-  int framesWithDetections = 0;
-  int poseOkCount = 0;
-
-  while (true) {
-    std::vector<cv::Mat> frames(idx.size());
-    {
-      QMutexLocker lock(&sources_mutex_);
-      bool ok = true;
-      for (int i = 0; i < (int)idx.size(); ++i) {
-        if (!readNext(sources_[idx[i]], frames[i])) { ok = false; break; }
-      }
-      if (!ok) break;
-    }
-
-    std::vector<cv::Mat> vis = frames;
-    AprilTagDetections det;
-    std::vector<Observation> obs;
-    buildObservationsFromFrames(frames, tag_corner_map_, obs, &det, tag_dict_id_);
-
-    bool hasDet = false;
-    for (int i = 0; i < (int)vis.size(); ++i) {
-      if (i < (int)det.ids_per_cam.size() && !det.ids_per_cam[i].empty()) hasDet = true;
-      if (i < (int)det.ids_per_cam.size()) {
-        cv::aruco::drawDetectedMarkers(vis[i], det.corners_per_cam[i], det.ids_per_cam[i]);
-      }
-      cv::putText(vis[i], "cam" + std::to_string(i), cv::Point(15,30),
-                  cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0,255,0), 2, cv::LINE_AA);
-    }
-    if (hasDet) framesWithDetections++;
-
-    if ((int)cams_.size() == (int)frames.size() && obs.size() >= 3) {
-      auto res = estimatePoseRansac(cams_, obs, R_wr_, t_wr_, ransac_iters_, inlier_thresh_px_);
-      if (res.ok) {
-        R_wr_ = res.R_wr;
-        t_wr_ = res.t_wr;
-        Eigen::AngleAxisd aa(res.R_wr);
-        Eigen::Vector3d aavec = aa.axis() * aa.angle();
-        last_inliers_ = (int)res.inliers.size();
-        traj_.push_back(TrajRow{QDateTime::currentMSecsSinceEpoch(), t_wr_, aavec, last_inliers_});
-        poseOkCount++;
-        if (lblPose_) {
-          lblPose_->setText(QString("Pose t=[%1, %2, %3], aa=[%4, %5, %6], inliers=%7")
-                            .arg(t_wr_.x(),0,'f',4).arg(t_wr_.y(),0,'f',4).arg(t_wr_.z(),0,'f',4)
-                            .arg(aavec.x(),0,'f',4).arg(aavec.y(),0,'f',4).arg(aavec.z(),0,'f',4)
-                            .arg(last_inliers_));
-        }
-      }
-    }
-
-    for (int i = 0; i < (int)idx.size(); ++i) {
-      detect_overlay_cache_[idx[i]][processed] = vis[i];
-    }
-
-    std::vector<cv::Mat> uiFrames;
-    {
-      QMutexLocker frameLock(&frames_mutex_);
-      if ((int)last_frames_.size() < (int)sources_.size()) last_frames_.resize(sources_.size());
-      for (int i = 0; i < (int)idx.size(); ++i) last_frames_[idx[i]] = vis[i];
-      uiFrames = last_frames_;
-    }
-    updateSourceViews(uiFrames);
-    refreshTrajectoryPlot();
-
-    processed++;
-    if (calibProgressBar_) calibProgressBar_->setValue(processed);
-    if (lblCalibProgress_) {
-      lblCalibProgress_->setText(QString("Progress: tracking detect %1 / %2 | det=%3 | pose=%4")
-                                 .arg(processed)
-                                 .arg(std::max(processed, totalFrames))
-                                 .arg(framesWithDetections)
-                                 .arg(poseOkCount));
-    }
-    QApplication::processEvents();
-  }
-
-  logLine(QString("Detect All finished. processed=%1 detFrames=%2 poseOK=%3")
-          .arg(processed).arg(framesWithDetections).arg(poseOkCount));
+  QMessageBox::information(this, "Tracking", "Measurement algorithm is removed in this monocular version.");
+  logLine("Detect/Pose algorithm removed in monocular version.");
 }
 
 // ----------------- Sources: pause/resume -----------------
@@ -2106,31 +4975,9 @@ void MainWindow::onPauseResumeSelected() {
 
 // ----------------- Tracking: export trajectory -----------------
 void MainWindow::onExportTrajectory() {
-  if (traj_.empty()) {
-    QMessageBox::information(this, "Export", "No trajectory collected yet. Turn Pose ON and ensure tags are detected.");
-    return;
-  }
-  QString path = QFileDialog::getSaveFileName(this, "Export Trajectory CSV", "trajectory.csv", "CSV (*.csv)");
-  if (path.isEmpty()) return;
-
-  QFile f(path);
-  if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-    QMessageBox::warning(this, "Export", "Failed to open file for writing.");
-    return;
-  }
-  QByteArray header = "t_ms,tx,ty,tz,aax,aay,aaz,inliers\n";
-  f.write(header);
-  for (const auto& r : traj_) {
-    QString line = QString("%1,%2,%3,%4,%5,%6,%7,%8\n")
-      .arg(r.t_ms)
-      .arg(r.t.x(),0,'f',9).arg(r.t.y(),0,'f',9).arg(r.t.z(),0,'f',9)
-      .arg(r.aa.x(),0,'f',9).arg(r.aa.y(),0,'f',9).arg(r.aa.z(),0,'f',9)
-      .arg(r.inliers);
-    f.write(line.toUtf8());
-  }
-  f.close();
-  logLine(QString("Trajectory exported: %1 (rows=%2)").arg(path).arg(traj_.size()));
+  QMessageBox::information(this, "Export", "Trajectory export is unavailable because measurement algorithm is removed.");
 }
+
 
 // ----------------- Project config: save/load -----------------
 void MainWindow::onSaveProject() {
@@ -2187,12 +5034,13 @@ void MainWindow::onFramesFromWorker(FramePack frames, qint64 capture_ts_ms) {
     for (const auto& s : sources_) {
       if (s.is_cam || s.mode_owner!=(int)mode_) continue;
       if (s.is_image_seq) {
-        framePos = std::max<int64_t>(0, s.seq_idx);
+        framePos = (s.seq_idx > 0) ? std::max<int64_t>(0, (int64_t)s.seq_idx - 1) : 0;
         if (frameEnd <= 0) frameEnd = (int64_t)s.seq_files.size();
         break;
       }
       if (!s.cap.isOpened()) continue;
-      framePos = std::max<int64_t>(0, (int64_t)std::llround(s.cap.get(cv::CAP_PROP_POS_FRAMES)) - 1);
+      if (s.seq_idx > 0) framePos = std::max<int64_t>(0, (int64_t)s.seq_idx - 1);
+      else framePos = std::max<int64_t>(0, (int64_t)std::llround(s.cap.get(cv::CAP_PROP_POS_FRAMES)) - 1);
       double fc = s.cap.get(cv::CAP_PROP_FRAME_COUNT);
       if (frameEnd <= 0 && fc > 0) frameEnd = (int64_t)fc;
       break;
@@ -2201,6 +5049,18 @@ void MainWindow::onFramesFromWorker(FramePack frames, qint64 capture_ts_ms) {
   play_frame_ = framePos;
   if (play_end_frame_ <= 0 && frameEnd > 0) play_end_frame_ = frameEnd;
   updateProgressUI(play_frame_, play_end_frame_);
+
+  if (playback_running_ && play_end_frame_ > 0 && play_frame_ >= (play_end_frame_ - 1)) {
+    playback_running_ = false;
+    timer_.stop();
+    if (captureWorker_) QMetaObject::invokeMethod(captureWorker_, "stop", Qt::QueuedConnection);
+    if (btnPlayAll_) {
+      btnPlayAll_->setChecked(false);
+      btnPlayAll_->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
+      btnPlayAll_->setToolTip("Play");
+    }
+    logLine("Playback reached last frame and stopped.");
+  }
 
   // forward to solver thread (queued)
   if (solveWorker_) {
@@ -2319,117 +5179,790 @@ void MainWindow::onVisualizationPlotContextMenu(const QPoint& pos) {
   }
 }
 
-void MainWindow::refreshTrajectoryPlot() {
-  if (visCharts_.empty()) return;
-
-  static const QString kNames[6] = {"x", "y", "z", "aa_x", "aa_y", "aa_z"};
-  static const QColor kColors[6] = {
-    QColor(255,99,132), QColor(80,220,255), QColor(120,220,120),
-    QColor(255,179,71), QColor(186,104,200), QColor(121,134,203)
-  };
-
-  auto currentTrajIndex = [this]() -> int {
-    if (traj_.empty()) return -1;
-    if (play_end_frame_ > 1) {
-      double r = double(std::max<int64_t>(0, play_frame_)) / double(play_end_frame_ - 1);
-      int idx = (int)std::llround(r * double(std::max(0, (int)traj_.size() - 1)));
-      return std::max(0, std::min((int)traj_.size() - 1, idx));
-    }
-    return (int)traj_.size() - 1;
-  };
-
-  auto getComp = [&](const TrajRow& row, int comp) {
-    switch (comp) {
-      case 0: return row.t.x();
-      case 1: return row.t.y();
-      case 2: return row.t.z();
-      case 3: return row.aa.x();
-      case 4: return row.aa.y();
-      default: return row.aa.z();
-    }
-  };
-
-  for (auto& cfg : visCharts_) {
-    QCustomPlot* plot = cfg.plot;
-    if (!plot) continue;
-    const int nSeries = cfg.components.size();
-    if (nSeries <= 0) continue;
-
-    while (plot->graphCount() > nSeries + 1) plot->removeGraph(plot->graphCount()-1);
-    while (plot->graphCount() < nSeries + 1) plot->addGraph();
-
-    if (traj_.size() < 2) {
-      for (int g=0; g<plot->graphCount(); ++g) plot->graph(g)->setData({}, {});
-      plot->replot();
-      continue;
-    }
-
-    QVector<double> xs((int)traj_.size());
-    for (int i=0;i<(int)traj_.size();++i) xs[i] = i;
-
-    double yMin = 1e18, yMax = -1e18;
-    for (int g=0; g<nSeries; ++g) {
-      int comp = cfg.components[g];
-      QVector<double> ys((int)traj_.size());
-      for (int i=0;i<(int)traj_.size(); ++i) {
-        ys[i] = getComp(traj_[i], comp);
-        yMin = std::min(yMin, ys[i]);
-        yMax = std::max(yMax, ys[i]);
-      }
-      plot->graph(g)->setData(xs, ys);
-      plot->graph(g)->setPen(QPen(kColors[comp], 1.8));
-      plot->graph(g)->setName(kNames[comp]);
-    }
-    if (yMax - yMin < 1e-12) { yMax += 1.0; yMin -= 1.0; }
-
-    plot->xAxis->setRange(0, std::max(1, (int)traj_.size()-1));
-    plot->yAxis->setRange(yMin, yMax);
-
-    const int curIdx = currentTrajIndex();
-    const int cursorGraph = nSeries;
-    if (curIdx >= 0 && curIdx < (int)traj_.size()) {
-      QVector<double> cx(2), cy(2);
-      cx[0] = curIdx; cx[1] = curIdx;
-      cy[0] = yMin;   cy[1] = yMax;
-      plot->graph(cursorGraph)->setData(cx, cy);
-      plot->graph(cursorGraph)->setPen(QPen(QColor(255,70,70), 1.2));
-
-      QStringList vals;
-      vals << QString("t=%1").arg(curIdx);
-      for (int g=0; g<nSeries; ++g) {
-        int comp = cfg.components[g];
-        vals << QString("%1=%2").arg(kNames[comp]).arg(getComp(traj_[curIdx], comp), 0, 'f', 3);
-      }
-      plot->graph(cursorGraph)->setName(vals.join(" | "));
-    } else {
-      plot->graph(cursorGraph)->setData({}, {});
-      plot->graph(cursorGraph)->setName("cursor");
-    }
-
-    if (cfg.selector) {
-      QStringList options;
-      options << QString::fromUtf8("全部");
-      for (int g=0; g<nSeries; ++g) {
-        options << kNames[cfg.components[g]];
-      }
-      const int keepIndex = std::max(0, std::min(cfg.selector->currentIndex(), options.size()-1));
-      cfg.selector->blockSignals(true);
-      cfg.selector->clear();
-      cfg.selector->addItems(options);
-      cfg.selector->setCurrentIndex(keepIndex);
-      cfg.selector->blockSignals(false);
-
-      const int sel = cfg.selector->currentIndex();
-      for (int g=0; g<nSeries; ++g) {
-        const bool visible = (sel == 0) || (sel == g+1);
-        plot->graph(g)->setVisible(visible);
-      }
-    }
-
-    plot->graph(cursorGraph)->setVisible(true);
-    plot->legend->setVisible(false);
-    plot->replot();
+void MainWindow::updateMeasurementFromFrame(const cv::Mat& preprocessedFrame) {
+  if (preprocessedFrame.empty()) return;
+  auto contours = detectBinaryContours(preprocessedFrame);
+  if (contours.empty()) return;
+  size_t best = 0;
+  double bestA = 0.0;
+  for (size_t i=0;i<contours.size();++i) {
+    double a = std::abs(cv::contourArea(contours[i]));
+    if (a > bestA) { bestA = a; best = i; }
   }
+  const auto& c = contours[best];
+  cv::Moments mm = cv::moments(c);
+  if (std::abs(mm.m00) < 1e-9) return;
+  cv::Point2f ctr((float)(mm.m10/mm.m00), (float)(mm.m01/mm.m00));
+  double scale = (mm_per_pixel_ > 0.0) ? mm_per_pixel_ : 1.0;
+  double area = std::abs(cv::contourArea(c)) * scale * scale;
+  double perim = cv::arcLength(c, true) * scale;
+  cv::RotatedRect rr = cv::minAreaRect(c);
+  double major = std::max(rr.size.width, rr.size.height) * scale;
+  double minor = std::min(rr.size.width, rr.size.height) * scale;
+  double circ = (perim > 1e-9) ? (4.0 * std::acos(-1.0) * area / (perim * perim)) : 0.0;
+  qint64 key = last_capture_ts_ms_;
+  if ((progressSlider_ && progressSlider_->maximum() > 0) || play_end_frame_ > 0) {
+    key = std::max<qint64>(0, play_frame_);
+  }
+  if (key == last_meas_key_) return;
+  MeasureRow row;
+  row.key = key;
+  if (meas_rows_.empty()) {
+    first_ctr_ = ctr;
+    row.disp = 0.0;
+    row.speed = 0.0;
+    row.accel = 0.0;
+  } else {
+    row.disp = cv::norm(ctr - first_ctr_) * scale;
+    const double fps = std::max(1.0, play_fps_);
+    const double stepDisp = cv::norm(ctr - last_ctr_) * scale;
+    row.speed = stepDisp * fps;
+    row.accel = (row.speed - last_speed_) * fps;
+  }
+  row.area = area; row.perim = perim; row.major = major; row.minor = minor; row.circ = circ;
+  last_ctr_ = ctr;
+  last_speed_ = row.speed;
+  last_meas_key_ = key;
+  meas_rows_.push_back(row);
+}
+
+
+double MainWindow::metricValueForHist(const MeasureRow& r, const QString& metric) const {
+  if (metric == "Perimeter") return r.perim;
+  if (metric == "Circularity") return r.circ;
+  if (metric == "MajorAxis" || metric == "Major Axis") return r.major;
+  if (metric == "MinorAxis" || metric == "Minor Axis") return r.minor;
+  if (metric == "Speed") return r.speed;
+  if (metric == "Displacement") return r.disp;
+  if (metric == "Acceleration") return r.accel;
+  return r.area;
+}
+
+bool MainWindow::passesConfirmedHistogramRules(const MeasureRow& r) const {
+  for (const auto& kv : confirmed_hist_rules_) {
+    const double v = metricValueForHist(r, kv.first);
+    if (!std::isfinite(v)) return false;
+    if (v < kv.second.first || v > kv.second.second) return false;
+  }
+  return true;
+}
+
+void MainWindow::configureHistogramEditorsForMetric(const QString& metric) {
+  if (!spHistMin_ || !spHistMax_) return;
+  if (metric == "Circularity") {
+    spHistMin_->setDecimals(3); spHistMax_->setDecimals(3);
+    spHistMin_->setSingleStep(0.01); spHistMax_->setSingleStep(0.01);
+    spHistMin_->setRange(0.0, 1.0); spHistMax_->setRange(0.0, 1.0);
+  } else {
+    spHistMin_->setDecimals(4); spHistMax_->setDecimals(4);
+    spHistMin_->setSingleStep(0.1); spHistMax_->setSingleStep(0.1);
+    spHistMin_->setRange(-1e9, 1e9); spHistMax_->setRange(-1e9, 1e9);
+  }
+}
+
+void MainWindow::updateHistogramPlot() {
+  if (suppress_histogram_updates_) return;
+  if (!plotHistogram_ || !cbHistMetric_) return;
+
+  const QString metric = cbHistMetric_->currentText();
+  auto pick = [&](const MeasureRow& r)->double { return metricValueForHist(r, metric); };
+
+  std::vector<double> vals;
+  for (const auto& fs : analyzed_measures_by_frame_) {
+    for (const auto& am : fs) {
+      if (!am.enabled) continue;
+      vals.push_back(pick(am.m));
+    }
+  }
+  if (vals.empty()) {
+    vals.reserve(std::max(target_meas_rows_.size(), meas_rows_.size()));
+    if (!target_meas_rows_.empty()) {
+      for (const auto& t : target_meas_rows_) vals.push_back(pick(t.m));
+    } else {
+      for (const auto& r : meas_rows_) vals.push_back(pick(r));
+    }
+  }
+  vals.erase(std::remove_if(vals.begin(), vals.end(), [](double v){ return !std::isfinite(v); }), vals.end());
+  if (vals.empty()) { plotHistogram_->clearPlottables(); plotHistogram_->clearItems(); plotHistogram_->replot(); return; }
+  std::sort(vals.begin(), vals.end());
+
+  // Histogram bars/range are fixed by data distribution; Min/Max only move guide lines.
+  double dataLo = vals.front();
+  double dataHi = vals.back();
+  if (metric == "Circularity") { dataLo = 0.0; dataHi = 1.0; }
+  if (dataHi <= dataLo) dataHi = dataLo + 1.0;
+
+  double lo = spHistMin_ ? spHistMin_->value() : dataLo;
+  double hi = spHistMax_ ? spHistMax_->value() : dataHi;
+  if (hi <= lo) hi = lo + 1.0;
+
+  const int bins = 10;
+  const double span = dataHi - dataLo;
+  if (!std::isfinite(span) || span <= 0.0) {
+    plotHistogram_->clearPlottables();
+    plotHistogram_->clearItems();
+    plotHistogram_->replot();
+    return;
+  }
+  const double binW = span / bins;
+  QVector<double> x(bins), y(bins);
+  for (int i=0;i<bins;++i) {
+    x[i] = dataLo + (i + 0.5) * binW;
+    y[i] = 0.0;
+  }
+  for (double v : vals) {
+    if (!std::isfinite(v)) continue;
+    int b = std::min(bins-1, std::max(0, (int)((v-dataLo)/span*bins)));
+    if (b < 0 || b >= bins) continue;
+    y[b] += 1.0;
+  }
+
+  plotHistogram_->clearPlottables();
+  plotHistogram_->clearItems();
+  QCPBars* bars = new QCPBars(plotHistogram_->xAxis, plotHistogram_->yAxis);
+  bars->setWidth(binW * 0.9);
+  bars->setPen(QPen(QColor(59,130,246), 1.0));
+  bars->setBrush(QColor(96,165,250,180));
+  bars->setData(x, y);
+
+  auto addVLine = [&](double xv, const QColor& c){
+    auto* line = new QCPItemStraightLine(plotHistogram_);
+    line->setPen(QPen(c, 2, Qt::DashLine));
+    line->point1->setType(QCPItemPosition::ptPlotCoords);
+    line->point2->setType(QCPItemPosition::ptPlotCoords);
+    line->point1->setCoords(xv, 0.0);
+    line->point2->setCoords(xv, 1.0);
+  };
+  addVLine(lo, QColor(244,63,94));
+  addVLine(hi, QColor(16,185,129));
+
+  plotHistogram_->xAxis->setLabel(metric);
+  plotHistogram_->yAxis->setLabel("Count");
+  plotHistogram_->xAxis->setRange(dataLo, dataHi);
+  double ymax = 1.0;
+  for (double c : y) ymax = std::max(ymax, c);
+  plotHistogram_->yAxis->setRange(0, ymax * 1.1);
+  plotHistogram_->replot();
+}
+
+void MainWindow::refreshTrajectoryPlot() {
+  const bool useTimeAxis = !cbXAxisMode_ || cbXAxisMode_->currentIndex() == 0;
+  const double fps = std::max(1.0, play_fps_);
+  auto xFromKey = [&](qint64 key)->double { return useTimeAxis ? ((double)key / fps) : (double)key; };
+  auto fillPlot = [&](QCustomPlot* p, auto getter, const QString& yLabel) {
+    if (!p) return;
+    const int n = (int)meas_rows_.size();
+    QVector<double> x(n), y(n);
+    for (int i=0;i<n;++i) { x[i]=xFromKey(meas_rows_[i].key); y[i]=getter(meas_rows_[i]); }
+    if (p->graphCount() == 0) p->addGraph();
+    p->graph(0)->setData(x, y);
+    p->xAxis->setLabel(useTimeAxis ? "Time (s)" : "Frame");
+    if (useTimeAxis) {
+      p->xAxis->setNumberFormat("gb");
+      p->xAxis->setNumberPrecision(4);
+    } else {
+      p->xAxis->setNumberFormat("f");
+      p->xAxis->setNumberPrecision(0);
+    }
+    p->yAxis->setLabel(yLabel);
+    p->rescaleAxes(true);
+    p->replot();
+  };
+  fillPlot(lblTrajPosPlot_, [](const MeasureRow& r){ return r.disp; }, "Displacement");
+  fillPlot(lblTrajAngPlot_, [](const MeasureRow& r){ return r.speed; }, "Speed");
+  fillPlot(plotArea_, [](const MeasureRow& r){ return r.area; }, "Area");
+  fillPlot(plotPerimeter_, [](const MeasureRow& r){ return r.perim; }, "Perimeter");
+  fillPlot(plotCircularity_, [](const MeasureRow& r){ return r.circ; }, "Circularity");
+  fillPlot(plotAccel_, [](const MeasureRow& r){ return r.accel; }, "Acceleration");
+
+  if (tblMeasurements_) {
+    tblMeasurements_->setRowCount((int)meas_rows_.size());
+    for (int i=0;i<(int)meas_rows_.size();++i) {
+      const auto& r = meas_rows_[i];
+      const double sc = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
+      auto set=[&](int c,double v){ tblMeasurements_->setItem(i,c,new QTableWidgetItem(QString::number(v,'f',4))); };
+      set(0,r.disp); set(1,r.speed); set(2,r.accel); set(3,r.area); set(4,r.perim); set(5,r.major); set(6,r.minor); set(7,r.circ); set(8,sc);
+    }
+  }
+  updateHistogramPlot();
+}
+
+
+void MainWindow::rebuildMeasurementSeriesFromCurrentSource(bool showProgress) {
+  measurements_frozen_ = false;
+  int totalFrames = progressSlider_ ? (progressSlider_->maximum() + 1) : 0;
+  if (totalFrames <= 0 && play_end_frame_ > 0) totalFrames = (int)play_end_frame_;
+
+  int srcIdx = -1;
+  {
+    QMutexLocker srcLock(&sources_mutex_);
+    for (int i=0;i<(int)sources_.size();++i) {
+      if (!sources_[i].is_cam && sources_[i].mode_owner==(int)mode_) { srcIdx = i; break; }
+    }
+    if (srcIdx < 0) {
+      for (int i=0;i<(int)sources_.size();++i) {
+        if (!sources_[i].is_cam) { srcIdx = i; break; }
+      }
+    }
+  }
+  if (srcIdx < 0) return;
+
+  if (totalFrames <= 0) {
+    QMutexLocker srcLock(&sources_mutex_);
+    if (srcIdx >= 0 && srcIdx < (int)sources_.size()) {
+      const auto& src = sources_[srcIdx];
+      if (src.is_image_seq) totalFrames = (int)src.seq_files.size();
+      else if (src.cap.isOpened()) {
+        double fc = src.cap.get(cv::CAP_PROP_FRAME_COUNT);
+        if (fc > 0) totalFrames = (int)fc;
+      }
+    }
+  }
+  if (totalFrames <= 0) return;
+
+  std::unique_ptr<QProgressDialog> progress;
+  if (showProgress) {
+    progress.reset(new QProgressDialog("Tracking all frames...", QString(), 0, totalFrames, this));
+    progress->setWindowModality(Qt::ApplicationModal);
+    progress->setCancelButton(nullptr);
+    progress->setMinimumDuration(0);
+    progress->setValue(0);
+    progress->show();
+    qApp->processEvents();
+  }
+
+  std::vector<cv::Mat> frames(totalFrames);
+  int savedSeq = -1;
+  double savedPos = -1.0;
+  {
+    QMutexLocker srcLock(&sources_mutex_);
+    if (srcIdx >= (int)sources_.size()) return;
+    auto& src = sources_[srcIdx];
+    if (src.is_cam) return;
+    if (src.is_image_seq) {
+      savedSeq = src.seq_idx;
+      for (int i=0;i<totalFrames;++i) {
+        if (i < src.seq_files.size()) frames[i] = imreadUnicodePath(src.seq_files[i], cv::IMREAD_COLOR);
+      }
+      src.seq_idx = std::max(0, std::min(savedSeq, std::max(0, totalFrames-1)));
+    } else {
+      if (!src.cap.isOpened()) return;
+      savedPos = src.cap.get(cv::CAP_PROP_POS_FRAMES);
+      for (int i=0;i<totalFrames;++i) {
+        src.cap.set(cv::CAP_PROP_POS_FRAMES, (double)i);
+        src.cap.read(frames[i]);
+      }
+      src.cap.set(cv::CAP_PROP_POS_FRAMES, savedPos);
+    }
+  }
+
+  meas_rows_.clear();
+  target_meas_rows_.clear();
+  analyzed_measures_by_frame_.clear();
+  last_meas_key_ = std::numeric_limits<qint64>::min();
+  last_ctr_ = cv::Point2f(0,0);
+  first_ctr_ = cv::Point2f(0,0);
+  last_speed_ = 0.0;
+
+  std::unordered_map<int, cv::Point2f> id_last_ctr;
+  std::unordered_map<int, cv::Point2f> id_first_ctr;
+  std::unordered_map<int, double> id_last_speed;
+  std::unordered_map<int, cv::Point2f> id_prev_centroids;
+  int id_next = 1;
+
+  const int64_t savedPlayFrame = play_frame_;
+  if (play_end_frame_ < totalFrames) play_end_frame_ = totalFrames;
+  updateProgressUI(play_frame_, play_end_frame_);
+
+  for (int i=0;i<totalFrames;++i) {
+    if (progress) {
+      progress->setValue(i);
+      progress->setLabelText(QString("Tracking all frames... %1/%2").arg(i+1).arg(totalFrames));
+      qApp->processEvents();
+    }
+    if (frames[i].empty()) continue;
+    cv::Mat f = applyPreprocess(frames[i]);
+    auto contoursAll = detectBinaryContours(f);
+    std::unordered_map<int, cv::Point2f> id_curr_centroids;
+    const float maxDist = 60.0f;
+    for (const auto& c : contoursAll) {
+      if (c.empty()) continue;
+      cv::Moments mm = cv::moments(c);
+      if (std::abs(mm.m00) < 1e-9) continue;
+      cv::Point2f ctr((float)(mm.m10/mm.m00), (float)(mm.m01/mm.m00));
+      int bestId = -1; float bestD = maxDist;
+      for (const auto& kv : id_prev_centroids) {
+        float d = cv::norm(ctr - kv.second);
+        if (d < bestD) { bestD = d; bestId = kv.first; }
+      }
+      if (bestId < 0) bestId = id_next++;
+      id_curr_centroids[bestId] = ctr;
+      const double scale = (mm_per_pixel_ > 0.0) ? mm_per_pixel_ : 1.0;
+      MeasureRow row;
+      row.key = i;
+      row.area = std::abs(cv::contourArea(c)) * scale * scale;
+      row.perim = cv::arcLength(c, true) * scale;
+      cv::RotatedRect rr = cv::minAreaRect(c);
+      row.major = std::max(rr.size.width, rr.size.height) * scale;
+      row.minor = std::min(rr.size.width, rr.size.height) * scale;
+      row.circ = (row.perim > 1e-9) ? (4.0 * std::acos(-1.0) * row.area / (row.perim * row.perim)) : 0.0;
+      auto itPrev = id_last_ctr.find(bestId);
+      auto itFirst = id_first_ctr.find(bestId);
+      if (itPrev == id_last_ctr.end()) {
+        id_first_ctr[bestId] = ctr;
+        row.disp = 0.0;
+        row.speed = 0.0;
+        row.accel = 0.0;
+      } else {
+        if (itFirst == id_first_ctr.end()) {
+          id_first_ctr[bestId] = itPrev->second;
+          itFirst = id_first_ctr.find(bestId);
+        }
+        row.disp = cv::norm(ctr - itFirst->second) * scale;
+        const double fps = std::max(1.0, play_fps_);
+        const double stepDisp = cv::norm(ctr - itPrev->second) * scale;
+        row.speed = stepDisp * fps;
+        row.accel = (row.speed - id_last_speed[bestId]) * fps;
+      }
+      id_last_ctr[bestId] = ctr;
+      id_last_speed[bestId] = row.speed;
+      target_meas_rows_.push_back(TargetMeasureRow{bestId, row});
+    }
+    id_prev_centroids = id_curr_centroids;
+
+    play_frame_ = i;
+    updateMeasurementFromFrame(f);
+  }
+  play_frame_ = savedPlayFrame;
+  updateProgressUI(play_frame_, play_end_frame_);
+  measurements_frozen_ = true;
+  if (progress) {
+    progress->setValue(totalFrames);
+    qApp->processEvents();
+  }
+  updateLeftVisualDashboard();
+  updateDetectParticlePanel();
+}
+
+void MainWindow::updateDetectParticlePanel() {
+  if (!lblDetectParticleCount_ || !tblDetectParticles_) return;
+  const int frameIdx = std::max(0, (int)play_frame_);
+  std::vector<std::vector<cv::Point>> contours;
+  std::vector<MeasureRow> rows;
+
+  if (contour_mask_frame_key_ == frameIdx && !contour_mask_working_contours_.empty()) {
+    contours = contour_mask_working_contours_;
+  } else if (frameIdx < (int)analyzed_measures_by_frame_.size() && !analyzed_measures_by_frame_[frameIdx].empty()) {
+    for (const auto& am : analyzed_measures_by_frame_[frameIdx]) {
+      contours.push_back(am.contour);
+      rows.push_back(am.m);
+    }
+  } else {
+    std::vector<cv::Mat> frames;
+    {
+      QMutexLocker locker(&frames_mutex_);
+      frames = last_frames_;
+    }
+    cv::Mat f;
+    for (const auto& it : frames) { if (!it.empty()) { f = applyPreprocess(it); break; } }
+    if (!f.empty()) {
+      contours = detectBinaryContours(f);
+    }
+  }
+
+  const double scale = (mm_per_pixel_ > 0.0 ? mm_per_pixel_ : 1.0);
+  if (rows.empty()) {
+    rows.reserve(contours.size());
+    for (const auto& c : contours) {
+      if (c.size() < 5) continue;
+      MeasureRow r;
+      r.area = std::abs(cv::contourArea(c)) * scale * scale;
+      r.perim = cv::arcLength(c, true) * scale;
+      cv::RotatedRect rr = cv::minAreaRect(c);
+      r.major = std::max(rr.size.width, rr.size.height) * scale;
+      r.minor = std::min(rr.size.width, rr.size.height) * scale;
+      r.circ = (r.perim > 1e-9) ? (4.0 * std::acos(-1.0) * r.area / (r.perim * r.perim)) : 0.0;
+      rows.push_back(r);
+    }
+  }
+
+  lblDetectParticleCount_->setText(QString("Particles: %1").arg((int)rows.size()));
+  tblDetectParticles_->setRowCount((int)rows.size());
+  for (int i=0; i<(int)rows.size(); ++i) {
+    auto setTxt = [&](int c, const QString& v){
+      auto* item = new QTableWidgetItem(v);
+      item->setTextAlignment(Qt::AlignCenter);
+      tblDetectParticles_->setItem(i, c, item);
+    };
+    setTxt(0, QString::number(i + 1));
+    setTxt(1, QString::number(rows[i].area, 'f', 4));
+    setTxt(2, QString::number(rows[i].major, 'f', 4));
+    setTxt(3, QString::number(rows[i].minor, 'f', 4));
+    setTxt(4, QString::number(rows[i].circ, 'f', 4));
+  }
+}
+
+void MainWindow::updateLeftVisualDashboard() {
+  if (updating_left_visual_dashboard_) return;
+  QScopedValueRollback<bool> updatingGuard(updating_left_visual_dashboard_, true);
+  const bool realScale = mm_per_pixel_ > 0.0;
+  const QString lenU = realScale ? "mm" : "px";
+  const QString areaU = realScale ? "mm²" : "px²";
+
+  int curIdx = -1;
+  int totalFrames = progressSlider_ ? (progressSlider_->maximum() + 1) : ((play_end_frame_ > 0) ? (int)play_end_frame_ : (int)meas_rows_.size());
+  if (totalFrames <= 0) totalFrames = (int)meas_rows_.size();
+  if (totalFrames > 0) curIdx = std::max(0, std::min((int)play_frame_, totalFrames - 1));
+  const bool useTimeAxis = !cbXAxisMode_ || cbXAxisMode_->currentIndex() == 0;
+  const double fpsAxis = std::max(1.0, play_fps_);
+  auto xFromKey = [&](qint64 key)->double { return useTimeAxis ? ((double)key / fpsAxis) : (double)key; };
+
+  auto metricOf = [&](const MeasureRow& r, int idx)->double {
+    if (idx == 1) return r.speed;
+    if (idx == 2) return r.accel;
+    if (idx == 3) return r.area;
+    if (idx == 4) return r.perim;
+    if (idx == 5) return r.major;
+    if (idx == 6) return r.minor;
+    if (idx == 7) return r.circ;
+    return r.disp;
+  };
+  auto passHistThreshold = [&](const MeasureRow& r)->bool {
+    return passesConfirmedHistogramRules(r);
+  };
+
+  auto metricLabel = [&](int idx)->QString {
+    if (idx == 1) return QString("Speed (%1/s)").arg(lenU);
+    if (idx == 2) return QString("Acceleration (%1/s²)").arg(lenU);
+    if (idx == 3) return QString("Area (%1)").arg(areaU);
+    if (idx == 4) return QString("Perimeter (%1)").arg(lenU);
+    if (idx == 5) return QString("Major Axis (%1)").arg(lenU);
+    if (idx == 6) return QString("Minor Axis (%1)").arg(lenU);
+    if (idx == 7) return "Circularity (-)";
+    return QString("Displacement (%1)").arg(lenU);
+  };
+
+  std::set<int> ids;
+  for (const auto& tr : target_meas_rows_) ids.insert(tr.id);
+  if (ids.empty() && !meas_rows_.empty()) ids.insert(0);
+
+  if (cbTargetFilter_) {
+    auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model());
+    const bool popupVisible = cbTargetFilter_->view() && cbTargetFilter_->view()->isVisible();
+    if (model && !popupVisible) {
+      std::map<int, Qt::CheckState> old;
+      Qt::CheckState oldAll = Qt::Checked;
+      if (auto* ai=model->item(0)) oldAll = ai->checkState();
+      for (int i=1;i<model->rowCount();++i) {
+        auto* it = model->item(i);
+        if (!it) continue;
+        bool ok=false;
+        int id = it->data(Qt::UserRole).toInt(&ok);
+        if (ok) old[id] = (Qt::CheckState)it->checkState();
+      }
+      model->blockSignals(true);
+      if (model->rowCount() == 0) model->appendRow(new QStandardItem("ALL"));
+      if (auto* ai=model->item(0)) { ai->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable); ai->setData(-1, Qt::UserRole); ai->setCheckState(oldAll); }
+      while (model->rowCount() > 1) model->removeRow(1);
+      bool allCheckedNow = true;
+      for (int id : ids) {
+        auto* it = new QStandardItem(QString("ID %1").arg(id));
+        it->setData(id, Qt::UserRole);
+        it->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        it->setCheckState(old.count(id) ? old[id] : Qt::Checked);
+        if (it->checkState() != Qt::Checked) allCheckedNow = false;
+        model->appendRow(it);
+      }
+      if (auto* ai=model->item(0)) ai->setCheckState(allCheckedNow ? Qt::Checked : Qt::Unchecked);
+      model->blockSignals(false);
+    }
+  }
+
+  std::set<int> showIds;
+  if (cbTargetFilter_) {
+    if (auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model())) {
+      for (int i=1;i<model->rowCount();++i) {
+        auto* it = model->item(i);
+        if (it && it->checkState() == Qt::Checked) showIds.insert(it->data(Qt::UserRole).toInt());
+      }
+    }
+  }
+  if (showIds.empty()) {
+    if (cbTargetFilter_) {
+      if (auto* model = qobject_cast<QStandardItemModel*>(cbTargetFilter_->model())) {
+        auto* allItem = model->item(0);
+        if (allItem && allItem->checkState()==Qt::Checked) showIds = ids;
+      }
+    } else {
+      showIds = ids;
+    }
+  }
+
+  auto fill=[&](QCustomPlot* p, int metricIdx, const QString& yLabel){
+    if(!p) return;
+    const QCPRange prevX = p->xAxis->range();
+    const QCPRange prevY = p->yAxis->range();
+    double yMin = 0.0, yMax = 1.0;
+    bool has=false;
+    p->clearGraphs();
+    p->clearItems();
+    int gi = 0;
+    std::unordered_map<int, std::unordered_map<qint64, double>> idKeyToY;
+    for (int id : showIds) {
+      QVector<double> x, y;
+      if (!target_meas_rows_.empty()) {
+        for (const auto& tr : target_meas_rows_) {
+          if (tr.id != id || !passHistThreshold(tr.m)) continue;
+          x.push_back(xFromKey(tr.m.key));
+          double v = metricOf(tr.m, metricIdx);
+          y.push_back(v);
+          idKeyToY[id][tr.m.key] = v;
+          if (std::isfinite(v)) {
+            if (!has) { yMin = yMax = v; has = true; }
+            else { yMin = std::min(yMin, v); yMax = std::max(yMax, v); }
+          }
+        }
+      } else {
+        for (const auto& r : meas_rows_) {
+          if (!passHistThreshold(r)) continue;
+          x.push_back(xFromKey(r.key));
+          double v = metricOf(r, metricIdx);
+          y.push_back(v);
+          idKeyToY[id][r.key] = v;
+          if (std::isfinite(v)) {
+            if (!has) { yMin = yMax = v; has = true; }
+            else { yMin = std::min(yMin, v); yMax = std::max(yMax, v); }
+          }
+        }
+      }
+      p->addGraph();
+      QColor c = QColor::fromHsv((id*57)%360, 180, 230);
+      p->graph(gi)->setName(QString("ID %1").arg(id));
+      p->graph(gi)->setPen(QPen(c, 2.0));
+      p->graph(gi)->setData(x, y);
+      gi++;
+    }
+    if(!has){ yMin=0.0; yMax=1.0; }
+    if(std::abs(yMax-yMin) < 1e-9){ yMin-=1.0; yMax+=1.0; }
+    p->addGraph();
+    p->graph(gi)->setName("cursorLine");
+    p->graph(gi)->setPen(QPen(QColor(239,68,68),1.6));
+    p->graph(gi)->removeFromLegend();
+    p->graph(gi)->setData({}, {});
+    if (curIdx >= 0) {
+      QVector<double> cx(2), cy(2); const double xcur = xFromKey(curIdx); cx[0]=xcur; cx[1]=xcur; cy[0]=yMin; cy[1]=yMax; p->graph(gi)->setData(cx,cy);
+      const qint64 keyNow = static_cast<qint64>(curIdx);
+      std::vector<int> idsForLabels(showIds.begin(), showIds.end());
+      std::sort(idsForLabels.begin(), idsForLabels.end());
+      int labelIndex = 0;
+      for (int id : idsForLabels) {
+        auto itId = idKeyToY.find(id);
+        if (itId == idKeyToY.end()) continue;
+        auto itY = itId->second.find(keyNow);
+        if (itY == itId->second.end() || !std::isfinite(itY->second)) continue;
+        const double yv = itY->second;
+        auto* txt = new QCPItemText(p);
+        txt->setPositionAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        txt->position->setType(QCPItemPosition::ptPlotCoords);
+        txt->position->setCoords(xcur, yv);
+        txt->setText(QString("ID %1: %2").arg(id).arg(yv, 0, 'f', 3));
+        txt->setColor(QColor(248,250,252));
+        txt->setFont(QFont("", 8));
+        txt->setPadding(QMargins(3,1,3,1));
+        txt->setBrush(QBrush(QColor(30,41,59,180)));
+        txt->setPositionAlignment((labelIndex % 2 == 0) ? (Qt::AlignLeft | Qt::AlignVCenter)
+                                                         : (Qt::AlignRight | Qt::AlignVCenter));
+        labelIndex++;
+      }
+    }
+    if (selected_target_id_ >= 0 && selected_target_frame_ >= 0) {
+      p->addGraph();
+      const int markerGraphIdx = p->graphCount() - 1;
+      if (markerGraphIdx >= 0) {
+        p->graph(markerGraphIdx)->setName("selectedPoint");
+        p->graph(markerGraphIdx)->setLineStyle(QCPGraph::lsNone);
+        p->graph(markerGraphIdx)->setScatterStyle(QCPScatterStyle(QCPScatterStyle::ssDisc, QColor(255,200,0), QColor(255,230,0), 9));
+        p->graph(markerGraphIdx)->removeFromLegend();
+        for (const auto& tr : target_meas_rows_) {
+          if (tr.id == selected_target_id_ && tr.m.key == selected_target_frame_) {
+            p->graph(markerGraphIdx)->setData(QVector<double>{xFromKey(selected_target_frame_)}, QVector<double>{metricOf(tr.m, metricIdx)});
+            break;
+          }
+        }
+      }
+    }
+    p->xAxis->setLabel(useTimeAxis ? "Time (s)" : "Frame");
+    p->yAxis->setLabel(yLabel);
+    const double defXUpper = useTimeAxis ? std::max(1.0, (double)std::max(1, totalFrames-1) / fpsAxis) : (double)std::max(1, totalFrames-1);
+    if (playback_running_) {
+      p->xAxis->setRange(0, defXUpper);
+      p->yAxis->setRange(yMin, yMax);
+    } else {
+      if (prevX.size() > 1e-9 && std::isfinite(prevX.lower) && std::isfinite(prevX.upper)) p->xAxis->setRange(prevX);
+      else p->xAxis->setRange(0, defXUpper);
+      if (prevY.size() > 1e-9 && std::isfinite(prevY.lower) && std::isfinite(prevY.upper)) p->yAxis->setRange(prevY);
+      else p->yAxis->setRange(yMin, yMax);
+    }
+    p->replot();
+  };
+
+  fill(leftDispPlot_, cbDispMetric_ ? cbDispMetric_->currentIndex() : 0, metricLabel(cbDispMetric_ ? cbDispMetric_->currentIndex() : 0));
+  fill(leftSpeedPlot_, cbSpeedMetric_ ? cbSpeedMetric_->currentIndex() : 1, metricLabel(cbSpeedMetric_ ? cbSpeedMetric_->currentIndex() : 1));
+  fill(leftAreaPlot_, cbAreaMetric_ ? cbAreaMetric_->currentIndex() : 3, metricLabel(cbAreaMetric_ ? cbAreaMetric_->currentIndex() : 3));
+  fill(leftPerimPlot_, cbPerimMetric_ ? cbPerimMetric_->currentIndex() : 4, metricLabel(cbPerimMetric_ ? cbPerimMetric_->currentIndex() : 4));
+  fill(leftCircPlot_, cbCircMetric_ ? cbCircMetric_->currentIndex() : 7, metricLabel(cbCircMetric_ ? cbCircMetric_->currentIndex() : 7));
+
+  if (leftMeasureTable_) {
+    leftMeasureTable_->setHorizontalHeaderLabels({"Frame","ID",
+      QString("Disp (%1)").arg(lenU), QString("Speed (%1/s)").arg(lenU), QString("Accel (%1/s²)").arg(lenU),
+      QString("Area (%1)").arg(areaU), QString("Perimeter (%1)").arg(lenU), QString("Major (%1)").arg(lenU), QString("Minor (%1)").arg(lenU), "Circularity (-)"});
+    std::vector<TargetMeasureRow> rows = target_meas_rows_;
+    if (rows.empty()) {
+      for (const auto& r : meas_rows_) rows.push_back(TargetMeasureRow{0, r});
+    }
+    std::sort(rows.begin(), rows.end(), [](const TargetMeasureRow& a, const TargetMeasureRow& b){
+      if (a.m.key != b.m.key) return a.m.key < b.m.key;
+      return a.id < b.id;
+    });
+    int rr = 0;
+    leftMeasureTable_->setRowCount((int)rows.size());
+    auto setTxt=[&](int r,int c,const QString& v){
+      auto* item = new QTableWidgetItem(v);
+      item->setTextAlignment(Qt::AlignCenter);
+      leftMeasureTable_->setItem(r,c,item);
+    };
+    qint64 lastFrameShown = std::numeric_limits<qint64>::min();
+    for (int i=0;i<(int)rows.size();++i) {
+      const auto& t = rows[i];
+      if (!showIds.count(t.id) || !passHistThreshold(t.m)) continue;
+      if (t.m.key == lastFrameShown) continue; // one row per frame when multiple targets exist
+      lastFrameShown = t.m.key;
+      setTxt(rr,0,QString::number(t.m.key));
+      setTxt(rr,1,QString::number(t.id));
+      setTxt(rr,2,QString::number(t.m.disp,'f',4));
+      setTxt(rr,3,QString::number(t.m.speed,'f',4));
+      setTxt(rr,4,QString::number(t.m.accel,'f',4));
+      setTxt(rr,5,QString::number(t.m.area,'f',4));
+      setTxt(rr,6,QString::number(t.m.perim,'f',4));
+      setTxt(rr,7,QString::number(t.m.major,'f',4));
+      setTxt(rr,8,QString::number(t.m.minor,'f',4));
+      setTxt(rr,9,QString::number(t.m.circ,'f',4));
+      rr++;
+    }
+    leftMeasureTable_->setRowCount(rr);
+    int pickRow = -1;
+    for (int r=0; r<leftMeasureTable_->rowCount(); ++r) {
+      auto* frIt = leftMeasureTable_->item(r,0);
+      if (frIt && frIt->text().toLongLong() == play_frame_) { pickRow = r; break; }
+    }
+    if (pickRow >= 0) {
+      QSignalBlocker b(leftMeasureTable_);
+      leftMeasureTable_->selectRow(pickRow);
+      leftMeasureTable_->scrollToItem(leftMeasureTable_->item(pickRow,0), QAbstractItemView::PositionAtCenter);
+      auto* frIt = leftMeasureTable_->item(pickRow,0);
+      auto* idIt = leftMeasureTable_->item(pickRow,1);
+      selected_target_frame_ = frIt ? frIt->text().toInt() : -1;
+      selected_target_id_ = idIt ? idIt->text().toInt() : -1;
+    } else {
+      QSignalBlocker b(leftMeasureTable_);
+      leftMeasureTable_->clearSelection();
+      selected_target_frame_ = -1;
+      selected_target_id_ = -1;
+    }
+  }
+}
+
+void MainWindow::savePlotAsBmp(QCustomPlot* plot, const QString& nameHint) {
+  if (!plot) return;
+  QString def = QString("%1_%2.bmp").arg(nameHint, QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+  QString path = QFileDialog::getSaveFileName(this, "Save Plot BMP", def, "Bitmap (*.bmp)");
+  if (path.isEmpty()) return;
+  const int w = std::max(1920, plot->width() * 2);
+  const int h = std::max(1080, plot->height() * 2);
+  if (!plot->saveBmp(path, w, h, 1.0, -1)) {
+    QMessageBox::warning(this, "Save BMP", "Failed to save plot image.");
+    return;
+  }
+  openSavedDirectoryForFile(path);
+}
+
+void MainWindow::onCaptureVisualSnapshot() {
+  if (!visualDashHost_) return;
+  QString def = QString("visual_window_%1.bmp").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+  QString path = QFileDialog::getSaveFileName(this, "Save Visual Snapshot", def, "Bitmap (*.bmp)");
+  if (path.isEmpty()) return;
+  QPixmap pm = visualDashHost_->grab();
+  if (!pm.save(path, "BMP")) {
+    QMessageBox::warning(this, "Snapshot", "Failed to save snapshot.");
+    return;
+  }
+  openSavedDirectoryForFile(path);
+}
+
+void MainWindow::onExportTableCsv() {
+  if (!leftMeasureTable_) return;
+  QString def = QString("measurements_%1.csv").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+  QString path = QFileDialog::getSaveFileName(this, "Export CSV", def, "CSV (*.csv)");
+  if (path.isEmpty()) return;
+  QFile f(path);
+  if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    QMessageBox::warning(this, "Export CSV", "Failed to open file.");
+    return;
+  }
+  QTextStream ts(&f);
+  QStringList headers;
+  for (int c=0;c<leftMeasureTable_->columnCount();++c) {
+    auto* hi = leftMeasureTable_->horizontalHeaderItem(c);
+    headers << (hi ? hi->text() : QString("Col%1").arg(c));
+  }
+  ts << headers.join(',') << "\n";
+  for (int r=0;r<leftMeasureTable_->rowCount();++r) {
+    for (int c=0;c<leftMeasureTable_->columnCount();++c) {
+      auto* it = leftMeasureTable_->item(r,c);
+      QString v = it ? it->text() : "";
+      if (v.contains(',')) v = QString("\"") + v + "\"";
+      if (c > 0) ts << ',';
+      ts << v;
+    }
+    ts << "\n";
+  }
+  f.close();
+  openSavedDirectoryForFile(path);
+}
+
+void MainWindow::onExportVisualMp4() {
+  if (!visualDashHost_ || !progressSlider_) return;
+  QString def = QString("visual_record_%1.mp4").arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+  QString path = QFileDialog::getSaveFileName(this, "Export MP4", def, "MP4 (*.mp4)");
+  if (path.isEmpty()) return;
+
+  const int start = progressSlider_->minimum();
+  const int end = progressSlider_->maximum();
+  if (end < start) return;
+  int savedFrame = (int)play_frame_;
+
+  QImage first = visualDashHost_->grab().toImage().convertToFormat(QImage::Format_RGB888);
+  cv::Mat firstMat(first.height(), first.width(), CV_8UC3, (void*)first.bits(), first.bytesPerLine());
+  cv::Mat firstBgr; cv::cvtColor(firstMat, firstBgr, cv::COLOR_RGB2BGR);
+  cv::VideoWriter writer(path.toStdString(), cv::VideoWriter::fourcc('m','p','4','v'), std::max(1.0, play_fps_), firstBgr.size());
+  if (!writer.isOpened()) {
+    QMessageBox::warning(this, "Export MP4", "Failed to create mp4 writer.");
+    return;
+  }
+
+  for (int i=start; i<=end; ++i) {
+    play_frame_ = i;
+    onTick();
+    qApp->processEvents();
+    QImage qi = visualDashHost_->grab().toImage().convertToFormat(QImage::Format_RGB888);
+    cv::Mat rgb(qi.height(), qi.width(), CV_8UC3, (void*)qi.bits(), qi.bytesPerLine());
+    cv::Mat bgr; cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
+    writer.write(bgr);
+  }
+  writer.release();
+  play_frame_ = savedFrame;
+  onTick();
+  openSavedDirectoryForFile(path);
 }
 
 void MainWindow::onPoseFromWorker(const PoseResult& r) {
@@ -2526,6 +6059,7 @@ int MainWindow::videoSourceCount() const {
 }
 
 void MainWindow::stopCaptureBlocking() {
+  timer_.stop();
   if (!captureWorker_) return;
   // BlockingQueuedConnection ensures timer stops before returning
   QMetaObject::invokeMethod(captureWorker_, "stop", Qt::BlockingQueuedConnection);
@@ -2563,7 +6097,8 @@ void MainWindow::updatePlaybackParams() {
       minFrames = 0;
     }
     play_end_frame_ = minFrames;
-    play_fps_ = (fps > 0.0 ? fps : 30.0);
+    double autoFps = (fps > 0.0 ? fps : 30.0);
+    play_fps_ = (spSourceFps_ ? std::max(1.0, spSourceFps_->value()) : autoFps);
     QMetaObject::invokeMethod(captureWorker_, "setPlaybackRangeSlot", Qt::BlockingQueuedConnection,
                               Q_ARG(qint64, (qint64)0), Q_ARG(qint64, (qint64)play_end_frame_), Q_ARG(double, play_fps_));
   } else {
@@ -2580,6 +6115,9 @@ void MainWindow::updatePlaybackParams() {
       if (fc > 0) maxFrames = std::max<int64_t>(maxFrames, (int64_t)fc);
     }
     play_end_frame_ = maxFrames;
+    if (spSourceFps_) play_fps_ = std::max(1.0, spSourceFps_->value());
+    QMetaObject::invokeMethod(captureWorker_, "setPlaybackRangeSlot", Qt::BlockingQueuedConnection,
+                              Q_ARG(qint64, (qint64)0), Q_ARG(qint64, (qint64)play_end_frame_), Q_ARG(double, play_fps_));
   }
   updateProgressUI(play_frame_, play_end_frame_);
 }
@@ -2621,7 +6159,7 @@ void MainWindow::stepAllVideos(int delta) {
         if (src.seq_files.isEmpty()) continue;
         target = std::max<int64_t>(0, std::min<int64_t>(target, (int64_t)src.seq_files.size()-1));
         src.seq_idx = (int)target;
-        f = cv::imread(src.seq_files[(int)target].toStdString(), cv::IMREAD_COLOR);
+        f = imreadUnicodePath(src.seq_files[(int)target], cv::IMREAD_COLOR);
       } else {
         if (!src.cap.isOpened()) continue;
         if (play_end_frame_ <= 0) {
@@ -2629,7 +6167,9 @@ void MainWindow::stepAllVideos(int delta) {
           if (cnt > 0) target = std::min<int64_t>(target, std::max<int64_t>(0, (int64_t)std::llround(cnt)-1));
         }
         src.cap.set(cv::CAP_PROP_POS_FRAMES, (double)target);
+        src.seq_idx = (int)target;
         src.cap.read(f);
+        if (!f.empty()) src.seq_idx = (int)target + 1;
       }
       if (!f.empty()) {
         // If Detect-All generated a visualized frame for this source/frame, reuse it
@@ -2649,20 +6189,16 @@ void MainWindow::stepAllVideos(int delta) {
   }
 
   if (stepped) {
-    std::vector<cv::Mat> uiFrames;
     {
       QMutexLocker frameLock(&frames_mutex_);
       if ((int)last_frames_.size() != (int)steppedFrames.size()) last_frames_.resize(steppedFrames.size());
       for (int i=0;i<(int)steppedFrames.size();++i) {
         if (!steppedFrames[i].empty()) last_frames_[i] = steppedFrames[i];
       }
-      uiFrames = last_frames_;
     }
     play_frame_ = progressFrame;
     updateProgressUI(play_frame_, play_end_frame_);
-    updateSourceViews(uiFrames);
-    if (show_docks_) updateSourceDocks(uiFrames);
-    updateStatus();
+    onTick();
     logLine(QString("Step frame: %1").arg(delta > 0 ? "next" : "prev"));
   } else {
     logLine("Step frame ignored: no video source ready.");
@@ -2711,6 +6247,7 @@ void MainWindow::onProgressSliderReleased() {
       }
       if (!src.cap.isOpened()) continue;
       src.cap.set(cv::CAP_PROP_POS_FRAMES, (double)target);
+      src.seq_idx = target;
     }
   }
   play_frame_ = target;
@@ -2756,11 +6293,24 @@ void MainWindow::onPlayAll() {
 
   stopCaptureBlocking();
 
+  // Fixed playback rate requirement: always play at 15 fps.
+  play_fps_ = 15.0;
+  if (spSourceFps_) spSourceFps_->setValue(15.0);
+
   {
     QMutexLocker srcLock(&sources_mutex_);
-    // Enable all video sources for playback
-    for (int i=0;i<(int)sources_.size();++i) if (!sources_[i].is_cam && sources_[i].mode_owner==(int)mode_) source_enabled_[i]=true;
-
+    // Enable all non-camera sources for playback and align their cursor to current play frame.
+    for (int i=0;i<(int)sources_.size();++i) {
+      auto& src = sources_[i];
+      if (src.is_cam || src.mode_owner!=(int)mode_) continue;
+      source_enabled_[i] = true;
+      if (src.is_image_seq) {
+        if (!src.seq_files.isEmpty()) src.seq_idx = std::max(0, std::min((int)play_frame_, (int)src.seq_files.size()-1));
+      } else if (src.cap.isOpened()) {
+        src.cap.set(cv::CAP_PROP_POS_FRAMES, (double)std::max<int64_t>(0, play_frame_));
+        src.seq_idx = (int)std::max<int64_t>(0, play_frame_);
+      }
+    }
   }
   playback_running_ = true;
   if (btnPlayAll_) {
@@ -2773,7 +6323,7 @@ void MainWindow::onPlayAll() {
   //    lblPlayState_->setText("State: PLAY (SYNC)");
 
   updatePlaybackParams();
-  timer_.start(33);
+  timer_.start(std::max(1, (int)std::lround(1000.0 / std::max(1.0, play_fps_))));
   QMetaObject::invokeMethod(captureWorker_, "start", Qt::QueuedConnection);
 }
 
@@ -2786,5 +6336,7 @@ void MainWindow::onStopAll() {
   }
   //if (lblPlayState_) lblPlayState_->setText("State: STOP");
   stopCaptureBlocking();
+  play_frame_ = 0;
+  stepAllVideos(0);
   updateProgressUI(play_frame_, play_end_frame_);
 }
