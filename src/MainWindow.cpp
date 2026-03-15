@@ -50,6 +50,7 @@
 #include <memory>
 #include <set>
 #include <map>
+#include <queue>
 
 static QString nowStr() {
   return QDateTime::currentDateTime().toString("hh:mm:ss");
@@ -1637,7 +1638,11 @@ void MainWindow::buildUI() {
     tg->addWidget(new QLabel("BinaryImg", gbThresh), 5, 0);
     tg->addWidget(chkInvertBinary_, 5, 2);
     tg->addWidget(btnBinaryPreviewPopup_, 5, 3);
+    btnAnalyzeParticles_ = new QPushButton("Analyze Particles", gbThresh);
+    btnClearContours_ = new QPushButton("Clear Contours", gbThresh);
     tg->addWidget(lblBinaryPreview_, 6, 0, 1, 4);
+    tg->addWidget(btnAnalyzeParticles_, 7, 0, 1, 2);
+    tg->addWidget(btnClearContours_, 7, 2, 1, 2);
 
     QGroupBox* gbBinaryProc = new QGroupBox("2.Morphological Processing", tabObj);
     QGridLayout* bp = new QGridLayout(gbBinaryProc);
@@ -1646,8 +1651,6 @@ void MainWindow::buildUI() {
     btnUndoBinaryOp_ = new QPushButton("Undo", gbBinaryProc);
     lblBinaryOps_ = new QLabel("Pipeline: (none)", gbBinaryProc);
     lblBinaryOps_->setWordWrap(true);
-    btnAnalyzeParticles_ = new QPushButton("Analyze Particles", tabObj);
-    btnClearContours_ = new QPushButton("Clear Contours", tabObj);
     chkEnableMaskEdit_ = new QCheckBox("Enable Mask Edit", tabObj);
     btnAddMaskContour_ = new QPushButton("Add Mask", tabObj);
     btnModifyMaskContour_ = new QPushButton("Modify Mask", tabObj);
@@ -1696,27 +1699,26 @@ void MainWindow::buildUI() {
     QPushButton* btnHistReset = new QPushButton("Reset", gbDetect);
     btnHistApply_ = new QPushButton("Apply", gbDetect);
 
-    hg->addWidget(btnAnalyzeParticles_, 0, 0, 1, 3);
-    hg->addWidget(btnClearContours_, 0, 3, 1, 3);
-    hg->addWidget(chkEnableMaskEdit_, 1, 0, 1, 3);
-    hg->addWidget(new QLabel("Snap Radius(px)", gbDetect), 1, 3);
+
+    hg->addWidget(chkEnableMaskEdit_, 0, 0, 1, 3);
+    hg->addWidget(new QLabel("Snap Radius(px)", gbDetect), 0, 3);
     spMaskSnapRadius_ = new QSpinBox(gbDetect);
     spMaskSnapRadius_->setRange(3, 200);
     spMaskSnapRadius_->setValue(10);
-    hg->addWidget(spMaskSnapRadius_, 1, 4, 1, 2);
-    hg->addWidget(btnAddMaskContour_, 2, 0, 1, 2);
-    hg->addWidget(btnModifyMaskContour_, 2, 2, 1, 2);
-    hg->addWidget(btnDeleteMaskContour_, 2, 4, 1, 2);
-    hg->addWidget(new QLabel("Metric", gbDetect), 3, 0);
-    hg->addWidget(cbHistMetric_, 3, 1, 1, 2);
-    hg->addWidget(btnHistReset, 3, 3);
-    hg->addWidget(btnHistApply_, 3, 4);
+    hg->addWidget(spMaskSnapRadius_, 0, 4, 1, 2);
+    hg->addWidget(btnAddMaskContour_, 1, 0, 1, 2);
+    hg->addWidget(btnModifyMaskContour_, 1, 2, 1, 2);
+    hg->addWidget(btnDeleteMaskContour_, 1, 4, 1, 2);
+    hg->addWidget(new QLabel("Metric", gbDetect), 2, 0);
+    hg->addWidget(cbHistMetric_, 2, 1, 1, 2);
+    hg->addWidget(btnHistReset, 2, 3);
+    hg->addWidget(btnHistApply_, 2, 4);
 
-    hg->addWidget(plotHistogram_, 4, 0, 1, 6);
-    hg->addWidget(new QLabel("Min", gbDetect), 5, 0);
-    hg->addWidget(spHistMin_, 5, 1);
-    hg->addWidget(new QLabel("Max", gbDetect), 5, 3);
-    hg->addWidget(spHistMax_, 5, 4);
+    hg->addWidget(plotHistogram_, 3, 0, 1, 6);
+    hg->addWidget(new QLabel("Min", gbDetect), 4, 0);
+    hg->addWidget(spHistMin_, 4, 1);
+    hg->addWidget(new QLabel("Max", gbDetect), 4, 3);
+    hg->addWidget(spHistMax_, 4, 4);
 
     lblDetectParticleCount_ = new QLabel("Particles: 0", gbDetect);
     lblDetectParticleCount_->setStyleSheet("font-weight:600;color:#f8fafc;");
@@ -1729,8 +1731,8 @@ void MainWindow::buildUI() {
     tblDetectParticles_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tblDetectParticles_->setMinimumHeight(180);
     tblDetectParticles_->setStyleSheet("QTableWidget{background:#1f2937;color:#e5e7eb;gridline-color:#4b5563;selection-background-color:#2563eb;selection-color:#ffffff;}QHeaderView::section{background:#334155;color:#f8fafc;border:1px solid #475569;padding:5px;font-weight:600;}");
-    hg->addWidget(lblDetectParticleCount_, 6, 0, 1, 6);
-    hg->addWidget(tblDetectParticles_, 7, 0, 1, 6);
+    hg->addWidget(lblDetectParticleCount_, 5, 0, 1, 6);
+    hg->addWidget(tblDetectParticles_, 6, 0, 1, 6);
     hg->setColumnMinimumWidth(2, 12);
     hg->setColumnMinimumWidth(5, 12);
     hg->setColumnStretch(5, 1);
@@ -3632,8 +3634,8 @@ void MainWindow::onContourMaskPointClicked(const QPointF& p) {
   for (const auto& f : frames) { if (!f.empty()) { frame = f; break; } }
   if (frame.empty()) return;
 
+  cv::Mat pre = applyPreprocess(frame);
   if (contour_mask_frame_key_ != frameKey || contour_mask_working_contours_.empty()) {
-    cv::Mat pre = applyPreprocess(frame);
     contour_mask_working_contours_ = detectBinaryContours(pre);
     contour_mask_frame_key_ = frameKey;
     contour_mask_selected_index_ = -1;
@@ -3655,15 +3657,57 @@ void MainWindow::onContourMaskPointClicked(const QPointF& p) {
   }
 
   if (contour_mask_mode_ == ContourMaskAdd) {
-    const double snapRadius = spMaskSnapRadius_ ? (double)spMaskSnapRadius_->value() : 10.0;
-    if (bestContour < 0 || bestPoint < 0 || bestDist > snapRadius) {
-      logLine("Add Mask: click near contour edge for snapping.");
-      return;
-    }
+    const int snapRadius = spMaskSnapRadius_ ? spMaskSnapRadius_->value() : 10;
+    bool useContourSnap = (bestContour >= 0 && bestPoint >= 0 && bestDist <= snapRadius);
 
-    contour_mask_selected_index_ = bestContour;
-    const auto& c = contour_mask_working_contours_[(size_t)bestContour];
-    cv::Point snapped = c[(size_t)bestPoint];
+    cv::Mat gray;
+    if (pre.channels() == 3) cv::cvtColor(pre, gray, cv::COLOR_BGR2GRAY);
+    else if (pre.channels() == 4) cv::cvtColor(pre, gray, cv::COLOR_BGRA2GRAY);
+    else gray = pre.clone();
+    if (gray.type() != CV_8UC1) gray.convertTo(gray, CV_8UC1);
+
+    cv::Mat gx, gy, grad, lap, grayF, mean, mean2, sq, var, tex;
+    cv::Sobel(gray, gx, CV_32F, 1, 0, 3);
+    cv::Sobel(gray, gy, CV_32F, 0, 1, 3);
+    cv::magnitude(gx, gy, grad);
+    cv::Laplacian(gray, lap, CV_32F, 3);
+    cv::absdiff(lap, cv::Scalar(0), lap);
+    gray.convertTo(grayF, CV_32F);
+    cv::blur(grayF, mean, cv::Size(5,5));
+    cv::multiply(grayF, grayF, sq);
+    cv::blur(sq, mean2, cv::Size(5,5));
+    var = mean2 - mean.mul(mean);
+    cv::max(var, 0, var);
+    cv::sqrt(var, tex);
+    auto norm01 = [](cv::Mat& m){ double mn=0,mx=0; cv::minMaxLoc(m,&mn,&mx); if(mx-mn>1e-6) m=(m-mn)/(mx-mn); else m.setTo(0); };
+    norm01(grad); norm01(lap); norm01(tex);
+    cv::Mat edgeProb = 0.6f * grad + 0.3f * lap + 0.1f * tex;
+    norm01(edgeProb);
+
+    cv::Point snapped = click;
+    int usedContour = -1;
+    int usedPointIdx = -1;
+    if (useContourSnap) {
+      usedContour = bestContour;
+      usedPointIdx = bestPoint;
+      contour_mask_selected_index_ = bestContour;
+      snapped = contour_mask_working_contours_[(size_t)bestContour][(size_t)bestPoint];
+    } else {
+      float bestScore = -1.f;
+      for (int dy=-snapRadius; dy<=snapRadius; ++dy) {
+        for (int dx=-snapRadius; dx<=snapRadius; ++dx) {
+          if (dx*dx + dy*dy > snapRadius*snapRadius) continue;
+          int x = click.x + dx, y = click.y + dy;
+          if (x < 0 || y < 0 || x >= edgeProb.cols || y >= edgeProb.rows) continue;
+          float sc = edgeProb.at<float>(y, x);
+          if (sc > bestScore) { bestScore = sc; snapped = cv::Point(x,y); }
+        }
+      }
+      if (bestScore < 0.05f) {
+        logLine("Add Mask: no suitable nearby edge for snapping.");
+        return;
+      }
+    }
 
     contour_mask_add_snap_points_.push_back(snapped);
     if (contour_mask_add_path_.empty()) {
@@ -3674,20 +3718,60 @@ void MainWindow::onContourMaskPointClicked(const QPointF& p) {
     }
 
     cv::Point prev = contour_mask_add_snap_points_[contour_mask_add_snap_points_.size()-2];
-    int prevIdx=-1, currIdx=bestPoint;
-    for (int i=0;i<(int)c.size();++i) if (c[(size_t)i]==prev) { prevIdx=i; break; }
-    if (prevIdx < 0) {
-      contour_mask_add_path_.push_back(snapped);
-    } else {
-      auto buildPath=[&](int a,int b,bool fw){
-        std::vector<cv::Point> path; int n=(int)c.size(); int i=a; path.push_back(c[(size_t)i]);
-        while(i!=b){ i=fw?((i+1)%n):((i-1+n)%n); path.push_back(c[(size_t)i]); if((int)path.size()>n+2) break; }
-        return path;
-      };
-      auto pf=buildPath(prevIdx,currIdx,true), pb=buildPath(prevIdx,currIdx,false);
-      auto len=[&](const std::vector<cv::Point>& path){ double L=0; for(int i=1;i<(int)path.size();++i) L += cv::norm(path[(size_t)i]-path[(size_t)(i-1)]); return L; };
-      const auto& best=(len(pf)<=len(pb))?pf:pb;
-      for (size_t i=1;i<best.size();++i) contour_mask_add_path_.push_back(best[i]);
+    bool appended = false;
+    if (useContourSnap && usedContour >= 0) {
+      const auto& c = contour_mask_working_contours_[(size_t)usedContour];
+      int prevIdx=-1, currIdx=usedPointIdx;
+      for (int i=0;i<(int)c.size();++i) if (c[(size_t)i]==prev) { prevIdx=i; break; }
+      if (prevIdx >= 0) {
+        auto buildPath=[&](int a,int b,bool fw){
+          std::vector<cv::Point> path; int n=(int)c.size(); int i=a; path.push_back(c[(size_t)i]);
+          while(i!=b){ i=fw?((i+1)%n):((i-1+n)%n); path.push_back(c[(size_t)i]); if((int)path.size()>n+2) break; }
+          return path;
+        };
+        auto pf=buildPath(prevIdx,currIdx,true), pb=buildPath(prevIdx,currIdx,false);
+        auto len=[&](const std::vector<cv::Point>& path){ double L=0; for(int i=1;i<(int)path.size();++i) L += cv::norm(path[(size_t)i]-path[(size_t)(i-1)]); return L; };
+        const auto& best=(len(pf)<=len(pb))?pf:pb;
+        for (size_t i=1;i<best.size();++i) contour_mask_add_path_.push_back(best[i]);
+        appended = true;
+      }
+    }
+    if (!appended) {
+      const int W=edgeProb.cols, H=edgeProb.rows;
+      auto idx=[&](int x,int y){ return y*W+x; };
+      std::vector<float> dist((size_t)W*H, std::numeric_limits<float>::infinity());
+      std::vector<int> prevNode((size_t)W*H, -1);
+      using QN = std::pair<float,int>;
+      std::priority_queue<QN, std::vector<QN>, std::greater<QN>> pq;
+      if (prev.x>=0 && prev.y>=0 && prev.x<W && prev.y<H && snapped.x>=0 && snapped.y>=0 && snapped.x<W && snapped.y<H) {
+        int sNode=idx(prev.x,prev.y), tNode=idx(snapped.x,snapped.y);
+        dist[sNode]=0.f; pq.push({0.f,sNode});
+        const int dx8[8]={1,1,0,-1,-1,-1,0,1};
+        const int dy8[8]={0,1,1,1,0,-1,-1,-1};
+        while(!pq.empty()){
+          auto [d,u]=pq.top(); pq.pop();
+          if(d!=dist[u]) continue;
+          if(u==tNode) break;
+          int ux=u%W, uy=u/W;
+          for(int k=0;k<8;++k){
+            int vx=ux+dx8[k], vy=uy+dy8[k];
+            if(vx<0||vy<0||vx>=W||vy>=H) continue;
+            float edge=edgeProb.at<float>(vy,vx);
+            float w=(1.0f-edge)+0.001f;
+            if(k%2==1) w*=1.4142f;
+            int v=idx(vx,vy);
+            if(dist[u]+w<dist[v]){ dist[v]=dist[u]+w; prevNode[v]=u; pq.push({dist[v],v}); }
+          }
+        }
+        std::vector<cv::Point> path;
+        for(int cur=tNode; cur!=-1; cur=prevNode[cur]){ path.emplace_back(cur%W, cur/W); if(cur==sNode) break; }
+        if(!path.empty() && path.back()==prev){
+          std::reverse(path.begin(), path.end());
+          for(size_t i=1;i<path.size();++i) contour_mask_add_path_.push_back(path[i]);
+          appended = true;
+        }
+      }
+      if (!appended) contour_mask_add_path_.push_back(snapped);
     }
 
     if (contour_mask_add_path_.size() > 8 && cv::norm(contour_mask_add_path_.front() - snapped) <= 12.0) {
@@ -4371,12 +4455,12 @@ void MainWindow::onTick() {
   if (contour_mask_frame_key_ == frameIdx && !contour_mask_working_contours_.empty()) {
     for (auto& f : vis) {
       if (f.empty()) continue;
-      cv::drawContours(f, contour_mask_working_contours_, -1, cv::Scalar(0, 180, 255), 2, cv::LINE_AA);
+      cv::drawContours(f, contour_mask_working_contours_, -1, cv::Scalar(0, 180, 255), 1, cv::LINE_AA);
       if (contour_mask_selected_index_ >= 0 && contour_mask_selected_index_ < (int)contour_mask_working_contours_.size()) {
-        cv::drawContours(f, std::vector<std::vector<cv::Point>>{contour_mask_working_contours_[(size_t)contour_mask_selected_index_]}, -1, cv::Scalar(255, 120, 0), 2, cv::LINE_AA);
+        cv::drawContours(f, std::vector<std::vector<cv::Point>>{contour_mask_working_contours_[(size_t)contour_mask_selected_index_]}, -1, cv::Scalar(255, 120, 0), 1, cv::LINE_AA);
       }
       if (!contour_mask_add_path_.empty()) {
-        cv::polylines(f, std::vector<std::vector<cv::Point>>{contour_mask_add_path_}, false, cv::Scalar(255, 255, 0), 2, cv::LINE_AA);
+        cv::polylines(f, std::vector<std::vector<cv::Point>>{contour_mask_add_path_}, false, cv::Scalar(255, 255, 0), 1, cv::LINE_AA);
       }
       for (int i=0; i<(int)contour_mask_working_contours_.size(); ++i) {
         cv::Moments mm = cv::moments(contour_mask_working_contours_[(size_t)i]);
