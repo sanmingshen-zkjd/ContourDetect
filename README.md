@@ -58,6 +58,16 @@ cmake --build build -j
 cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/Qt/6.x/gcc_64
 ```
 
+### Windows / Visual Studio 说明
+
+如果你在 **MSVC Debug** 下遇到 `GaussianBlur`、`cvtColor` 等 `LNK2019`，通常是 OpenCV 的 `imgproc` / `imgcodecs` 没有按 Debug 配置正确参与链接。当前 `CMakeLists.txt` 已优先使用 OpenCV 的 imported targets（如 `opencv_world` 或 `opencv_core`/`opencv_imgproc`/`opencv_imgcodecs`），并在旧版 OpenCV 包配置下回退到显式模块链接，以尽量避免这一类问题。
+
+如果仍有问题，请检查：
+
+1. `OpenCV_DIR` 是否指向与你当前编译器/架构匹配的 OpenCV CMake 配置目录。
+2. Debug 构建是否对应 Debug OpenCV 库，Release 构建是否对应 Release OpenCV 库。
+3. `cmake` 配置输出中的 `OpenCV link libs:` 是否包含 `opencv_imgproc` / `opencv_imgcodecs` 或 `opencv_world`。
+
 ## 使用流程
 
 1. 打开图像。
