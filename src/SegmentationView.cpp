@@ -26,6 +26,14 @@ SegmentationView::SegmentationView(QWidget* parent)
   brushItem_ = scene_.addEllipse(QRectF(), QPen(QColor(255, 255, 255, 180), 1.5), Qt::NoBrush);
   brushItem_->setVisible(false);
   brushItem_->setZValue(10.0);
+
+  pendingTraceItem_ = scene_.addPath(QPainterPath(), QPen(QColor(255, 210, 90), 2.0), Qt::NoBrush);
+  pendingTraceItem_->setVisible(false);
+  pendingTraceItem_->setZValue(11.0);
+
+  activeTraceItem_ = scene_.addPath(QPainterPath(), QPen(QColor(255, 255, 255, 160), 2.0), Qt::NoBrush);
+  activeTraceItem_->setVisible(false);
+  activeTraceItem_->setZValue(12.0);
   updateCursor();
 }
 
@@ -50,11 +58,21 @@ void SegmentationView::clearAllLayers() {
   annotationItem_->setPixmap(QPixmap());
   imageSize_ = QSize();
   scene_.setSceneRect(QRectF());
+  clearPendingTrace();
+  activeTracePolygon_.clear();
+  activeTraceItem_->setPath(QPainterPath());
+  activeTraceItem_->setVisible(false);
 }
 
 void SegmentationView::setToolMode(ToolMode mode) {
   toolMode_ = mode;
   setDragMode(toolMode_ == PanTool ? QGraphicsView::ScrollHandDrag : QGraphicsView::NoDrag);
+  if (toolMode_ != TraceTool) {
+    traceDrawing_ = false;
+    activeTracePolygon_.clear();
+    activeTraceItem_->setPath(QPainterPath());
+    activeTraceItem_->setVisible(false);
+  }
   updateCursor();
 }
 
@@ -70,6 +88,23 @@ void SegmentationView::setActiveClass(int classIndex, const QColor& color) {
   activeColor_ = color;
   QPen pen(activeColor_.lighter(160), 1.5);
   brushItem_->setPen(pen);
+  pendingTraceItem_->setPen(QPen(activeColor_.lighter(130), 2.0));
+  activeTraceItem_->setPen(QPen(activeColor_.lighter(170), 2.0));
+}
+
+void SegmentationView::setPendingTrace(const QPolygon& trace, const QColor& color) {
+  if (trace.isEmpty()) {
+    clearPendingTrace();
+    return;
+  }
+  pendingTraceItem_->setPen(QPen(color.lighter(130), 2.0));
+  pendingTraceItem_->setPath(polygonToPath(trace));
+  pendingTraceItem_->setVisible(true);
+}
+
+void SegmentationView::clearPendingTrace() {
+  pendingTraceItem_->setPath(QPainterPath());
+  pendingTraceItem_->setVisible(false);
 }
 
 void SegmentationView::zoomIn() { applyZoom(1.15); }
@@ -94,8 +129,17 @@ void SegmentationView::wheelEvent(QWheelEvent* event) {
 }
 
 void SegmentationView::mousePressEvent(QMouseEvent* event) {
+  const QPoint imagePos = sceneToImage(mapToScene(event->pos()));
+  if (toolMode_ == TraceTool && paintEnabled_ && event->button() == Qt::LeftButton && imagePos.x() >= 0) {
+    traceDrawing_ = true;
+    activeTracePolygon_.clear();
+    activeTracePolygon_ << imagePos;
+    activeTraceItem_->setPath(polygonToPath(activeTracePolygon_));
+    activeTraceItem_->setVisible(true);
+    return;
+  }
+
   if ((toolMode_ == PaintTool || toolMode_ == EraseTool) && paintEnabled_ && event->button() == Qt::LeftButton) {
-    const QPoint imagePos = sceneToImage(mapToScene(event->pos()));
     if (imagePos.x() >= 0 && onBrushStroke) {
       mousePressed_ = true;
       onBrushStroke(imagePos, brushRadius_, toolMode_ == EraseTool);
@@ -109,6 +153,14 @@ void SegmentationView::mousePressEvent(QMouseEvent* event) {
 void SegmentationView::mouseMoveEvent(QMouseEvent* event) {
   const QPoint imagePos = sceneToImage(mapToScene(event->pos()));
   if (imagePos.x() >= 0) {
+    if (toolMode_ == TraceTool && traceDrawing_) {
+      if (activeTracePolygon_.isEmpty() || activeTracePolygon_.last() != imagePos) {
+        activeTracePolygon_ << imagePos;
+        activeTraceItem_->setPath(polygonToPath(activeTracePolygon_));
+      }
+      return;
+    }
+
     updateBrushPreview(imagePos);
     if (onMouseHover) {
       onMouseHover(imagePos);
@@ -124,6 +176,17 @@ void SegmentationView::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void SegmentationView::mouseReleaseEvent(QMouseEvent* event) {
+  if (toolMode_ == TraceTool && traceDrawing_ && event->button() == Qt::LeftButton) {
+    traceDrawing_ = false;
+    activeTraceItem_->setVisible(false);
+    activeTraceItem_->setPath(QPainterPath());
+    if (activeTracePolygon_.size() > 2 && onTraceFinished) {
+      onTraceFinished(activeTracePolygon_);
+    }
+    activeTracePolygon_.clear();
+    return;
+  }
+
   mousePressed_ = false;
   QGraphicsView::mouseReleaseEvent(event);
 }
@@ -161,13 +224,15 @@ void SegmentationView::applyZoom(double factor) {
 void SegmentationView::updateCursor() {
   if (toolMode_ == PanTool) {
     setCursor(Qt::OpenHandCursor);
+  } else if (toolMode_ == TraceTool) {
+    setCursor(Qt::PointingHandCursor);
   } else {
     setCursor(Qt::CrossCursor);
   }
 }
 
 void SegmentationView::updateBrushPreview(const QPoint& imagePos) {
-  if (toolMode_ == PanTool || imagePos.x() < 0) {
+  if (toolMode_ == PanTool || toolMode_ == TraceTool || imagePos.x() < 0) {
     clearBrushPreview();
     return;
   }
@@ -177,4 +242,17 @@ void SegmentationView::updateBrushPreview(const QPoint& imagePos) {
 
 void SegmentationView::clearBrushPreview() {
   brushItem_->setVisible(false);
+}
+
+QPainterPath SegmentationView::polygonToPath(const QPolygon& polygon) const {
+  QPainterPath path;
+  if (polygon.isEmpty()) {
+    return path;
+  }
+  path.moveTo(polygon.first());
+  for (int i = 1; i < polygon.size(); ++i) {
+    path.lineTo(polygon[i]);
+  }
+  path.closeSubpath();
+  return path;
 }

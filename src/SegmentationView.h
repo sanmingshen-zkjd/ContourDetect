@@ -4,9 +4,11 @@
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
 #include <QGraphicsEllipseItem>
+#include <QGraphicsPathItem>
 #include <QColor>
 #include <QPoint>
 #include <QImage>
+#include <QPolygon>
 
 #include <opencv2/core.hpp>
 
@@ -18,7 +20,8 @@ public:
   enum ToolMode {
     PanTool,
     PaintTool,
-    EraseTool
+    EraseTool,
+    TraceTool
   };
 
   explicit SegmentationView(QWidget* parent = nullptr);
@@ -36,6 +39,8 @@ public:
 
   void setActiveClass(int classIndex, const QColor& color);
   void setPaintEnabled(bool enabled) { paintEnabled_ = enabled; }
+  void setPendingTrace(const QPolygon& trace, const QColor& color);
+  void clearPendingTrace();
 
   void zoomIn();
   void zoomOut();
@@ -43,6 +48,7 @@ public:
 
   std::function<void(const QPoint& imagePos, int radius, bool erase)> onBrushStroke;
   std::function<void(const QPoint& imagePos)> onMouseHover;
+  std::function<void(const QPolygon& trace)> onTraceFinished;
 
 protected:
   void wheelEvent(QWheelEvent* event) override;
@@ -58,18 +64,23 @@ private:
   void updateCursor();
   void updateBrushPreview(const QPoint& imagePos);
   void clearBrushPreview();
+  QPainterPath polygonToPath(const QPolygon& polygon) const;
 
   QGraphicsScene scene_;
   QGraphicsPixmapItem* baseItem_ = nullptr;
   QGraphicsPixmapItem* overlayItem_ = nullptr;
   QGraphicsPixmapItem* annotationItem_ = nullptr;
   QGraphicsEllipseItem* brushItem_ = nullptr;
+  QGraphicsPathItem* pendingTraceItem_ = nullptr;
+  QGraphicsPathItem* activeTraceItem_ = nullptr;
 
   ToolMode toolMode_ = PanTool;
   bool paintEnabled_ = true;
   bool mousePressed_ = false;
+  bool traceDrawing_ = false;
   int brushRadius_ = 12;
   QColor activeColor_ = Qt::red;
   double zoomFactor_ = 1.0;
   QSize imageSize_;
+  QPolygon activeTracePolygon_;
 };

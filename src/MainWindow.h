@@ -11,6 +11,7 @@
 #include <QSpinBox>
 #include <QTextEdit>
 #include <QComboBox>
+#include <QPolygon>
 
 #include <opencv2/core.hpp>
 
@@ -49,9 +50,12 @@ private slots:
   void onPaintTool();
   void onEraseTool();
   void onPanTool();
+  void onTraceTool();
   void onResetZoom();
   void onAddToClass1();
   void onAddToClass2();
+  void onRemoveSelectedClass1Trace();
+  void onRemoveSelectedClass2Trace();
 
 private:
   void buildUi();
@@ -68,6 +72,12 @@ private:
   bool ensureModelReady(const QString& actionName);
   void logMessage(const QString& message);
   void activateLabelShortcut(int classIndex, const QString& semanticDescription);
+  void ensureAnnotationStorage();
+  void rebuildMasksFromAnnotations();
+  void updateTraceLists();
+  void setPendingTrace(const QPolygon& trace);
+  void addPendingTraceToClass(int classIndex, const QString& semanticDescription);
+  void removeSelectedTraceFromClass(int classIndex);
 
   bool loadImageFile(const QString& path);
   bool saveTrainingData(const QString& path);
@@ -95,6 +105,10 @@ private:
   QPushButton* probabilityButton_ = nullptr;
   QPushButton* addToClass1Button_ = nullptr;
   QPushButton* addToClass2Button_ = nullptr;
+  QPushButton* removeClass1TraceButton_ = nullptr;
+  QPushButton* removeClass2TraceButton_ = nullptr;
+  QListWidget* class1TraceList_ = nullptr;
+  QListWidget* class2TraceList_ = nullptr;
 
   cv::Mat originalImage_;
   cv::Mat featureStack_;
@@ -102,6 +116,9 @@ private:
   cv::Mat overlayImage_;
   cv::Mat probabilityImage_;
   std::vector<cv::Mat> classMasks_;
+  std::vector<cv::Mat> classBrushMasks_;
+  std::vector<std::vector<QPolygon>> classTracePolygons_;
+  QPolygon pendingTrace_;
   std::vector<SegmentationClassInfo> classes_;
   SegmentationFeatureSettings featureSettings_;
   GaussianNaiveBayesModel model_;
