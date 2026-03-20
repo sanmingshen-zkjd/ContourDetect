@@ -19,6 +19,8 @@ add_executable(QtTrainableSegmentation
   src/SegmentationEngine.h
   src/SegmentationView.cpp
   src/SegmentationView.h
+  src/ImageIOUtils.cpp
+  src/ImageIOUtils.h
   src/QCustomPlot.cpp
   src/QCustomPlot.h
   assets/resourcefile.qrc

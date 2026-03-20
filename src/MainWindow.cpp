@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "ImageIOUtils.h"
 #include "QCustomPlot.h"
 #include "SegmentationView.h"
 
@@ -8,7 +9,10 @@
 #include <QColorDialog>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
+#include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QInputDialog>
@@ -19,16 +23,21 @@
 #include <QPainter>
 #include <QScreen>
 #include <QSplitter>
+#include <QTemporaryDir>
+#include <QTextEdit>
 #include <QToolBar>
 #include <QDateTime>
-#include <QDir>
-#include <QFileInfo>
 #include <QGuiApplication>
 #include <QLineEdit>
 #include <QDoubleSpinBox>
+#include <QDirIterator>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <numeric>
 
 namespace {
 QString nowString() {
@@ -42,6 +51,82 @@ QColor defaultColorForIndex(int index) {
   return palette[index % palette.size()];
 }
 
+std::vector<cv::Mat> cloneMaskVector(const std::vector<cv::Mat>& source) {
+  std::vector<cv::Mat> cloned;
+  cloned.reserve(source.size());
+  for (const cv::Mat& mask : source) cloned.push_back(mask.clone());
+  return cloned;
+}
+
+std::vector<std::vector<TraceRegion>> cloneTraceRegions(const std::vector<std::vector<TraceRegion>>& source) {
+  return source;
+}
+
+QString sessionDataRoot() {
+  const QString root = QDir(QDir::tempPath()).filePath("qt_trainable_segmentation_project");
+  QDir().mkpath(root);
+  return root;
+}
+
+QPainterPath pointsToPath(const QVector<QPointF>& points) {
+  QPainterPath path;
+  if (points.isEmpty()) return path;
+  path.moveTo(points.first());
+  for (int i = 1; i < points.size(); ++i) {
+    path.lineTo(points[i]);
+  }
+  return path;
+}
+
+struct BinaryMetrics {
+  QVector<QPointF> roc;
+  QVector<QPointF> pr;
+  double auc = 0.0;
+  double ap = 0.0;
+};
+
+BinaryMetrics computeBinaryCurves(const std::vector<float>& scores, const std::vector<int>& truth) {
+  BinaryMetrics metrics;
+  if (scores.empty() || scores.size() != truth.size()) {
+    return metrics;
+  }
+  std::vector<int> order(scores.size());
+  std::iota(order.begin(), order.end(), 0);
+  std::sort(order.begin(), order.end(), [&](int a, int b) { return scores[a] > scores[b]; });
+
+  const double positives = std::count(truth.begin(), truth.end(), 1);
+  const double negatives = static_cast<double>(truth.size()) - positives;
+  double tp = 0.0;
+  double fp = 0.0;
+  metrics.roc.push_back(QPointF(0.0, 0.0));
+  metrics.pr.push_back(QPointF(0.0, positives > 0.0 ? 1.0 : 0.0));
+  for (int idx : order) {
+    if (truth[idx] == 1) {
+      tp += 1.0;
+    } else {
+      fp += 1.0;
+    }
+    const double tpr = positives > 0.0 ? tp / positives : 0.0;
+    const double fpr = negatives > 0.0 ? fp / negatives : 0.0;
+    const double precision = (tp + fp) > 0.0 ? tp / (tp + fp) : 1.0;
+    const double recall = positives > 0.0 ? tp / positives : 0.0;
+    metrics.roc.push_back(QPointF(fpr, tpr));
+    metrics.pr.push_back(QPointF(recall, precision));
+  }
+  metrics.roc.push_back(QPointF(1.0, 1.0));
+
+  for (int i = 1; i < metrics.roc.size(); ++i) {
+    const QPointF a = metrics.roc[i - 1];
+    const QPointF b = metrics.roc[i];
+    metrics.auc += (b.x() - a.x()) * (a.y() + b.y()) * 0.5;
+  }
+  for (int i = 1; i < metrics.pr.size(); ++i) {
+    const QPointF a = metrics.pr[i - 1];
+    const QPointF b = metrics.pr[i];
+    metrics.ap += std::abs(b.x() - a.x()) * (a.y() + b.y()) * 0.5;
+  }
+  return metrics;
+}
 }
 
 MainWindow::MainWindow(QWidget* parent)
@@ -50,7 +135,7 @@ MainWindow::MainWindow(QWidget* parent)
   buildUi();
   connectSignals();
   updateUiState();
-  resize(1540, 920);
+  resize(1640, 980);
   if (QScreen* screen = QGuiApplication::primaryScreen()) {
     const QRect available = screen->availableGeometry();
     move(available.center() - rect().center());
@@ -59,10 +144,17 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 void MainWindow::buildUi() {
-  auto* toolBar = addToolBar(tr("File"));
+  auto* toolBar = addToolBar(tr("Main"));
   toolBar->setMovable(false);
+  QAction* newProjectAction = toolBar->addAction(tr("New Project"));
+  QAction* openProjectAction = toolBar->addAction(tr("Open Project"));
+  QAction* saveProjectAction = toolBar->addAction(tr("Save Project"));
+  toolBar->addSeparator();
   QAction* openImageAction = toolBar->addAction(tr("Open Image"));
   QAction* saveMaskAction = toolBar->addAction(tr("Export Mask"));
+  toolBar->addSeparator();
+  QAction* undoAction = toolBar->addAction(tr("Undo"));
+  QAction* redoAction = toolBar->addAction(tr("Redo"));
   toolBar->addSeparator();
   QAction* paintAction = toolBar->addAction(tr("Paint"));
   QAction* eraseAction = toolBar->addAction(tr("Erase"));
@@ -70,8 +162,13 @@ void MainWindow::buildUi() {
   QAction* traceAction = toolBar->addAction(tr("Trace ROI"));
   QAction* resetZoomAction = toolBar->addAction(tr("Reset Zoom"));
 
+  connect(newProjectAction, &QAction::triggered, this, &MainWindow::onNewProject);
+  connect(openProjectAction, &QAction::triggered, this, &MainWindow::onOpenProject);
+  connect(saveProjectAction, &QAction::triggered, this, &MainWindow::onSaveProject);
   connect(openImageAction, &QAction::triggered, this, &MainWindow::onOpenImage);
   connect(saveMaskAction, &QAction::triggered, this, &MainWindow::onExportMask);
+  connect(undoAction, &QAction::triggered, this, &MainWindow::onUndo);
+  connect(redoAction, &QAction::triggered, this, &MainWindow::onRedo);
   connect(paintAction, &QAction::triggered, this, &MainWindow::onPaintTool);
   connect(eraseAction, &QAction::triggered, this, &MainWindow::onEraseTool);
   connect(panAction, &QAction::triggered, this, &MainWindow::onPanTool);
@@ -95,12 +192,14 @@ void MainWindow::buildUi() {
   createResultButton_ = new QPushButton(tr("Create result"), trainingGroup);
   probabilityButton_ = new QPushButton(tr("Get probability"), trainingGroup);
   QPushButton* plotButton = new QPushButton(tr("Plot result"), trainingGroup);
+  evaluateButton_ = new QPushButton(tr("Evaluate"), trainingGroup);
   trainingLayout->addWidget(trainButton_);
   trainingLayout->addWidget(stopTrainingButton_);
   trainingLayout->addWidget(overlayButton);
   trainingLayout->addWidget(createResultButton_);
   trainingLayout->addWidget(probabilityButton_);
   trainingLayout->addWidget(plotButton);
+  trainingLayout->addWidget(evaluateButton_);
   leftLayout->addWidget(trainingGroup);
 
   auto* optionsGroup = new QGroupBox(tr("Options"), leftPanel);
@@ -112,6 +211,8 @@ void MainWindow::buildUi() {
   QPushButton* saveDataButton = new QPushButton(tr("Save data"), optionsGroup);
   QPushButton* createClassButton = new QPushButton(tr("Create new class"), optionsGroup);
   QPushButton* settingsButton = new QPushButton(tr("Settings"), optionsGroup);
+  QPushButton* addProjectImageButton = new QPushButton(tr("Add image to project"), optionsGroup);
+  QPushButton* removeProjectImageButton = new QPushButton(tr("Remove project image"), optionsGroup);
   optionsLayout->addWidget(applyButton_);
   optionsLayout->addWidget(loadClassifierButton);
   optionsLayout->addWidget(saveClassifierButton);
@@ -119,9 +220,11 @@ void MainWindow::buildUi() {
   optionsLayout->addWidget(saveDataButton);
   optionsLayout->addWidget(createClassButton);
   optionsLayout->addWidget(settingsButton);
+  optionsLayout->addWidget(addProjectImageButton);
+  optionsLayout->addWidget(removeProjectImageButton);
   leftLayout->addWidget(optionsGroup);
 
-  auto* brushGroup = new QGroupBox(tr("Brush"), leftPanel);
+  auto* brushGroup = new QGroupBox(tr("Brush / Slice"), leftPanel);
   auto* brushLayout = new QFormLayout(brushGroup);
   brushSizeSpin_ = new QSpinBox(brushGroup);
   brushSizeSpin_->setRange(1, 256);
@@ -138,13 +241,23 @@ void MainWindow::buildUi() {
   overlayCheck_->setChecked(true);
   contourCheck_ = new QCheckBox(tr("Draw contours"), brushGroup);
   contourCheck_->setChecked(true);
+  sliceSlider_ = new QSlider(Qt::Horizontal, brushGroup);
+  sliceSlider_->setRange(0, 0);
+  sliceLabel_ = new QLabel(tr("Slice 1 / 1"), brushGroup);
   brushLayout->addRow(tr("Brush radius"), brushSizeSpin_);
   brushLayout->addRow(tr("Overlay alpha"), opacitySlider_);
   brushLayout->addRow(tr("Probability class"), probabilityCombo_);
   brushLayout->addRow(tr("Classifier"), classifierCombo_);
+  brushLayout->addRow(tr("Slice"), sliceSlider_);
+  brushLayout->addRow(QString(), sliceLabel_);
   brushLayout->addRow(overlayCheck_);
   brushLayout->addRow(contourCheck_);
   leftLayout->addWidget(brushGroup);
+
+  undoButton_ = new QPushButton(tr("Undo"), leftPanel);
+  redoButton_ = new QPushButton(tr("Redo"), leftPanel);
+  leftLayout->addWidget(undoButton_);
+  leftLayout->addWidget(redoButton_);
 
   auto* spacer = new QWidget(leftPanel);
   spacer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
@@ -158,6 +271,8 @@ void MainWindow::buildUi() {
   connect(saveDataButton, &QPushButton::clicked, this, &MainWindow::onSaveData);
   connect(createClassButton, &QPushButton::clicked, this, &MainWindow::onCreateNewClass);
   connect(settingsButton, &QPushButton::clicked, this, &MainWindow::onSettings);
+  connect(addProjectImageButton, &QPushButton::clicked, this, &MainWindow::onAddImageToProject);
+  connect(removeProjectImageButton, &QPushButton::clicked, this, &MainWindow::onRemoveProjectImage);
 
   auto* centerPanel = new QWidget(splitter);
   auto* centerLayout = new QVBoxLayout(centerPanel);
@@ -166,7 +281,7 @@ void MainWindow::buildUi() {
   imagePathLabel_ = new QLabel(tr("No image loaded"), centerPanel);
   imagePathLabel_->setWordWrap(true);
   view_ = new SegmentationView(centerPanel);
-  infoLabel_ = new QLabel(tr("Open a grayscale or color image to begin labeling."), centerPanel);
+  infoLabel_ = new QLabel(tr("Open a grayscale, color image, or TIFF stack to begin labeling."), centerPanel);
   probabilityLabel_ = new QLabel(tr("Probability: n/a"), centerPanel);
   modelLabel_ = new QLabel(tr("Model: not trained"), centerPanel);
   centerLayout->addWidget(imagePathLabel_);
@@ -180,17 +295,26 @@ void MainWindow::buildUi() {
   rightLayout->setContentsMargins(12, 12, 12, 12);
   rightLayout->setSpacing(12);
 
+  auto* projectGroup = new QGroupBox(tr("Project images"), rightPanel);
+  auto* projectLayout = new QVBoxLayout(projectGroup);
+  projectList_ = new QListWidget(projectGroup);
+  projectLayout->addWidget(projectList_);
+  rightLayout->addWidget(projectGroup, 1);
+
   auto* labelsGroup = new QGroupBox(tr("Labels"), rightPanel);
   auto* labelsLayout = new QVBoxLayout(labelsGroup);
   addTraceButton_ = new QPushButton(tr("Add ROI to selected class"), labelsGroup);
-  addTraceButton_->setToolTip(tr("Commit the current ROI trace to the currently selected class."));
   classList_ = new QListWidget(labelsGroup);
   traceList_ = new QListWidget(labelsGroup);
   removeTraceButton_ = new QPushButton(tr("Remove selected trace"), labelsGroup);
+  renameTraceButton_ = new QPushButton(tr("Rename selected trace"), labelsGroup);
+  clearTraceButton_ = new QPushButton(tr("Clear traces in class"), labelsGroup);
   traceGroup_ = new QGroupBox(tr("Traces"), labelsGroup);
   auto* traceLayout = new QVBoxLayout(traceGroup_);
   traceLayout->addWidget(traceList_);
   traceLayout->addWidget(removeTraceButton_);
+  traceLayout->addWidget(renameTraceButton_);
+  traceLayout->addWidget(clearTraceButton_);
   labelsLayout->addWidget(addTraceButton_);
   labelsLayout->addWidget(classList_);
   labelsLayout->addWidget(traceGroup_);
@@ -209,7 +333,7 @@ void MainWindow::buildUi() {
   splitter->setStretchFactor(0, 0);
   splitter->setStretchFactor(1, 1);
   splitter->setStretchFactor(2, 0);
-  splitter->setSizes({250, 980, 280});
+  splitter->setSizes({290, 980, 320});
 
   refreshClassList();
 }
@@ -220,6 +344,7 @@ void MainWindow::connectSignals() {
   connect(applyButton_, &QPushButton::clicked, this, &MainWindow::onApplyClassifier);
   connect(createResultButton_, &QPushButton::clicked, this, &MainWindow::onCreateResult);
   connect(probabilityButton_, &QPushButton::clicked, this, &MainWindow::onGetProbability);
+  connect(evaluateButton_, &QPushButton::clicked, this, &MainWindow::onEvaluateModel);
   connect(brushSizeSpin_, qOverload<int>(&QSpinBox::valueChanged), this, &MainWindow::onBrushRadiusChanged);
   connect(classList_, &QListWidget::itemSelectionChanged, this, &MainWindow::onClassSelectionChanged);
   connect(probabilityCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, &MainWindow::onProbabilityClassChanged);
@@ -228,16 +353,19 @@ void MainWindow::connectSignals() {
     updateUiState();
   });
   connect(opacitySlider_, &QSlider::valueChanged, this, &MainWindow::onOpacityChanged);
+  connect(sliceSlider_, &QSlider::valueChanged, this, &MainWindow::onSliceChanged);
   connect(overlayCheck_, &QCheckBox::toggled, this, [this](bool checked) {
     showOverlay_ = checked;
     updateViewer();
   });
-  connect(contourCheck_, &QCheckBox::toggled, this, [this](bool) {
-    updateViewer();
-  });
+  connect(contourCheck_, &QCheckBox::toggled, this, [this](bool) { updateViewer(); });
   connect(addTraceButton_, &QPushButton::clicked, this, &MainWindow::onAddTraceToSelectedClass);
   connect(removeTraceButton_, &QPushButton::clicked, this, &MainWindow::onRemoveSelectedTrace);
-  connect(traceList_, &QListWidget::itemSelectionChanged, this, [this]() { updateUiState(); });
+  connect(renameTraceButton_, &QPushButton::clicked, this, &MainWindow::onRenameSelectedTrace);
+  connect(clearTraceButton_, &QPushButton::clicked, this, &MainWindow::onClearTracesForSelectedClass);
+  connect(undoButton_, &QPushButton::clicked, this, &MainWindow::onUndo);
+  connect(redoButton_, &QPushButton::clicked, this, &MainWindow::onRedo);
+  connect(projectList_, &QListWidget::itemSelectionChanged, this, &MainWindow::onProjectSelectionChanged);
 
   view_->onBrushStroke = [this](const QPoint& imagePos, int radius, bool erase) {
     applyBrushStroke(imagePos, radius, erase);
@@ -245,7 +373,6 @@ void MainWindow::connectSignals() {
   view_->onTraceFinished = [this](const QPolygon& trace) {
     setPendingTrace(trace);
   };
-
   view_->onMouseHover = [this](const QPoint& imagePos) {
     if (originalImage_.empty() || imagePos.x() < 0 || imagePos.y() < 0) {
       probabilityLabel_->setText(tr("Probability: n/a"));
@@ -274,10 +401,7 @@ void MainWindow::refreshClassList() {
   probabilityCombo_->clear();
   for (int i = 0; i < static_cast<int>(classes_.size()); ++i) {
     const auto& cls = classes_[i];
-    QString roleText;
-    if (i == 0) roleText = tr(" - foreground target");
-    else if (i == 1) roleText = tr(" - background object");
-    QListWidgetItem* item = new QListWidgetItem(QString("%1  (Class %2)%3").arg(cls.name).arg(i + 1).arg(roleText), classList_);
+    QListWidgetItem* item = new QListWidgetItem(QString("%1  (Class %2)").arg(cls.name).arg(i + 1), classList_);
     item->setForeground(cls.color);
     item->setData(Qt::UserRole, i);
     probabilityCombo_->addItem(cls.name, i);
@@ -296,14 +420,20 @@ void MainWindow::updateUiState() {
   trainButton_->setEnabled(hasImage && !trainingInProgress_);
   stopTrainingButton_->setEnabled(trainingInProgress_);
   removeTraceButton_->setEnabled(traceList_ && traceList_->currentRow() >= 0);
+  renameTraceButton_->setEnabled(traceList_ && traceList_->currentRow() >= 0);
+  clearTraceButton_->setEnabled(hasImage && hasClassSelection);
+  undoButton_->setEnabled(!undoStack_.empty());
+  redoButton_->setEnabled(!redoStack_.empty());
   applyButton_->setEnabled(hasModel && !trainingInProgress_);
   createResultButton_->setEnabled(hasImage && hasModel && !trainingInProgress_);
   probabilityButton_->setEnabled(hasImage && hasProbability && !trainingInProgress_);
+  evaluateButton_->setEnabled(hasImage && hasModel && !trainingInProgress_);
   brushSizeSpin_->setEnabled(hasImage);
   probabilityCombo_->setEnabled(hasProbability && !trainingInProgress_);
   classifierCombo_->setEnabled(!trainingInProgress_);
   addTraceButton_->setEnabled(hasImage && hasClassSelection && !trainingInProgress_);
   traceList_->setEnabled(hasImage && hasClassSelection && !trainingInProgress_);
+  sliceSlider_->setEnabled(imageVolume_.size() > 1 && !trainingInProgress_);
   if (traceGroup_) {
     traceGroup_->setEnabled(hasImage && hasClassSelection);
   }
@@ -317,6 +447,84 @@ void MainWindow::updateUiState() {
                                  .arg(trainingStats_.sampleCount)
                                  .arg(QString::number(trainingStats_.trainingAccuracy * 100.0, 'f', 2))
                            : tr("Model: not trained"));
+  sliceLabel_->setText(tr("Slice %1 / %2").arg(currentSliceIndex_ + 1).arg(std::max(1, static_cast<int>(imageVolume_.size()))));
+}
+
+void MainWindow::ensureSliceStorage() {
+  const int count = std::max(1, static_cast<int>(imageVolume_.size()));
+  if (static_cast<int>(sliceAnnotationStates_.size()) != count) {
+    sliceAnnotationStates_.resize(count);
+  }
+  if (static_cast<int>(sliceLabelResults_.size()) != count) {
+    sliceLabelResults_.resize(count);
+  }
+  if (static_cast<int>(sliceProbabilityResults_.size()) != count) {
+    sliceProbabilityResults_.resize(count);
+  }
+  if (static_cast<int>(featureVolume_.size()) != count) {
+    featureVolume_.resize(count);
+  }
+}
+
+void MainWindow::saveCurrentSliceState() {
+  if (originalImage_.empty()) {
+    return;
+  }
+  ensureSliceStorage();
+  if (currentSliceIndex_ < 0 || currentSliceIndex_ >= static_cast<int>(sliceAnnotationStates_.size())) {
+    return;
+  }
+  sliceAnnotationStates_[currentSliceIndex_].classBrushMasks = cloneMaskVector(classBrushMasks_);
+  sliceAnnotationStates_[currentSliceIndex_].classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  sliceLabelResults_[currentSliceIndex_] = labelResult_.clone();
+  sliceProbabilityResults_[currentSliceIndex_] = probabilityImage_.clone();
+}
+
+void MainWindow::restoreSliceState(int sliceIndex) {
+  ensureSliceStorage();
+  if (sliceIndex < 0 || sliceIndex >= static_cast<int>(sliceAnnotationStates_.size())) {
+    return;
+  }
+  classBrushMasks_ = cloneMaskVector(sliceAnnotationStates_[sliceIndex].classBrushMasks);
+  classTraceRegions_ = cloneTraceRegions(sliceAnnotationStates_[sliceIndex].classTraceRegions);
+  labelResult_ = sliceLabelResults_[sliceIndex].clone();
+  probabilityImage_ = sliceProbabilityResults_[sliceIndex].clone();
+  pendingTrace_.clear();
+  view_->clearPendingTrace();
+  undoStack_.clear();
+  redoStack_.clear();
+  rebuildMasksFromAnnotations();
+}
+
+QString MainWindow::defaultTraceNameForClass(int classIndex) const {
+  const QString className = (classIndex >= 0 && classIndex < static_cast<int>(classes_.size())) ? classes_[classIndex].name : tr("Class");
+  int count = 1;
+  if (classIndex >= 0 && classIndex < static_cast<int>(classTraceRegions_.size())) {
+    count = static_cast<int>(classTraceRegions_[classIndex].size()) + 1;
+  }
+  return tr("%1 ROI %2").arg(className).arg(count);
+}
+
+void MainWindow::pushUndoSnapshot() {
+  AnnotationSnapshot snapshot;
+  snapshot.classBrushMasks = cloneMaskVector(classBrushMasks_);
+  snapshot.classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  undoStack_.push_back(std::move(snapshot));
+  trimUndoHistory();
+  redoStack_.clear();
+}
+
+void MainWindow::trimUndoHistory() {
+  constexpr int kMaxHistory = 30;
+  if (static_cast<int>(undoStack_.size()) > kMaxHistory) {
+    undoStack_.erase(undoStack_.begin(), undoStack_.begin() + (undoStack_.size() - kMaxHistory));
+  }
+}
+
+void MainWindow::restoreSnapshot(const AnnotationSnapshot& snapshot) {
+  classBrushMasks_ = cloneMaskVector(snapshot.classBrushMasks);
+  classTraceRegions_ = cloneTraceRegions(snapshot.classTraceRegions);
+  rebuildMasksFromAnnotations();
 }
 
 void MainWindow::rebuildFeatureStack() {
@@ -325,6 +533,8 @@ void MainWindow::rebuildFeatureStack() {
     return;
   }
   featureStack_ = SegmentationEngine::computeFeatureStack(originalImage_, featureSettings_);
+  ensureSliceStorage();
+  featureVolume_[currentSliceIndex_] = featureStack_.clone();
 }
 
 void MainWindow::updateViewer() {
@@ -332,19 +542,14 @@ void MainWindow::updateViewer() {
     view_->clearAllLayers();
     return;
   }
-  if (view_->sceneRect().isEmpty()) {
-    view_->setBaseImage(cvMatToQImage(originalImage_));
-  } else {
-    view_->setBaseImage(cvMatToQImage(originalImage_));
-  }
-
+  view_->setBaseImage(cvMatToQImage(originalImage_));
   if (showOverlay_ && !labelResult_.empty()) {
     overlayImage_ = SegmentationEngine::makeOverlay(originalImage_, labelResult_, classes_, overlayOpacity_, contourCheck_->isChecked());
     view_->setOverlayImage(cvMatToQImage(overlayImage_));
   } else {
     view_->setOverlayImage(QImage());
   }
-  rebuildMasksFromAnnotations();
+  repaintAnnotationPreview();
 }
 
 void MainWindow::updateProbabilityView() {
@@ -356,6 +561,9 @@ void MainWindow::updateProbabilityView() {
   probabilityImage_ = model_.supportsProbability()
                           ? SegmentationEngine::applyModelProbabilities(model_, featureStack_, originalImage_.rows, originalImage_.cols, cls)
                           : cv::Mat();
+  if (!sliceProbabilityResults_.empty() && currentSliceIndex_ < static_cast<int>(sliceProbabilityResults_.size())) {
+    sliceProbabilityResults_[currentSliceIndex_] = probabilityImage_.clone();
+  }
 }
 
 int MainWindow::currentSelectedClassIndex() const {
@@ -396,8 +604,9 @@ void MainWindow::applyBrushStroke(const QPoint& imagePos, int radius, bool erase
   if (originalImage_.empty()) {
     return;
   }
+  pushUndoSnapshot();
   ensureAnnotationStorage();
-  const int cls = classList_->currentItem() ? classList_->currentItem()->data(Qt::UserRole).toInt() : 0;
+  const int cls = currentSelectedClassIndex() >= 0 ? currentSelectedClassIndex() : 0;
   if (cls < 0 || cls >= static_cast<int>(classMasks_.size())) {
     return;
   }
@@ -456,8 +665,8 @@ void MainWindow::ensureAnnotationStorage() {
   if (static_cast<int>(classBrushMasks_.size()) != static_cast<int>(classes_.size())) {
     classBrushMasks_.assign(classes_.size(), cv::Mat(rows, cols, CV_8U, cv::Scalar(0)));
   }
-  if (static_cast<int>(classTracePolygons_.size()) != static_cast<int>(classes_.size())) {
-    classTracePolygons_.resize(classes_.size());
+  if (static_cast<int>(classTraceRegions_.size()) != static_cast<int>(classes_.size())) {
+    classTraceRegions_.resize(classes_.size());
   }
   for (auto& mask : classMasks_) {
     if (mask.empty() || mask.rows != rows || mask.cols != cols) {
@@ -475,18 +684,23 @@ void MainWindow::clearAnnotationsForCurrentImage() {
   if (originalImage_.empty()) {
     classMasks_.clear();
     classBrushMasks_.clear();
-    classTracePolygons_.clear();
+    classTraceRegions_.clear();
     pendingTrace_.clear();
     view_->clearPendingTrace();
     return;
   }
-  ensureAnnotationStorage();
-  for (auto& mask : classBrushMasks_) {
-    mask = cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0));
+  ensureSliceStorage();
+  for (auto& state : sliceAnnotationStates_) {
+    state.classBrushMasks.clear();
+    state.classTraceRegions.clear();
   }
-  for (auto& traces : classTracePolygons_) {
-    traces.clear();
-  }
+  for (auto& result : sliceLabelResults_) result.release();
+  for (auto& result : sliceProbabilityResults_) result.release();
+  classMasks_.assign(classes_.size(), cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)));
+  classBrushMasks_.assign(classes_.size(), cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)));
+  classTraceRegions_.assign(classes_.size(), {});
+  undoStack_.clear();
+  redoStack_.clear();
   pendingTrace_.clear();
   view_->clearPendingTrace();
   rebuildMasksFromAnnotations();
@@ -496,6 +710,8 @@ void MainWindow::clearInferenceOutputs() {
   labelResult_.release();
   overlayImage_.release();
   probabilityImage_.release();
+  for (auto& result : sliceLabelResults_) result.release();
+  for (auto& result : sliceProbabilityResults_) result.release();
 }
 
 void MainWindow::rebuildMasksFromAnnotations() {
@@ -507,12 +723,12 @@ void MainWindow::rebuildMasksFromAnnotations() {
     classMasks_[i] = classBrushMasks_[i].clone();
   }
 
-  for (int cls = 0; cls < static_cast<int>(classTracePolygons_.size()); ++cls) {
-    for (const QPolygon& polygon : classTracePolygons_[cls]) {
-      if (polygon.size() < 3) continue;
+  for (int cls = 0; cls < static_cast<int>(classTraceRegions_.size()); ++cls) {
+    for (const TraceRegion& region : classTraceRegions_[cls]) {
+      if (region.polygon.size() < 3) continue;
       std::vector<cv::Point> cvPoints;
-      cvPoints.reserve(polygon.size());
-      for (const QPoint& pt : polygon) {
+      cvPoints.reserve(region.polygon.size());
+      for (const QPoint& pt : region.polygon) {
         cvPoints.emplace_back(pt.x(), pt.y());
       }
       std::vector<std::vector<cv::Point>> fillPoints{cvPoints};
@@ -529,6 +745,7 @@ void MainWindow::rebuildMasksFromAnnotations() {
   repaintAnnotationPreview();
   updateTraceLists();
   updateUiState();
+  saveCurrentSliceState();
 }
 
 void MainWindow::updateTraceLists() {
@@ -541,10 +758,11 @@ void MainWindow::updateTraceLists() {
     traceGroup_->setTitle(tr("Traces"));
     return;
   }
-  traceGroup_->setTitle(tr("Traces for %1").arg(classes_[cls].name));
-  if (cls < static_cast<int>(classTracePolygons_.size())) {
-    for (int i = 0; i < static_cast<int>(classTracePolygons_[cls].size()); ++i) {
-      QListWidgetItem* item = new QListWidgetItem(tr("Trace %1").arg(i + 1), traceList_);
+  traceGroup_->setTitle(tr("Traces for %1 (slice %2)").arg(classes_[cls].name).arg(currentSliceIndex_ + 1));
+  if (cls < static_cast<int>(classTraceRegions_.size())) {
+    for (int i = 0; i < static_cast<int>(classTraceRegions_[cls].size()); ++i) {
+      const TraceRegion& region = classTraceRegions_[cls][i];
+      QListWidgetItem* item = new QListWidgetItem(region.name.isEmpty() ? tr("Trace %1").arg(i + 1) : region.name, traceList_);
       item->setData(Qt::UserRole, i);
       item->setForeground(classes_[cls].color);
     }
@@ -570,16 +788,15 @@ void MainWindow::addPendingTraceToSelectedClass() {
   if (pendingTrace_.size() < 3) {
     view_->setToolMode(SegmentationView::TraceTool);
     infoLabel_->setText(tr("Draw a freehand ROI for %1, then click Add ROI to selected class.").arg(classes_[classIndex].name));
-    logMessage(tr("Waiting for a ROI trace before adding to %1.").arg(classes_[classIndex].name));
     return;
   }
+  pushUndoSnapshot();
   ensureAnnotationStorage();
-  classTracePolygons_[classIndex].push_back(pendingTrace_);
+  classTraceRegions_[classIndex].push_back({defaultTraceNameForClass(classIndex), pendingTrace_});
   pendingTrace_.clear();
   view_->clearPendingTrace();
   view_->setToolMode(SegmentationView::TraceTool);
   rebuildMasksFromAnnotations();
-  updateTraceLists();
   if (traceList_) {
     traceList_->setCurrentRow(traceList_->count() - 1);
   }
@@ -589,39 +806,53 @@ void MainWindow::addPendingTraceToSelectedClass() {
 
 void MainWindow::removeSelectedTraceFromClass() {
   const int classIndex = currentSelectedClassIndex();
-  if (!traceList_ || classIndex < 0 || classIndex >= static_cast<int>(classTracePolygons_.size())) {
+  if (!traceList_ || classIndex < 0 || classIndex >= static_cast<int>(classTraceRegions_.size())) {
     return;
   }
   const int row = traceList_->currentRow();
-  if (row < 0 || row >= static_cast<int>(classTracePolygons_[classIndex].size())) {
+  if (row < 0 || row >= static_cast<int>(classTraceRegions_[classIndex].size())) {
     return;
   }
-  classTracePolygons_[classIndex].erase(classTracePolygons_[classIndex].begin() + row);
+  pushUndoSnapshot();
+  classTraceRegions_[classIndex].erase(classTraceRegions_[classIndex].begin() + row);
   rebuildMasksFromAnnotations();
   updateTraceLists();
-  logMessage(tr("Removed trace %1 from %2.").arg(row).arg(classes_[classIndex].name));
+  logMessage(tr("Removed trace %1 from %2.").arg(row + 1).arg(classes_[classIndex].name));
 }
 
 bool MainWindow::loadImageFile(const QString& path) {
-  cv::Mat image = cv::imread(path.toStdString(), cv::IMREAD_COLOR);
-  if (image.empty()) {
-    QMessageBox::warning(this, tr("Open image failed"), tr("Unable to load image: %1").arg(path));
+  std::vector<cv::Mat> slices;
+  QString error;
+  if (!ImageIOUtils::loadImageVolume(path, &slices, &error) || slices.empty()) {
+    QMessageBox::warning(this, tr("Open image failed"), error.isEmpty() ? tr("Unable to load image: %1").arg(path) : error);
     return false;
   }
-  originalImage_ = image;
+
+  imageVolume_ = std::move(slices);
+  currentSliceIndex_ = 0;
+  originalImage_ = imageVolume_.front().clone();
+  featureVolume_.assign(imageVolume_.size(), cv::Mat());
+  sliceAnnotationStates_.assign(imageVolume_.size(), {});
+  sliceLabelResults_.assign(imageVolume_.size(), cv::Mat());
+  sliceProbabilityResults_.assign(imageVolume_.size(), cv::Mat());
   imagePath_ = path;
   imagePathLabel_->setText(path);
-  clearInferenceOutputs();
-  clearAnnotationsForCurrentImage();
   model_.clear();
   trainingStats_ = {};
+  clearAnnotationsForCurrentImage();
+  clearInferenceOutputs();
   rebuildFeatureStack();
   updateViewer();
+  sliceSlider_->blockSignals(true);
+  sliceSlider_->setRange(0, std::max(0, static_cast<int>(imageVolume_.size()) - 1));
+  sliceSlider_->setValue(0);
+  sliceSlider_->blockSignals(false);
   updateUiState();
-  logMessage(tr("Loaded image %1 (%2 x %3).")
+  logMessage(tr("Loaded image %1 (%2 x %3, %4 slice(s)).")
                  .arg(QFileInfo(path).fileName())
                  .arg(originalImage_.cols)
-                 .arg(originalImage_.rows));
+                 .arg(originalImage_.rows)
+                 .arg(imageVolume_.size()));
   return true;
 }
 
@@ -629,10 +860,15 @@ bool MainWindow::applyClassifierToImage(const cv::Mat& image, const QString& pat
   if (image.empty() || !model_.isValid()) {
     return false;
   }
-
   originalImage_ = image.clone();
+  imageVolume_.assign(1, originalImage_);
+  currentSliceIndex_ = 0;
   imagePath_ = path;
   imagePathLabel_->setText(path.isEmpty() ? tr("Unsaved image") : path);
+  featureVolume_.assign(1, cv::Mat());
+  sliceAnnotationStates_.assign(1, {});
+  sliceLabelResults_.assign(1, cv::Mat());
+  sliceProbabilityResults_.assign(1, cv::Mat());
   clearInferenceOutputs();
   if (resetAnnotations) {
     clearAnnotationsForCurrentImage();
@@ -642,6 +878,7 @@ bool MainWindow::applyClassifierToImage(const cv::Mat& image, const QString& pat
   }
   rebuildFeatureStack();
   labelResult_ = SegmentationEngine::applyModelLabels(model_, featureStack_, originalImage_.rows, originalImage_.cols);
+  sliceLabelResults_[0] = labelResult_.clone();
   updateProbabilityView();
   updateViewer();
   updateUiState();
@@ -652,6 +889,7 @@ bool MainWindow::saveTrainingData(const QString& path) {
   if (!ensureImageLoaded(tr("saving training data"))) {
     return false;
   }
+  saveCurrentSliceState();
   QFileInfo info(path);
   QDir dir = info.dir();
   const QString base = info.completeBaseName();
@@ -661,28 +899,14 @@ bool MainWindow::saveTrainingData(const QString& path) {
 
   QJsonObject root;
   root["imagePath"] = imagePath_;
-  root["maskWidth"] = originalImage_.cols;
-  root["maskHeight"] = originalImage_.rows;
+  root["currentSliceIndex"] = currentSliceIndex_;
+  root["sliceCount"] = static_cast<int>(imageVolume_.size());
   QJsonArray classArray;
-  for (int i = 0; i < static_cast<int>(classes_.size()); ++i) {
-    const QString maskName = QString("%1_class_%2.png").arg(base).arg(i);
-    cv::imwrite(dir.filePath(maskName).toStdString(), classMasks_[i]);
-    QJsonObject cls;
-    cls["name"] = classes_[i].name;
-    cls["color"] = classes_[i].color.name(QColor::HexRgb);
-    cls["mask"] = maskName;
-    QJsonArray traces;
-    if (i < static_cast<int>(classTracePolygons_.size())) {
-      for (const QPolygon& polygon : classTracePolygons_[i]) {
-        QJsonArray tracePoints;
-        for (const QPoint& point : polygon) {
-          tracePoints.append(QJsonObject{{"x", point.x()}, {"y", point.y()}});
-        }
-        traces.append(tracePoints);
-      }
-    }
-    cls["traces"] = traces;
-    classArray.append(cls);
+  for (const auto& cls : classes_) {
+    QJsonObject clsObj;
+    clsObj["name"] = cls.name;
+    clsObj["color"] = cls.color.name(QColor::HexRgb);
+    classArray.append(clsObj);
   }
   root["classes"] = classArray;
   root["featureSettings"] = QJsonObject{{"intensity", featureSettings_.intensity},
@@ -706,6 +930,44 @@ bool MainWindow::saveTrainingData(const QString& path) {
                                            {"svmC", classifierSettings_.svmC},
                                            {"svmGamma", classifierSettings_.svmGamma},
                                            {"balanceClasses", classifierSettings_.balanceClasses}};
+
+  QJsonArray slicesArray;
+  for (int sliceIndex = 0; sliceIndex < static_cast<int>(sliceAnnotationStates_.size()); ++sliceIndex) {
+    const AnnotationSnapshot& state = sliceAnnotationStates_[sliceIndex];
+    QJsonObject sliceObject;
+    sliceObject["index"] = sliceIndex;
+    QJsonArray sliceClasses;
+    for (int classIndex = 0; classIndex < static_cast<int>(classes_.size()); ++classIndex) {
+      const QString maskName = QString("%1_slice_%2_class_%3.png").arg(base).arg(sliceIndex).arg(classIndex);
+      cv::Mat mask = classIndex < static_cast<int>(state.classBrushMasks.size())
+                         ? state.classBrushMasks[classIndex]
+                         : cv::Mat(imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols, CV_8U, cv::Scalar(0));
+      if (mask.empty()) {
+        mask = cv::Mat(imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols, CV_8U, cv::Scalar(0));
+      }
+      cv::imwrite(dir.filePath(maskName).toStdString(), mask);
+      QJsonObject cls;
+      cls["mask"] = maskName;
+      QJsonArray traces;
+      if (classIndex < static_cast<int>(state.classTraceRegions.size())) {
+        for (const TraceRegion& region : state.classTraceRegions[classIndex]) {
+          QJsonObject traceObject;
+          traceObject["name"] = region.name;
+          QJsonArray tracePoints;
+          for (const QPoint& point : region.polygon) {
+            tracePoints.append(QJsonObject{{"x", point.x()}, {"y", point.y()}});
+          }
+          traceObject["points"] = tracePoints;
+          traces.append(traceObject);
+        }
+      }
+      cls["traces"] = traces;
+      sliceClasses.append(cls);
+    }
+    sliceObject["classes"] = sliceClasses;
+    slicesArray.append(sliceObject);
+  }
+  root["slices"] = slicesArray;
 
   QFile file(path);
   if (!file.open(QIODevice::WriteOnly)) {
@@ -733,29 +995,15 @@ bool MainWindow::loadTrainingData(const QString& path) {
 
   const QJsonArray classArray = root["classes"].toArray();
   classes_.clear();
-  classMasks_.clear();
-  classBrushMasks_.clear();
-  classTracePolygons_.clear();
-  for (int i = 0; i < classArray.size(); ++i) {
-    const QJsonObject clsObj = classArray[i].toObject();
+  for (const auto& value : classArray) {
+    const QJsonObject clsObj = value.toObject();
     classes_.push_back({clsObj["name"].toString(), QColor(clsObj["color"].toString()), true});
-    cv::Mat mask = cv::imread(QFileInfo(path).dir().filePath(clsObj["mask"].toString()).toStdString(), cv::IMREAD_GRAYSCALE);
-    if (mask.empty()) {
-      mask = cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0));
-    }
-    classBrushMasks_.push_back(mask.clone());
-    classMasks_.push_back(mask);
-    std::vector<QPolygon> traces;
-    for (const auto& traceValue : clsObj["traces"].toArray()) {
-      QPolygon poly;
-      for (const auto& ptValue : traceValue.toArray()) {
-        const QJsonObject pt = ptValue.toObject();
-        poly << QPoint(pt["x"].toInt(), pt["y"].toInt());
-      }
-      if (!poly.isEmpty()) traces.push_back(poly);
-    }
-    classTracePolygons_.push_back(traces);
   }
+  if (classes_.empty()) {
+    initializeDefaultClasses();
+  }
+  refreshClassList();
+
   const QJsonObject settings = root["featureSettings"].toObject();
   featureSettings_.intensity = settings["intensity"].toBool(true);
   featureSettings_.gaussian3 = settings["gaussian3"].toBool(true);
@@ -772,10 +1020,10 @@ bool MainWindow::loadTrainingData(const QString& path) {
   featureSettings_.membrane = settings["membrane"].toBool(false);
   featureSettings_.xPosition = settings["xPosition"].toBool(true);
   featureSettings_.yPosition = settings["yPosition"].toBool(true);
+
   const QJsonObject classifierSettings = root["classifierSettings"].toObject();
   if (!classifierSettings.isEmpty()) {
-    classifierSettings_.kind = static_cast<SegmentationClassifierSettings::Kind>(
-        classifierSettings["kind"].toInt(static_cast<int>(classifierSettings_.kind)));
+    classifierSettings_.kind = static_cast<SegmentationClassifierSettings::Kind>(classifierSettings["kind"].toInt(static_cast<int>(classifierSettings_.kind)));
     classifierSettings_.randomForestTrees = classifierSettings["randomForestTrees"].toInt(classifierSettings_.randomForestTrees);
     classifierSettings_.randomForestMaxDepth = classifierSettings["randomForestMaxDepth"].toInt(classifierSettings_.randomForestMaxDepth);
     classifierSettings_.svmC = classifierSettings["svmC"].toDouble(classifierSettings_.svmC);
@@ -783,19 +1031,173 @@ bool MainWindow::loadTrainingData(const QString& path) {
     classifierSettings_.balanceClasses = classifierSettings["balanceClasses"].toBool(classifierSettings_.balanceClasses);
   }
 
-  refreshClassList();
-  pendingTrace_.clear();
-  view_->clearPendingTrace();
-  clearInferenceOutputs();
-  rebuildMasksFromAnnotations();
+  ensureSliceStorage();
+  for (auto& state : sliceAnnotationStates_) {
+    state.classBrushMasks.clear();
+    state.classTraceRegions.clear();
+  }
+  const QJsonArray slicesArray = root["slices"].toArray();
+  for (const auto& sliceValue : slicesArray) {
+    const QJsonObject sliceObject = sliceValue.toObject();
+    const int sliceIndex = sliceObject["index"].toInt();
+    if (sliceIndex < 0 || sliceIndex >= static_cast<int>(sliceAnnotationStates_.size())) continue;
+    AnnotationSnapshot snapshot;
+    snapshot.classBrushMasks.assign(classes_.size(), cv::Mat());
+    snapshot.classTraceRegions.assign(classes_.size(), {});
+    const QJsonArray sliceClasses = sliceObject["classes"].toArray();
+    for (int classIndex = 0; classIndex < sliceClasses.size() && classIndex < static_cast<int>(classes_.size()); ++classIndex) {
+      const QJsonObject clsObj = sliceClasses[classIndex].toObject();
+      cv::Mat mask = cv::imread(QFileInfo(path).dir().filePath(clsObj["mask"].toString()).toStdString(), cv::IMREAD_GRAYSCALE);
+      if (mask.empty()) {
+        mask = cv::Mat(imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols, CV_8U, cv::Scalar(0));
+      }
+      snapshot.classBrushMasks[classIndex] = mask;
+      for (const auto& traceValue : clsObj["traces"].toArray()) {
+        const QJsonObject traceObject = traceValue.toObject();
+        QPolygon polygon;
+        for (const auto& pointValue : traceObject["points"].toArray()) {
+          const QJsonObject pointObject = pointValue.toObject();
+          polygon << QPoint(pointObject["x"].toInt(), pointObject["y"].toInt());
+        }
+        snapshot.classTraceRegions[classIndex].push_back({traceObject["name"].toString(), polygon});
+      }
+    }
+    sliceAnnotationStates_[sliceIndex] = snapshot;
+  }
+
+  currentSliceIndex_ = std::clamp(root["currentSliceIndex"].toInt(0), 0, std::max(0, static_cast<int>(imageVolume_.size()) - 1));
+  originalImage_ = imageVolume_[currentSliceIndex_].clone();
+  restoreSliceState(currentSliceIndex_);
   rebuildFeatureStack();
   const int comboIndex = classifierCombo_->findData(classifierSettings_.kind);
-  if (comboIndex >= 0) {
-    classifierCombo_->setCurrentIndex(comboIndex);
-  }
+  if (comboIndex >= 0) classifierCombo_->setCurrentIndex(comboIndex);
+  sliceSlider_->blockSignals(true);
+  sliceSlider_->setRange(0, std::max(0, static_cast<int>(imageVolume_.size()) - 1));
+  sliceSlider_->setValue(currentSliceIndex_);
+  sliceSlider_->blockSignals(false);
+  updateViewer();
   updateUiState();
   logMessage(tr("Loaded training data from %1.").arg(path));
   return true;
+}
+
+bool MainWindow::saveProject(const QString& path) {
+  persistCurrentProjectImageState();
+  QFileInfo info(path);
+  QDir dir = info.dir();
+  if (!dir.exists() && !dir.mkpath(".")) {
+    return false;
+  }
+  const QString annotationDirPath = dir.filePath(info.completeBaseName() + "_annotations");
+  QDir().mkpath(annotationDirPath);
+
+  QJsonObject root;
+  QJsonArray images;
+  for (int index = 0; index < static_cast<int>(projectImages_.size()); ++index) {
+    ProjectImageEntry& entry = projectImages_[index];
+    if (entry.workingDataPath.isEmpty()) {
+      entry.workingDataPath = ensureEntryWorkingPath(index);
+    }
+    const QString targetAnnotation = QDir(annotationDirPath).filePath(QString("image_%1.json").arg(index, 3, 10, QLatin1Char('0')));
+    QFile::remove(targetAnnotation);
+    if (!entry.workingDataPath.isEmpty() && QFile::exists(entry.workingDataPath)) {
+      QFile::copy(entry.workingDataPath, targetAnnotation);
+    }
+    QJsonObject imageObject;
+    imageObject["imagePath"] = entry.imagePath;
+    imageObject["annotationPath"] = QDir(info.dir()).relativeFilePath(targetAnnotation);
+    images.append(imageObject);
+  }
+  root["images"] = images;
+  root["currentIndex"] = currentProjectImageIndex_;
+
+  QFile file(path);
+  if (!file.open(QIODevice::WriteOnly)) {
+    return false;
+  }
+  file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+  projectPath_ = path;
+  logMessage(tr("Saved project to %1.").arg(path));
+  return true;
+}
+
+bool MainWindow::loadProject(const QString& path) {
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly)) {
+    return false;
+  }
+  const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+  if (!doc.isObject()) {
+    return false;
+  }
+  const QJsonObject root = doc.object();
+  projectImages_.clear();
+  const QJsonArray images = root["images"].toArray();
+  for (const auto& value : images) {
+    const QJsonObject imageObject = value.toObject();
+    ProjectImageEntry entry;
+    entry.imagePath = imageObject["imagePath"].toString();
+    entry.workingDataPath = QFileInfo(path).dir().filePath(imageObject["annotationPath"].toString());
+    projectImages_.push_back(entry);
+  }
+  projectPath_ = path;
+  updateProjectList();
+  if (!projectImages_.empty()) {
+    const int index = std::clamp(root["currentIndex"].toInt(0), 0, static_cast<int>(projectImages_.size()) - 1);
+    switchToProjectImage(index);
+  }
+  logMessage(tr("Loaded project %1.").arg(path));
+  return true;
+}
+
+QString MainWindow::ensureEntryWorkingPath(int index) {
+  if (index < 0 || index >= static_cast<int>(projectImages_.size())) {
+    return QString();
+  }
+  if (projectImages_[index].workingDataPath.isEmpty()) {
+    const QString root = sessionDataRoot();
+    projectImages_[index].workingDataPath = QDir(root).filePath(QString("entry_%1.json").arg(index, 3, 10, QLatin1Char('0')));
+  }
+  return projectImages_[index].workingDataPath;
+}
+
+void MainWindow::persistCurrentProjectImageState() {
+  if (currentProjectImageIndex_ < 0 || currentProjectImageIndex_ >= static_cast<int>(projectImages_.size())) {
+    return;
+  }
+  const QString dataPath = ensureEntryWorkingPath(currentProjectImageIndex_);
+  if (!dataPath.isEmpty()) {
+    saveTrainingData(dataPath);
+  }
+}
+
+void MainWindow::updateProjectList() {
+  if (!projectList_) return;
+  switchingProjectSelection_ = true;
+  projectList_->clear();
+  for (int i = 0; i < static_cast<int>(projectImages_.size()); ++i) {
+    QListWidgetItem* item = new QListWidgetItem(QFileInfo(projectImages_[i].imagePath).fileName(), projectList_);
+    item->setData(Qt::UserRole, i);
+  }
+  if (currentProjectImageIndex_ >= 0 && currentProjectImageIndex_ < projectList_->count()) {
+    projectList_->setCurrentRow(currentProjectImageIndex_);
+  }
+  switchingProjectSelection_ = false;
+}
+
+void MainWindow::switchToProjectImage(int index) {
+  if (index < 0 || index >= static_cast<int>(projectImages_.size())) {
+    return;
+  }
+  persistCurrentProjectImageState();
+  currentProjectImageIndex_ = index;
+  const ProjectImageEntry& entry = projectImages_[index];
+  if (!entry.workingDataPath.isEmpty() && QFile::exists(entry.workingDataPath)) {
+    loadTrainingData(entry.workingDataPath);
+  } else {
+    loadImageFile(entry.imagePath);
+  }
+  updateProjectList();
 }
 
 QImage MainWindow::cvMatToQImage(const cv::Mat& mat) {
@@ -822,6 +1224,9 @@ QImage MainWindow::cvMatToQImage(const cv::Mat& mat) {
     cv::Mat converted;
     mat.convertTo(converted, CV_8U);
     return cvMatToQImage(converted);
+  }
+  if (mat.type() == CV_8UC4) {
+    return QImage(mat.data, mat.cols, mat.rows, static_cast<int>(mat.step), QImage::Format_ARGB32).copy();
   }
   return QImage();
 }
@@ -853,18 +1258,10 @@ void MainWindow::onTrainClassifier() {
   if (stopTrainingRequested_) {
     trainingInProgress_ = false;
     updateUiState();
-    logMessage(tr("Training stopped before sample gathering."));
     return;
   }
   cv::Mat labels;
   cv::Mat samples = SegmentationEngine::gatherSamples(featureStack_, classMasks_, &labels, 12000, classifierSettings_.balanceClasses);
-  QApplication::processEvents();
-  if (stopTrainingRequested_) {
-    trainingInProgress_ = false;
-    updateUiState();
-    logMessage(tr("Training stopped before classifier fitting."));
-    return;
-  }
   if (samples.empty()) {
     trainingInProgress_ = false;
     updateUiState();
@@ -877,14 +1274,10 @@ void MainWindow::onTrainClassifier() {
     QMessageBox::warning(this, tr("Training failed"), tr("Training failed. Ensure every class has annotations."));
     return;
   }
-  if (stopTrainingRequested_) {
-    trainingInProgress_ = false;
-    updateUiState();
-    clearInferenceOutputs();
-    logMessage(tr("Training finished fitting but stopped before result generation."));
-    return;
-  }
   labelResult_ = SegmentationEngine::applyModelLabels(model_, featureStack_, originalImage_.rows, originalImage_.cols);
+  if (!sliceLabelResults_.empty()) {
+    sliceLabelResults_[currentSliceIndex_] = labelResult_.clone();
+  }
   updateProbabilityView();
   updateViewer();
   trainingInProgress_ = false;
@@ -893,9 +1286,7 @@ void MainWindow::onTrainClassifier() {
 }
 
 void MainWindow::onStopTraining() {
-  if (!trainingInProgress_) {
-    return;
-  }
+  if (!trainingInProgress_) return;
   stopTrainingRequested_ = true;
   logMessage(tr("Stop requested. The current training stage will stop as soon as it can."));
 }
@@ -905,11 +1296,11 @@ void MainWindow::onApplyClassifier() {
     return;
   }
   QString targetPath;
-  bool useCurrentImage = !originalImage_.empty();
-  if (!originalImage_.empty()) {
+  bool useCurrentImage = !imageVolume_.empty();
+  if (!imageVolume_.empty()) {
     QMessageBox choiceBox(this);
     choiceBox.setWindowTitle(tr("Apply classifier"));
-    choiceBox.setText(tr("Apply the classifier to the current image, or choose another image file?"));
+    choiceBox.setText(tr("Apply the classifier to the current image/stack, or choose another image file?"));
     QPushButton* currentButton = choiceBox.addButton(tr("Current image"), QMessageBox::AcceptRole);
     QPushButton* chooseButton = choiceBox.addButton(tr("Choose image..."), QMessageBox::ActionRole);
     choiceBox.addButton(QMessageBox::Cancel);
@@ -921,33 +1312,47 @@ void MainWindow::onApplyClassifier() {
     }
   }
 
+  std::vector<cv::Mat> targetVolume = imageVolume_;
   if (!useCurrentImage) {
-    targetPath = QFileDialog::getOpenFileName(this, tr("Apply classifier to image"), imagePath_,
-                                              tr("Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"));
-    if (targetPath.isEmpty()) {
+    targetPath = QFileDialog::getOpenFileName(this, tr("Apply classifier to image"), imagePath_, tr("Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"));
+    if (targetPath.isEmpty()) return;
+    QString error;
+    if (!ImageIOUtils::loadImageVolume(targetPath, &targetVolume, &error) || targetVolume.empty()) {
+      QMessageBox::warning(this, tr("Open image failed"), error);
       return;
     }
-    cv::Mat targetImage = cv::imread(targetPath.toStdString(), cv::IMREAD_COLOR);
-    if (targetImage.empty()) {
-      QMessageBox::warning(this, tr("Open image failed"), tr("Unable to load image: %1").arg(targetPath));
-      return;
-    }
-    if (!applyClassifierToImage(targetImage, targetPath, true)) {
-      QMessageBox::warning(this, tr("Apply failed"), tr("Failed to apply the classifier to %1.").arg(targetPath));
-      return;
-    }
-    logMessage(tr("Applied classifier to %1.").arg(QFileInfo(targetPath).fileName()));
-    return;
   }
 
-  if (!ensureImageLoaded(tr("applying the classifier"))) {
-    return;
+  if (targetVolume.empty()) return;
+  imageVolume_ = targetVolume;
+  imagePath_ = useCurrentImage ? imagePath_ : targetPath;
+  imagePathLabel_->setText(imagePath_);
+  featureVolume_.assign(imageVolume_.size(), cv::Mat());
+  if (!useCurrentImage) {
+    sliceAnnotationStates_.assign(imageVolume_.size(), {});
   }
-  if (!applyClassifierToImage(originalImage_, imagePath_, false)) {
-    QMessageBox::warning(this, tr("Apply failed"), tr("Failed to apply the classifier to the current image."));
-    return;
+  sliceLabelResults_.assign(imageVolume_.size(), cv::Mat());
+  sliceProbabilityResults_.assign(imageVolume_.size(), cv::Mat());
+  for (int sliceIndex = 0; sliceIndex < static_cast<int>(imageVolume_.size()); ++sliceIndex) {
+    const cv::Mat features = SegmentationEngine::computeFeatureStack(imageVolume_[sliceIndex], featureSettings_);
+    featureVolume_[sliceIndex] = features;
+    sliceLabelResults_[sliceIndex] = SegmentationEngine::applyModelLabels(model_, features, imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols);
+    if (model_.supportsProbability()) {
+      sliceProbabilityResults_[sliceIndex] = SegmentationEngine::applyModelProbabilities(model_, features, imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols, probabilityCombo_->currentData().toInt());
+    }
   }
-  logMessage(tr("Applied classifier to the full current image."));
+  currentSliceIndex_ = std::clamp(currentSliceIndex_, 0, std::max(0, static_cast<int>(imageVolume_.size()) - 1));
+  originalImage_ = imageVolume_[currentSliceIndex_].clone();
+  featureStack_ = featureVolume_[currentSliceIndex_].clone();
+  labelResult_ = sliceLabelResults_[currentSliceIndex_].clone();
+  probabilityImage_ = sliceProbabilityResults_[currentSliceIndex_].clone();
+  sliceSlider_->blockSignals(true);
+  sliceSlider_->setRange(0, std::max(0, static_cast<int>(imageVolume_.size()) - 1));
+  sliceSlider_->setValue(currentSliceIndex_);
+  sliceSlider_->blockSignals(false);
+  updateViewer();
+  updateUiState();
+  logMessage(tr("Applied classifier to %1 slice(s).").arg(imageVolume_.size()));
 }
 
 void MainWindow::onToggleOverlay() {
@@ -962,9 +1367,7 @@ void MainWindow::onCreateResult() {
   }
   if (labelResult_.empty()) {
     onApplyClassifier();
-    if (labelResult_.empty()) {
-      return;
-    }
+    if (labelResult_.empty()) return;
   }
   QDialog dialog(this);
   dialog.setWindowTitle(tr("Segmentation result"));
@@ -984,14 +1387,12 @@ void MainWindow::onGetProbability() {
     return;
   }
   if (!model_.supportsProbability()) {
-    QMessageBox::information(this, tr("Probability unavailable"),
-                             tr("The current classifier does not expose probabilities for this view."));
+    QMessageBox::information(this, tr("Probability unavailable"), tr("The current classifier does not expose probabilities for this view."));
     return;
   }
   updateProbabilityView();
   if (probabilityImage_.empty()) {
-    QMessageBox::information(this, tr("Probability unavailable"),
-                             tr("Probability output is not available for the current image/classifier combination."));
+    QMessageBox::information(this, tr("Probability unavailable"), tr("Probability output is not available for the current image/classifier combination."));
     return;
   }
   QDialog dialog(this);
@@ -1007,17 +1408,11 @@ void MainWindow::onGetProbability() {
 }
 
 void MainWindow::onPlotResult() {
-  if (!ensureImageLoaded(tr("plotting the result"))) {
-    return;
-  }
+  if (!ensureImageLoaded(tr("plotting the result"))) return;
   if (labelResult_.empty()) {
-    if (!ensureModelReady(tr("plotting the result"))) {
-      return;
-    }
+    if (!ensureModelReady(tr("plotting the result"))) return;
     onApplyClassifier();
-    if (labelResult_.empty()) {
-      return;
-    }
+    if (labelResult_.empty()) return;
   }
   QVector<double> ticks(classes_.size()), values(classes_.size());
   QVector<QString> labels(classes_.size());
@@ -1049,10 +1444,114 @@ void MainWindow::onPlotResult() {
   dialog.exec();
 }
 
-void MainWindow::onSaveClassifier() {
-  if (!ensureModelReady(tr("saving the classifier"))) {
+void MainWindow::onEvaluateModel() {
+  if (!ensureImageLoaded(tr("evaluating the model")) || !ensureModelReady(tr("evaluating the model"))) {
     return;
   }
+  cv::Mat labels;
+  cv::Mat samples = SegmentationEngine::gatherSamples(featureStack_, classMasks_, &labels, 120000, false);
+  if (samples.empty() || labels.empty()) {
+    QMessageBox::information(this, tr("No annotations"), tr("Please annotate the current slice before evaluating."));
+    return;
+  }
+  const cv::Mat predicted = model_.predictLabels(samples);
+  if (predicted.empty()) {
+    QMessageBox::warning(this, tr("Evaluation failed"), tr("The classifier could not produce predictions for the current slice annotations."));
+    return;
+  }
+
+  std::vector<std::vector<int>> confusion(classes_.size(), std::vector<int>(classes_.size(), 0));
+  for (int row = 0; row < labels.rows; ++row) {
+    const int truth = labels.at<int>(row, 0);
+    const int pred = predicted.at<int>(row, 0);
+    if (truth >= 0 && truth < static_cast<int>(classes_.size()) && pred >= 0 && pred < static_cast<int>(classes_.size())) {
+      confusion[truth][pred] += 1;
+    }
+  }
+
+  QString summary;
+  summary += tr("Samples: %1\n\nConfusion Matrix (rows=true, cols=pred):\n").arg(labels.rows);
+  for (int r = 0; r < static_cast<int>(classes_.size()); ++r) {
+    summary += classes_[r].name + ": ";
+    for (int c = 0; c < static_cast<int>(classes_.size()); ++c) {
+      summary += QString::number(confusion[r][c]) + (c + 1 == static_cast<int>(classes_.size()) ? "\n" : "  ");
+    }
+  }
+  summary += "\nMetrics:\n";
+  for (int cls = 0; cls < static_cast<int>(classes_.size()); ++cls) {
+    double tp = confusion[cls][cls];
+    double fp = 0.0;
+    double fn = 0.0;
+    for (int i = 0; i < static_cast<int>(classes_.size()); ++i) {
+      if (i != cls) {
+        fp += confusion[i][cls];
+        fn += confusion[cls][i];
+      }
+    }
+    const double precision = (tp + fp) > 0.0 ? tp / (tp + fp) : 0.0;
+    const double recall = (tp + fn) > 0.0 ? tp / (tp + fn) : 0.0;
+    const double f1 = (precision + recall) > 0.0 ? (2.0 * precision * recall) / (precision + recall) : 0.0;
+    summary += tr("- %1: Precision=%2  Recall=%3  F1=%4\n")
+                   .arg(classes_[cls].name)
+                   .arg(QString::number(precision, 'f', 3))
+                   .arg(QString::number(recall, 'f', 3))
+                   .arg(QString::number(f1, 'f', 3));
+  }
+
+  cv::Mat probs;
+  BinaryMetrics metrics;
+  if (model_.supportsProbability()) {
+    probs = model_.predictProbabilities(samples);
+    const int classIndex = std::clamp(probabilityCombo_->currentData().toInt(), 0, std::max(0, static_cast<int>(classes_.size()) - 1));
+    std::vector<float> scores;
+    std::vector<int> truth;
+    scores.reserve(probs.rows);
+    truth.reserve(probs.rows);
+    for (int row = 0; row < probs.rows; ++row) {
+      scores.push_back(probs.at<float>(row, classIndex));
+      truth.push_back(labels.at<int>(row, 0) == classIndex ? 1 : 0);
+    }
+    metrics = computeBinaryCurves(scores, truth);
+    summary += tr("\nOne-vs-rest for %1: AUC=%2  AP=%3")
+                   .arg(classes_[classIndex].name)
+                   .arg(QString::number(metrics.auc, 'f', 3))
+                   .arg(QString::number(metrics.ap, 'f', 3));
+  }
+
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Evaluation"));
+  dialog.resize(1100, 720);
+  auto* layout = new QVBoxLayout(&dialog);
+  auto* text = new QTextEdit(&dialog);
+  text->setReadOnly(true);
+  text->setPlainText(summary);
+  layout->addWidget(text, 1);
+  if (!metrics.roc.isEmpty()) {
+    auto* plot = new QCustomPlot(&dialog);
+    plot->legend->setVisible(true);
+    plot->addGraph();
+    plot->graph(0)->setName(tr("ROC"));
+    QVector<double> rocX, rocY, prX, prY;
+    for (const QPointF& point : metrics.roc) { rocX.push_back(point.x()); rocY.push_back(point.y()); }
+    for (const QPointF& point : metrics.pr) { prX.push_back(point.x()); prY.push_back(point.y()); }
+    plot->graph(0)->setData(rocX, rocY);
+    plot->graph(0)->setPen(QPen(QColor(80, 180, 255), 2));
+    plot->addGraph();
+    plot->graph(1)->setName(tr("PR"));
+    plot->graph(1)->setData(prX, prY);
+    plot->graph(1)->setPen(QPen(QColor(255, 170, 80), 2));
+    plot->xAxis->setLabel(tr("Rate / Recall"));
+    plot->yAxis->setLabel(tr("Value"));
+    plot->xAxis->setRange(0, 1);
+    plot->yAxis->setRange(0, 1);
+    plot->replot();
+    layout->addWidget(plot, 1);
+  }
+  dialog.exec();
+}
+
+void MainWindow::onSaveClassifier() {
+  if (!ensureModelReady(tr("saving the classifier"))) return;
   const QString path = QFileDialog::getSaveFileName(this, tr("Save classifier"), QString(), tr("Classifier (*.yml *.yaml)"));
   if (path.isEmpty()) return;
   if (!model_.save(path, classes_, featureSettings_, classifierSettings_, trainingStats_)) {
@@ -1079,11 +1578,6 @@ void MainWindow::onLoadClassifier() {
   featureSettings_ = settings;
   classifierSettings_ = classifierSettings;
   trainingStats_ = stats;
-  if (!originalImage_.empty()) {
-    clearAnnotationsForCurrentImage();
-    rebuildFeatureStack();
-    clearInferenceOutputs();
-  }
   refreshClassList();
   const int comboIndex = classifierCombo_->findData(classifierSettings_.kind);
   if (comboIndex >= 0) classifierCombo_->setCurrentIndex(comboIndex);
@@ -1108,26 +1602,21 @@ void MainWindow::onLoadData() {
 
 void MainWindow::onCreateNewClass() {
   bool ok = false;
-  const QString name = QInputDialog::getText(this, tr("Create class"), tr("Class name"), QLineEdit::Normal,
-                                             tr("Class %1").arg(classes_.size() + 1), &ok);
-  if (!ok || name.trimmed().isEmpty()) {
-    return;
-  }
+  const QString name = QInputDialog::getText(this, tr("Create class"), tr("Class name"), QLineEdit::Normal, tr("Class %1").arg(classes_.size() + 1), &ok);
+  if (!ok || name.trimmed().isEmpty()) return;
   const QColor color = QColorDialog::getColor(defaultColorForIndex(classes_.size()), this, tr("Choose class color"));
-  if (!color.isValid()) {
-    return;
-  }
+  if (!color.isValid()) return;
   classes_.push_back({name.trimmed(), color, true});
   if (!originalImage_.empty()) {
     classMasks_.push_back(cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)));
     classBrushMasks_.push_back(cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)));
-    classTracePolygons_.push_back({});
+    classTraceRegions_.push_back({});
+    saveCurrentSliceState();
   }
   model_.clear();
   trainingStats_ = {};
   clearInferenceOutputs();
   refreshClassList();
-  updateTraceLists();
   rebuildMasksFromAnnotations();
   updateViewer();
   logMessage(tr("Added class %1.").arg(name.trimmed()));
@@ -1206,9 +1695,7 @@ void MainWindow::onSettings() {
   layout->addWidget(buttons);
   connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
   connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-  if (dialog.exec() != QDialog::Accepted) {
-    return;
-  }
+  if (dialog.exec() != QDialog::Accepted) return;
   featureSettings_.intensity = intensity->isChecked();
   featureSettings_.gaussian3 = gaussian3->isChecked();
   featureSettings_.gaussian7 = gaussian7->isChecked();
@@ -1243,7 +1730,8 @@ void MainWindow::onExportMask() {
     QMessageBox::information(this, tr("No result"), tr("Please train/apply the classifier before exporting a mask."));
     return;
   }
-  const QString path = QFileDialog::getSaveFileName(this, tr("Export label mask"), QString(), tr("PNG (*.png);;TIFF (*.tif *.tiff)"));
+  QString defaultName = imageVolume_.size() > 1 ? tr("slice_%1_mask.png").arg(currentSliceIndex_ + 1) : QString();
+  const QString path = QFileDialog::getSaveFileName(this, tr("Export label mask"), defaultName, tr("PNG (*.png);;TIFF (*.tif *.tiff)"));
   if (path.isEmpty()) return;
   cv::Mat exportMask;
   labelResult_.convertTo(exportMask, CV_8U);
@@ -1262,23 +1750,13 @@ void MainWindow::onClassSelectionChanged() {
   const int cls = currentSelectedClassIndex();
   if (cls >= 0 && cls < static_cast<int>(classes_.size())) {
     view_->setActiveClass(cls, classes_[cls].color);
-    if (!pendingTrace_.isEmpty()) {
-      view_->setPendingTrace(pendingTrace_, classes_[cls].color);
-    }
-    addTraceButton_->setText(tr("Add ROI to %1").arg(classes_[cls].name));
-    addTraceButton_->setToolTip(tr("Commit the current ROI trace to %1.").arg(classes_[cls].name));
-    infoLabel_->setText(tr("Active class: %1 — use left mouse to paint samples, or draw a ROI trace and commit it to the selected class.").arg(classes_[cls].name));
-  } else if (addTraceButton_) {
-    addTraceButton_->setText(tr("Add ROI to selected class"));
-    addTraceButton_->setToolTip(tr("Commit the current ROI trace to the currently selected class."));
   }
   updateTraceLists();
-  updateUiState();
 }
 
-void MainWindow::onProbabilityClassChanged(int index) {
-  Q_UNUSED(index);
+void MainWindow::onProbabilityClassChanged(int) {
   updateProbabilityView();
+  updateUiState();
 }
 
 void MainWindow::onOpacityChanged(int value) {
@@ -1286,31 +1764,132 @@ void MainWindow::onOpacityChanged(int value) {
   updateViewer();
 }
 
-void MainWindow::onPaintTool() {
-  view_->setToolMode(SegmentationView::PaintTool);
+void MainWindow::onPaintTool() { view_->setToolMode(SegmentationView::PaintTool); }
+void MainWindow::onEraseTool() { view_->setToolMode(SegmentationView::EraseTool); }
+void MainWindow::onPanTool() { view_->setToolMode(SegmentationView::PanTool); }
+void MainWindow::onTraceTool() { view_->setToolMode(SegmentationView::TraceTool); }
+void MainWindow::onResetZoom() { view_->resetView(); }
+void MainWindow::onAddTraceToSelectedClass() { addPendingTraceToSelectedClass(); }
+void MainWindow::onRemoveSelectedTrace() { removeSelectedTraceFromClass(); }
+
+void MainWindow::onRenameSelectedTrace() {
+  const int classIndex = currentSelectedClassIndex();
+  const int row = traceList_ ? traceList_->currentRow() : -1;
+  if (classIndex < 0 || row < 0 || classIndex >= static_cast<int>(classTraceRegions_.size()) || row >= static_cast<int>(classTraceRegions_[classIndex].size())) {
+    return;
+  }
+  bool ok = false;
+  const QString currentName = classTraceRegions_[classIndex][row].name;
+  const QString name = QInputDialog::getText(this, tr("Rename trace"), tr("Trace name"), QLineEdit::Normal, currentName, &ok);
+  if (!ok || name.trimmed().isEmpty()) return;
+  pushUndoSnapshot();
+  classTraceRegions_[classIndex][row].name = name.trimmed();
+  updateTraceLists();
+  saveCurrentSliceState();
 }
 
-void MainWindow::onTraceTool() {
-  view_->setToolMode(SegmentationView::TraceTool);
-  infoLabel_->setText(tr("Draw a freehand ROI, then click Add ROI to selected class to commit it."));
+void MainWindow::onClearTracesForSelectedClass() {
+  const int classIndex = currentSelectedClassIndex();
+  if (classIndex < 0 || classIndex >= static_cast<int>(classTraceRegions_.size())) return;
+  if (classTraceRegions_[classIndex].empty()) return;
+  pushUndoSnapshot();
+  classTraceRegions_[classIndex].clear();
+  rebuildMasksFromAnnotations();
 }
 
-void MainWindow::onEraseTool() {
-  view_->setToolMode(SegmentationView::EraseTool);
+void MainWindow::onUndo() {
+  if (undoStack_.empty()) return;
+  AnnotationSnapshot current;
+  current.classBrushMasks = cloneMaskVector(classBrushMasks_);
+  current.classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  redoStack_.push_back(std::move(current));
+  const AnnotationSnapshot snapshot = undoStack_.back();
+  undoStack_.pop_back();
+  restoreSnapshot(snapshot);
 }
 
-void MainWindow::onPanTool() {
-  view_->setToolMode(SegmentationView::PanTool);
+void MainWindow::onRedo() {
+  if (redoStack_.empty()) return;
+  AnnotationSnapshot current;
+  current.classBrushMasks = cloneMaskVector(classBrushMasks_);
+  current.classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  undoStack_.push_back(std::move(current));
+  const AnnotationSnapshot snapshot = redoStack_.back();
+  redoStack_.pop_back();
+  restoreSnapshot(snapshot);
 }
 
-void MainWindow::onResetZoom() {
-  view_->resetView();
+void MainWindow::onSliceChanged(int value) {
+  if (value < 0 || value >= static_cast<int>(imageVolume_.size()) || value == currentSliceIndex_) {
+    return;
+  }
+  saveCurrentSliceState();
+  currentSliceIndex_ = value;
+  originalImage_ = imageVolume_[currentSliceIndex_].clone();
+  featureStack_ = featureVolume_[currentSliceIndex_].clone();
+  if (featureStack_.empty()) rebuildFeatureStack();
+  restoreSliceState(currentSliceIndex_);
+  updateViewer();
+  updateUiState();
 }
 
-void MainWindow::onAddTraceToSelectedClass() {
-  addPendingTraceToSelectedClass();
+void MainWindow::onNewProject() {
+  persistCurrentProjectImageState();
+  projectImages_.clear();
+  currentProjectImageIndex_ = -1;
+  projectPath_.clear();
+  updateProjectList();
+  logMessage(tr("Started a new empty project."));
 }
 
-void MainWindow::onRemoveSelectedTrace() {
-  removeSelectedTraceFromClass();
+void MainWindow::onOpenProject() {
+  const QString path = QFileDialog::getOpenFileName(this, tr("Open project"), QString(), tr("Project (*.json)"));
+  if (!path.isEmpty() && !loadProject(path)) {
+    QMessageBox::warning(this, tr("Open failed"), tr("Failed to load project."));
+  }
+}
+
+void MainWindow::onSaveProject() {
+  QString path = projectPath_;
+  if (path.isEmpty()) {
+    path = QFileDialog::getSaveFileName(this, tr("Save project"), QString(), tr("Project (*.json)"));
+  }
+  if (!path.isEmpty() && !saveProject(path)) {
+    QMessageBox::warning(this, tr("Save failed"), tr("Failed to save project."));
+  }
+}
+
+void MainWindow::onAddImageToProject() {
+  const QStringList paths = QFileDialog::getOpenFileNames(this, tr("Add image(s) to project"), QString(), tr("Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"));
+  if (paths.isEmpty()) return;
+  for (const QString& path : paths) {
+    projectImages_.push_back({path, QString()});
+  }
+  if (currentProjectImageIndex_ < 0 && !projectImages_.empty()) {
+    currentProjectImageIndex_ = 0;
+    switchToProjectImage(0);
+  }
+  updateProjectList();
+}
+
+void MainWindow::onRemoveProjectImage() {
+  if (currentProjectImageIndex_ < 0 || currentProjectImageIndex_ >= static_cast<int>(projectImages_.size())) return;
+  projectImages_.erase(projectImages_.begin() + currentProjectImageIndex_);
+  if (projectImages_.empty()) {
+    currentProjectImageIndex_ = -1;
+  } else {
+    currentProjectImageIndex_ = std::clamp(currentProjectImageIndex_, 0, static_cast<int>(projectImages_.size()) - 1);
+    switchToProjectImage(currentProjectImageIndex_);
+  }
+  updateProjectList();
+}
+
+void MainWindow::onProjectSelectionChanged() {
+  if (switchingProjectSelection_ || !projectList_ || !projectList_->currentItem()) {
+    return;
+  }
+  const int index = projectList_->currentItem()->data(Qt::UserRole).toInt();
+  if (index != currentProjectImageIndex_) {
+    switchToProjectImage(index);
+  }
 }
