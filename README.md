@@ -1,129 +1,127 @@
-# Multi-Camera Rig Toolkit (Qt GUI)
+# Qt Trainable Segmentation
 
-This is the **productized GUI** version (Qt Widgets) of:
-- Multi-camera chessboard calibration (intrinsics + rig->cam extrinsics)
-- AprilTag detection (OpenCV ArUco AprilTag)
-- Multi-camera 6DoF rig pose estimation (RANSAC + Ceres LM)
+一个使用 **Qt Widgets + C++ + OpenCV** 实现的交互式可训练图像分割工具，工作流参考 Fiji / ImageJ 的 **Plugins › Segmentation › Trainable Weka Segmentation**。
 
-Compared to the OpenCV-window version, this provides:
-- A real app window with dockable panels
-- Buttons for calibration and tracking actions
-- Status bar, logs, and live multi-camera mosaic display
-- Persistent settings (last used files, thresholds) via QSettings
+## 当前实现的核心能力
 
----
+- 打开单张图像并进行交互式像素级标注。
+- 支持多类别训练样本管理，默认提供 2 个类别，并可动态新增类别；其中 Class 1 预设为前景目标，Class 2 预设为背景对象。
+- 支持画笔标注、擦除、平移、缩放、ROI trace 绘制、trace 提交与结果叠加显示。
+- 自动提取多种像素特征：
+  - 原始灰度
+  - 多尺度高斯平滑
+  - Difference of Gaussians (DoG)
+  - 梯度幅值
+  - Laplacian
+  - Hessian 响应
+  - 局部均值 / 局部标准差
+  - 局部 entropy / texture energy
+  - Gabor / membrane 响应
+  - 归一化 X/Y 空间位置
+- 支持多种可切换分类器：**Gaussian Naive Bayes / Random Forest / SVM (RBF)**。
+- 支持在设置面板中调节分类器参数，并可启用 **balance classes** 采样。
+- 生成整图分割结果与按类别概率图。
+- 支持结果统计绘图。
+- 支持保存 / 加载：
+  - 训练数据（JSON + 每类 mask PNG）
+  - 分类器（YAML）
+- 支持导出最终标签图。
+- 训练好的分类器可直接应用到当前图像或另选图像文件。
 
-## Dependencies
-- Qt 6 Widgets (preferred) or Qt 5 Widgets
-- OpenCV
-- Eigen3
-- Ceres Solver
+## 界面对应关系
 
-Ubuntu example:
+左侧面板对应 Trainable Weka Segmentation 常见操作：
+
+- **Train classifier**：根据用户标注训练分类器
+- **Toggle overlay**：开关分割叠加层
+- **Create result**：弹出结果查看器
+- **Get probability**：显示类别概率图（当前支持 GaussianNB / Random Forest）
+- **Plot result**：统计各类别像素数量
+- **Apply classifier**：对当前图像或另选图像重新执行整图分类
+- **Load / Save classifier**：加载/保存训练好的模型
+- **Load / Save data**：加载/保存标注数据
+- **Create new class**：新增类别
+- **Settings**：配置特征提取项与分类器参数
+- **Stop training**：请求停止当前训练流程（会在当前可中断阶段尽快停下）
+- **Classifier**：选择当前训练器（GaussianNB / Random Forest / SVM）
+- **Trace ROI**：先画出一个自由曲线 ROI
+- **Add ROI to selected class**：把当前 ROI 提交到当前选中的类别
+
+## 依赖
+
+- CMake >= 3.16
+- Qt 5 或 Qt 6（Widgets + PrintSupport）
+- OpenCV（core / imgproc / imgcodecs / ml）
+
+## 构建
+
 ```bash
-sudo apt-get install -y qt6-base-dev libopencv-dev libeigen3-dev libceres-dev
-# If you're on Qt5:
-# sudo apt-get install -y qtbase5-dev
+cmake -S . -B build
+cmake --build build -j
 ```
 
----
+> 如果 CMake 找不到 Qt，请显式设置 `CMAKE_PREFIX_PATH` 指向 Qt 安装目录。
 
-## Build
+例如：
+
 ```bash
-mkdir -p build
-cd build
-cmake ..
-cmake --build . -j
+cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/Qt/6.x/gcc_64
 ```
 
----
+### Windows / Visual Studio 说明
 
-## Run
+如果你在 **MSVC Debug** 下遇到 `GaussianBlur`、`cvtColor` 等 `LNK2019`，通常是 OpenCV 的 `imgproc` / `imgcodecs` 没有按 Debug 配置正确参与链接。当前 `CMakeLists.txt` 已优先使用 OpenCV 的 imported targets（如 `opencv_world` 或 `opencv_core`/`opencv_imgproc`/`opencv_imgcodecs`），并在旧版 OpenCV 包配置下回退到显式模块链接，以尽量避免这一类问题。
 
-### Live cameras
+如果仍有问题，请检查：
+
+1. `OpenCV_DIR` 是否指向与你当前编译器/架构匹配的 OpenCV CMake 配置目录。
+2. Debug 构建是否对应 Debug OpenCV 库，Release 构建是否对应 Release OpenCV 库。
+3. `cmake` 配置输出中的 `OpenCV link libs:` 是否包含 `opencv_imgproc` / `opencv_imgcodecs` 或 `opencv_world`。
+4. 如果你使用的是 OpenCV 4.8.0 官方/自编译 Windows 包，确认其 `lib` 目录里确实存在类似 `opencv_core480d.lib`、`opencv_imgproc480d.lib`、`opencv_imgcodecs480d.lib`（Debug）以及对应的不带 `d` 的 Release 库。
+
+对于这种目录结构，现在的 CMake 会优先尝试直接解析这些具体 `.lib` 文件。
+
+一个典型的 VS2019 + Qt5.15 + OpenCV 4.8.0 配置示例是：
+
 ```bash
-./multicam_rig_toolkit_qt --cam 0 --cam 1 --cam 2 --cam 3 --board 9 6 --square 0.025
+cmake -S . -B build -G "Visual Studio 16 2019" -A x64 ^
+  -DQt5_DIR="C:/Qt/5.15.2/msvc2019_64/lib/cmake/Qt5" ^
+  -DOpenCV_DIR="C:/opencv/build"
 ```
 
-### Video files
-```bash
-./multicam_rig_toolkit_qt --video cam0.mp4 --video cam1.mp4 --video cam2.mp4 --video cam3.mp4 --board 9 6 --square 0.025
-```
+## 使用流程
 
----
+1. 打开图像。
+2. 从右侧类别列表选择当前要标注的类别。
+3. 先使用工具栏里的 **Trace ROI** 画出一个自由曲线 ROI，并点击 **Add ROI to selected class** 提交。
+4. 也可以继续使用 `Paint` 工具在图像上补充像素级样本。
+5. 如果你创建了更多类别，可以随时切换当前类别并继续标注；trace 列表会跟随当前选中类别刷新。
+6. 选择需要的 **Classifier**。
+7. 点击 **Train classifier**。
+8. 通过 **Apply classifier** 将模型应用到当前图像，或选择另一个图像文件进行推理。
+9. 查看叠加结果、概率图与结果统计。
+10. 根据需要继续补充标注并重新训练。
+11. 保存训练数据或导出分类器。
 
-## Input files
+## 训练数据格式
 
-### Tag 3D map (required for tracking pose)
-Default path (can also load from UI):
-- `tag_corners_world.txt`
+保存训练数据时会生成：
 
-Format each line:
-```
-tag_id corner_idx X Y Z
-```
-Corner order: 0 TL, 1 TR, 2 BR, 3 BL.
+- 一个 JSON 清单文件
+- 每个类别对应的 mask PNG 文件
 
-### Calibration YAML
-Default path (can also load from UI):
-- `rig_calib.yaml`
+这样便于后续再次打开项目继续标注和训练。
 
----
+## 说明
 
-## UI overview
-
-Left panel: **Sources**
-- shows how many cameras/videos opened
-- frame size and FPS estimate
-
-Middle: **Live view**
-- Mosaic display (2 columns by default)
-- Overlays: chessboard corners / AprilTag outlines / text
-
-Right panel: **Actions**
-- Tab **Calibration**
-  - Grab Frame (stores chessboard detections)
-  - Reset
-  - Calibrate + Save YAML
-- Tab **Tracking**
-  - Load Tag Map
-  - Load Calibration YAML
-  - Toggle Pose Estimation
-  - Print pose/inliers
-
-Status bar: current mode + capture count + inliers.
+- 当前实现面向 **2D 单张图像** 的交互式训练分割。
+- 为保证项目可直接在 C++/Qt/OpenCV 中落地，分类器采用轻量级内置 Gaussian Naive Bayes，并封装 OpenCV 的 Random Forest / SVM，而不是直接依赖 Java/Weka 运行时。
+- 如果需要进一步逼近 Fiji 版本，还可以继续扩展：
+  - 更多滤波器特征（Hessian、Gabor、膜结构、纹理特征）
+  - 超像素
+  - 3D stack / 多通道图像
+  - 批处理推理
+  - 模型对比与交叉验证
 
 
-
-# Tracking Demo Dataset (Stereo)
-
-This folder provides a ready-to-load demo set for the Tracking module:
-
-- `tag_corners_world.txt` : Tag Map (3 tags x 4 corners)
-- `rig_calib.yaml` : 2-camera rig calibration example
-- `left_seq/*.bmp` : left camera image sequence (12 frames)
-- `right_seq/*.bmp` : right camera image sequence (12 frames)
-
-## How to use in app
-1. Switch to **Tracking**.
-2. Add `left_seq` and `right_seq` via **AddImageSeq**.
-3. Click **Load Tag Map (TXT)** and choose `tag_corners_world.txt`.
-4. Click **Load Calibration (YAML)** and choose `rig_calib.yaml`.
-5. Enable **Pose Estimation ON**.
-6. Click **Detect All Frames**.
-
-> Note: Images are synthetic demo frames for integration and UI regression workflows.
-
-
-## Binary package (for offline transfer)
-- `tracking_demo_bin.zip` contains only the stereo BMP sequences (`left_seq/`, `right_seq/`).
-- Keep this zip outside git history if your remote rejects binary assets.
-
-
-
-
----
-
-## Notes
-- For best extrinsics: capture chessboard visible on cam0 and other cameras in the SAME frame (board static is OK).
-- Pose estimation uses previous estimate as initialization for smoother tracking.
+> 注：当前“概率图”支持 Gaussian Naive Bayes 与 Random Forest；SVM 已支持训练/预测/保存加载，但暂未提供严格概率输出。

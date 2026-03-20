@@ -1,2790 +1,1316 @@
-
 #include "MainWindow.h"
-#include "CaptureWorker.h"
-#include "SolveWorker.h"
-#include "qcustomplot.h"
 
-#include <QHBoxLayout>
-#include <QVBoxLayout>
-#include <QDockWidget>
-#include <QFileDialog>
-#include <QInputDialog>
-#include <QDateTime>
-#include <QMessageBox>
-#include <QFileInfo>
-#include <QDir>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonArray>
-#include <QFile>
-#include <QScrollArea>
+#include "QCustomPlot.h"
+#include "SegmentationView.h"
+
 #include <QApplication>
-#include <QScreen>
-#include <QHeaderView>
-#include <QTabBar>
-#include <QStyle>
-#include <QFrame>
-#include <QIntValidator>
+#include <QBoxLayout>
+#include <QColorDialog>
 #include <QDialog>
 #include <QDialogButtonBox>
-#include <QCheckBox>
+#include <QFileDialog>
 #include <QFormLayout>
-#include <QMenu>
-#include <functional>
-#include <climits>
+#include <QGroupBox>
+#include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMessageBox>
+#include <QPainter>
+#include <QScreen>
+#include <QSplitter>
+#include <QToolBar>
+#include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
+#include <QGuiApplication>
+#include <QLineEdit>
+#include <QDoubleSpinBox>
 
-static QString nowStr() {
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+
+namespace {
+QString nowString() {
   return QDateTime::currentDateTime().toString("hh:mm:ss");
 }
 
-static QStringList kImageNameFilters() {
-  return {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff"};
+QColor defaultColorForIndex(int index) {
+  static const QVector<QColor> palette = {
+      QColor(224, 72, 72), QColor(73, 201, 118), QColor(72, 130, 235),
+      QColor(235, 183, 72), QColor(188, 72, 235), QColor(54, 200, 211)};
+  return palette[index % palette.size()];
 }
 
-class ClickJumpSlider : public QSlider {
-public:
-  explicit ClickJumpSlider(Qt::Orientation orientation, QWidget* parent=nullptr)
-      : QSlider(orientation, parent) {}
+}
 
-protected:
-  void mousePressEvent(QMouseEvent* event) override {
-    if (event->button() == Qt::LeftButton) {
-      const int minV = minimum();
-      const int maxV = maximum();
-      int next = minV;
-      if (orientation() == Qt::Horizontal) {
-        const int w = width();
-        if (w > 1) next = QStyle::sliderValueFromPosition(minV, maxV, event->pos().x(), w - 1);
-      } else {
-        const int h = height();
-        if (h > 1) next = QStyle::sliderValueFromPosition(minV, maxV, h - 1 - event->pos().y(), h - 1);
-      }
-      setValue(next);
-      event->accept();
+MainWindow::MainWindow(QWidget* parent)
+    : QMainWindow(parent) {
+  initializeDefaultClasses();
+  buildUi();
+  connectSignals();
+  updateUiState();
+  resize(1540, 920);
+  if (QScreen* screen = QGuiApplication::primaryScreen()) {
+    const QRect available = screen->availableGeometry();
+    move(available.center() - rect().center());
+  }
+  setWindowTitle("Qt Trainable Segmentation");
+}
+
+void MainWindow::buildUi() {
+  auto* toolBar = addToolBar(tr("File"));
+  toolBar->setMovable(false);
+  QAction* openImageAction = toolBar->addAction(tr("Open Image"));
+  QAction* saveMaskAction = toolBar->addAction(tr("Export Mask"));
+  toolBar->addSeparator();
+  QAction* paintAction = toolBar->addAction(tr("Paint"));
+  QAction* eraseAction = toolBar->addAction(tr("Erase"));
+  QAction* panAction = toolBar->addAction(tr("Pan"));
+  QAction* traceAction = toolBar->addAction(tr("Trace ROI"));
+  QAction* resetZoomAction = toolBar->addAction(tr("Reset Zoom"));
+
+  connect(openImageAction, &QAction::triggered, this, &MainWindow::onOpenImage);
+  connect(saveMaskAction, &QAction::triggered, this, &MainWindow::onExportMask);
+  connect(paintAction, &QAction::triggered, this, &MainWindow::onPaintTool);
+  connect(eraseAction, &QAction::triggered, this, &MainWindow::onEraseTool);
+  connect(panAction, &QAction::triggered, this, &MainWindow::onPanTool);
+  connect(traceAction, &QAction::triggered, this, &MainWindow::onTraceTool);
+  connect(resetZoomAction, &QAction::triggered, this, &MainWindow::onResetZoom);
+
+  auto* splitter = new QSplitter(this);
+  splitter->setOrientation(Qt::Horizontal);
+  setCentralWidget(splitter);
+
+  auto* leftPanel = new QWidget(splitter);
+  auto* leftLayout = new QVBoxLayout(leftPanel);
+  leftLayout->setContentsMargins(12, 12, 12, 12);
+  leftLayout->setSpacing(12);
+
+  auto* trainingGroup = new QGroupBox(tr("Training"), leftPanel);
+  auto* trainingLayout = new QVBoxLayout(trainingGroup);
+  trainButton_ = new QPushButton(tr("Train classifier"), trainingGroup);
+  stopTrainingButton_ = new QPushButton(tr("Stop training"), trainingGroup);
+  QPushButton* overlayButton = new QPushButton(tr("Toggle overlay"), trainingGroup);
+  createResultButton_ = new QPushButton(tr("Create result"), trainingGroup);
+  probabilityButton_ = new QPushButton(tr("Get probability"), trainingGroup);
+  QPushButton* plotButton = new QPushButton(tr("Plot result"), trainingGroup);
+  trainingLayout->addWidget(trainButton_);
+  trainingLayout->addWidget(stopTrainingButton_);
+  trainingLayout->addWidget(overlayButton);
+  trainingLayout->addWidget(createResultButton_);
+  trainingLayout->addWidget(probabilityButton_);
+  trainingLayout->addWidget(plotButton);
+  leftLayout->addWidget(trainingGroup);
+
+  auto* optionsGroup = new QGroupBox(tr("Options"), leftPanel);
+  auto* optionsLayout = new QVBoxLayout(optionsGroup);
+  applyButton_ = new QPushButton(tr("Apply classifier"), optionsGroup);
+  QPushButton* loadClassifierButton = new QPushButton(tr("Load classifier"), optionsGroup);
+  QPushButton* saveClassifierButton = new QPushButton(tr("Save classifier"), optionsGroup);
+  QPushButton* loadDataButton = new QPushButton(tr("Load data"), optionsGroup);
+  QPushButton* saveDataButton = new QPushButton(tr("Save data"), optionsGroup);
+  QPushButton* createClassButton = new QPushButton(tr("Create new class"), optionsGroup);
+  QPushButton* settingsButton = new QPushButton(tr("Settings"), optionsGroup);
+  optionsLayout->addWidget(applyButton_);
+  optionsLayout->addWidget(loadClassifierButton);
+  optionsLayout->addWidget(saveClassifierButton);
+  optionsLayout->addWidget(loadDataButton);
+  optionsLayout->addWidget(saveDataButton);
+  optionsLayout->addWidget(createClassButton);
+  optionsLayout->addWidget(settingsButton);
+  leftLayout->addWidget(optionsGroup);
+
+  auto* brushGroup = new QGroupBox(tr("Brush"), leftPanel);
+  auto* brushLayout = new QFormLayout(brushGroup);
+  brushSizeSpin_ = new QSpinBox(brushGroup);
+  brushSizeSpin_->setRange(1, 256);
+  brushSizeSpin_->setValue(12);
+  opacitySlider_ = new QSlider(Qt::Horizontal, brushGroup);
+  opacitySlider_->setRange(0, 100);
+  opacitySlider_->setValue(static_cast<int>(overlayOpacity_ * 100.0));
+  probabilityCombo_ = new QComboBox(brushGroup);
+  classifierCombo_ = new QComboBox(brushGroup);
+  classifierCombo_->addItem(tr("Gaussian Naive Bayes"), SegmentationClassifierSettings::GaussianNaiveBayes);
+  classifierCombo_->addItem(tr("Random Forest"), SegmentationClassifierSettings::RandomForest);
+  classifierCombo_->addItem(tr("SVM (RBF)"), SegmentationClassifierSettings::SupportVectorMachine);
+  overlayCheck_ = new QCheckBox(tr("Show classifier overlay"), brushGroup);
+  overlayCheck_->setChecked(true);
+  contourCheck_ = new QCheckBox(tr("Draw contours"), brushGroup);
+  contourCheck_->setChecked(true);
+  brushLayout->addRow(tr("Brush radius"), brushSizeSpin_);
+  brushLayout->addRow(tr("Overlay alpha"), opacitySlider_);
+  brushLayout->addRow(tr("Probability class"), probabilityCombo_);
+  brushLayout->addRow(tr("Classifier"), classifierCombo_);
+  brushLayout->addRow(overlayCheck_);
+  brushLayout->addRow(contourCheck_);
+  leftLayout->addWidget(brushGroup);
+
+  auto* spacer = new QWidget(leftPanel);
+  spacer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+  leftLayout->addWidget(spacer);
+
+  connect(overlayButton, &QPushButton::clicked, this, &MainWindow::onToggleOverlay);
+  connect(plotButton, &QPushButton::clicked, this, &MainWindow::onPlotResult);
+  connect(loadClassifierButton, &QPushButton::clicked, this, &MainWindow::onLoadClassifier);
+  connect(saveClassifierButton, &QPushButton::clicked, this, &MainWindow::onSaveClassifier);
+  connect(loadDataButton, &QPushButton::clicked, this, &MainWindow::onLoadData);
+  connect(saveDataButton, &QPushButton::clicked, this, &MainWindow::onSaveData);
+  connect(createClassButton, &QPushButton::clicked, this, &MainWindow::onCreateNewClass);
+  connect(settingsButton, &QPushButton::clicked, this, &MainWindow::onSettings);
+
+  auto* centerPanel = new QWidget(splitter);
+  auto* centerLayout = new QVBoxLayout(centerPanel);
+  centerLayout->setContentsMargins(8, 8, 8, 8);
+  centerLayout->setSpacing(8);
+  imagePathLabel_ = new QLabel(tr("No image loaded"), centerPanel);
+  imagePathLabel_->setWordWrap(true);
+  view_ = new SegmentationView(centerPanel);
+  infoLabel_ = new QLabel(tr("Open a grayscale or color image to begin labeling."), centerPanel);
+  probabilityLabel_ = new QLabel(tr("Probability: n/a"), centerPanel);
+  modelLabel_ = new QLabel(tr("Model: not trained"), centerPanel);
+  centerLayout->addWidget(imagePathLabel_);
+  centerLayout->addWidget(view_, 1);
+  centerLayout->addWidget(infoLabel_);
+  centerLayout->addWidget(probabilityLabel_);
+  centerLayout->addWidget(modelLabel_);
+
+  auto* rightPanel = new QWidget(splitter);
+  auto* rightLayout = new QVBoxLayout(rightPanel);
+  rightLayout->setContentsMargins(12, 12, 12, 12);
+  rightLayout->setSpacing(12);
+
+  auto* labelsGroup = new QGroupBox(tr("Labels"), rightPanel);
+  auto* labelsLayout = new QVBoxLayout(labelsGroup);
+  addTraceButton_ = new QPushButton(tr("Add ROI to selected class"), labelsGroup);
+  addTraceButton_->setToolTip(tr("Commit the current ROI trace to the currently selected class."));
+  classList_ = new QListWidget(labelsGroup);
+  traceList_ = new QListWidget(labelsGroup);
+  removeTraceButton_ = new QPushButton(tr("Remove selected trace"), labelsGroup);
+  traceGroup_ = new QGroupBox(tr("Traces"), labelsGroup);
+  auto* traceLayout = new QVBoxLayout(traceGroup_);
+  traceLayout->addWidget(traceList_);
+  traceLayout->addWidget(removeTraceButton_);
+  labelsLayout->addWidget(addTraceButton_);
+  labelsLayout->addWidget(classList_);
+  labelsLayout->addWidget(traceGroup_);
+  rightLayout->addWidget(labelsGroup, 2);
+
+  auto* logGroup = new QGroupBox(tr("Log"), rightPanel);
+  auto* logLayout = new QVBoxLayout(logGroup);
+  logEdit_ = new QTextEdit(logGroup);
+  logEdit_->setReadOnly(true);
+  logLayout->addWidget(logEdit_);
+  rightLayout->addWidget(logGroup, 1);
+
+  splitter->addWidget(leftPanel);
+  splitter->addWidget(centerPanel);
+  splitter->addWidget(rightPanel);
+  splitter->setStretchFactor(0, 0);
+  splitter->setStretchFactor(1, 1);
+  splitter->setStretchFactor(2, 0);
+  splitter->setSizes({250, 980, 280});
+
+  refreshClassList();
+}
+
+void MainWindow::connectSignals() {
+  connect(trainButton_, &QPushButton::clicked, this, &MainWindow::onTrainClassifier);
+  connect(stopTrainingButton_, &QPushButton::clicked, this, &MainWindow::onStopTraining);
+  connect(applyButton_, &QPushButton::clicked, this, &MainWindow::onApplyClassifier);
+  connect(createResultButton_, &QPushButton::clicked, this, &MainWindow::onCreateResult);
+  connect(probabilityButton_, &QPushButton::clicked, this, &MainWindow::onGetProbability);
+  connect(brushSizeSpin_, qOverload<int>(&QSpinBox::valueChanged), this, &MainWindow::onBrushRadiusChanged);
+  connect(classList_, &QListWidget::itemSelectionChanged, this, &MainWindow::onClassSelectionChanged);
+  connect(probabilityCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, &MainWindow::onProbabilityClassChanged);
+  connect(classifierCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
+    classifierSettings_.kind = static_cast<SegmentationClassifierSettings::Kind>(classifierCombo_->itemData(index).toInt());
+    updateUiState();
+  });
+  connect(opacitySlider_, &QSlider::valueChanged, this, &MainWindow::onOpacityChanged);
+  connect(overlayCheck_, &QCheckBox::toggled, this, [this](bool checked) {
+    showOverlay_ = checked;
+    updateViewer();
+  });
+  connect(contourCheck_, &QCheckBox::toggled, this, [this](bool) {
+    updateViewer();
+  });
+  connect(addTraceButton_, &QPushButton::clicked, this, &MainWindow::onAddTraceToSelectedClass);
+  connect(removeTraceButton_, &QPushButton::clicked, this, &MainWindow::onRemoveSelectedTrace);
+  connect(traceList_, &QListWidget::itemSelectionChanged, this, [this]() { updateUiState(); });
+
+  view_->onBrushStroke = [this](const QPoint& imagePos, int radius, bool erase) {
+    applyBrushStroke(imagePos, radius, erase);
+  };
+  view_->onTraceFinished = [this](const QPolygon& trace) {
+    setPendingTrace(trace);
+  };
+
+  view_->onMouseHover = [this](const QPoint& imagePos) {
+    if (originalImage_.empty() || imagePos.x() < 0 || imagePos.y() < 0) {
+      probabilityLabel_->setText(tr("Probability: n/a"));
       return;
     }
-    QSlider::mousePressEvent(event);
-  }
-};
-
-class TitleBarWidget : public QWidget {
-public:
-  explicit TitleBarWidget(QWidget* parent=nullptr) : QWidget(parent) {}
-
-  std::function<void(const QPoint&)> onDragMove;
-  std::function<void()> onToggleMaxRestore;
-
-protected:
-  void mousePressEvent(QMouseEvent* event) override {
-    if (event->button() == Qt::LeftButton) {
-      dragging_ = true;
-      dragOffset_ = event->globalPos() - window()->frameGeometry().topLeft();
-      event->accept();
-      return;
-    }
-    QWidget::mousePressEvent(event);
-  }
-
-  void mouseMoveEvent(QMouseEvent* event) override {
-    if (dragging_ && (event->buttons() & Qt::LeftButton) && onDragMove) {
-      onDragMove(event->globalPos() - dragOffset_);
-      event->accept();
-      return;
-    }
-    QWidget::mouseMoveEvent(event);
-  }
-
-  void mouseReleaseEvent(QMouseEvent* event) override {
-    dragging_ = false;
-    QWidget::mouseReleaseEvent(event);
-  }
-
-  void mouseDoubleClickEvent(QMouseEvent* event) override {
-    if (event->button() == Qt::LeftButton && onToggleMaxRestore) {
-      onToggleMaxRestore();
-      event->accept();
-      return;
-    }
-    QWidget::mouseDoubleClickEvent(event);
-  }
-
-private:
-  bool dragging_ = false;
-  QPoint dragOffset_;
-};
-
-
-ImageViewer::ImageViewer(QWidget* parent) : QGraphicsView(parent) {
-  setScene(&scene_);
-  setRenderHint(QPainter::Antialiasing, true);
-  setBackgroundBrush(QColor(17,17,17));
-  setFrameShape(QFrame::StyledPanel);
-  setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
-  setResizeAnchor(QGraphicsView::AnchorViewCenter);
-  setDragMode(QGraphicsView::ScrollHandDrag);
-  pixmapItem_ = scene_.addPixmap(QPixmap());
-}
-
-void ImageViewer::setImage(const QImage& img) {
-  if (img.isNull()) {
-    pixmapItem_->setPixmap(QPixmap());
-    return;
-  }
-  pixmapItem_->setPixmap(QPixmap::fromImage(img));
-  scene_.setSceneRect(pixmapItem_->boundingRect());
-  if (zoomFactor_ == 1.0) {
-    resetTransform();
-    fitInView(pixmapItem_, Qt::KeepAspectRatio);
-  }
-}
-
-void ImageViewer::setToolMode(ToolMode mode) {
-  toolMode_ = mode;
-  if (toolMode_ == PanTool) {
-    setCursor(Qt::OpenHandCursor);
-    setDragMode(QGraphicsView::ScrollHandDrag);
-  } else {
-    setCursor(Qt::CrossCursor);
-    setDragMode(QGraphicsView::NoDrag);
-  }
-  if (!lineDrawing_ && previewLine_) {
-    scene_.removeItem(previewLine_);
-    delete previewLine_;
-    previewLine_ = nullptr;
-  }
-}
-
-void ImageViewer::zoomIn() { applyZoom(1.15); }
-void ImageViewer::zoomOut() { applyZoom(1.0/1.15); }
-
-void ImageViewer::resetView() {
-  resetTransform();
-  zoomFactor_ = 1.0;
-  if (!pixmapItem_->pixmap().isNull()) fitInView(pixmapItem_, Qt::KeepAspectRatio);
-}
-
-void ImageViewer::clearAnnotations() {
-  const auto items = scene_.items();
-  for (auto* it : items) {
-    if (it == pixmapItem_) continue;
-    scene_.removeItem(it);
-    delete it;
-  }
-  previewLine_ = nullptr;
-  lineDrawing_ = false;
-}
-
-void ImageViewer::applyZoom(double factor) {
-  zoomFactor_ *= factor;
-  zoomFactor_ = std::max(0.1, std::min(zoomFactor_, 20.0));
-  scale(factor, factor);
-}
-
-void ImageViewer::wheelEvent(QWheelEvent* e) {
-  if (e->angleDelta().y() > 0) zoomIn();
-  else zoomOut();
-}
-
-void ImageViewer::mousePressEvent(QMouseEvent* e) {
-  if (toolMode_ == PanTool) {
-    QGraphicsView::mousePressEvent(e);
-    return;
-  }
-  if (e->button() != Qt::LeftButton || pixmapItem_->pixmap().isNull()) return;
-
-  QPointF p = mapToScene(e->pos());
-  if (!sceneRect().contains(p)) return;
-
-  if (toolMode_ == PointTool) {
-    scene_.addEllipse(p.x()-3, p.y()-3, 6, 6, QPen(QColor(255,80,80), 2), QBrush(QColor(255,80,80)));
-    setToolMode(PanTool);
-    return;
-  }
-
-  if (toolMode_ == LineTool) {
-    if (!lineDrawing_) {
-      lineDrawing_ = true;
-      lineStart_ = p;
-      previewLine_ = scene_.addLine(QLineF(lineStart_, lineStart_), QPen(QColor(80,220,255), 2));
+    if (!probabilityImage_.empty()) {
+      const float value = probabilityImage_.at<float>(imagePos.y(), imagePos.x());
+      probabilityLabel_->setText(tr("Probability: %1%  @ (%2, %3)")
+                                     .arg(QString::number(value * 100.0f, 'f', 2))
+                                     .arg(imagePos.x())
+                                     .arg(imagePos.y()));
     } else {
-      scene_.addLine(QLineF(lineStart_, p), QPen(QColor(80,220,255), 2));
-      if (previewLine_) {
-        scene_.removeItem(previewLine_);
-        delete previewLine_;
-        previewLine_ = nullptr;
-      }
-      lineDrawing_ = false;
-      setToolMode(PanTool);
+      probabilityLabel_->setText(tr("Cursor: (%1, %2)").arg(imagePos.x()).arg(imagePos.y()));
     }
+  };
+}
+
+void MainWindow::initializeDefaultClasses() {
+  classes_.clear();
+  classes_.push_back({tr("Foreground target"), defaultColorForIndex(0), true});
+  classes_.push_back({tr("Background object"), defaultColorForIndex(1), true});
+}
+
+void MainWindow::refreshClassList() {
+  classList_->clear();
+  probabilityCombo_->clear();
+  for (int i = 0; i < static_cast<int>(classes_.size()); ++i) {
+    const auto& cls = classes_[i];
+    QString roleText;
+    if (i == 0) roleText = tr(" - foreground target");
+    else if (i == 1) roleText = tr(" - background object");
+    QListWidgetItem* item = new QListWidgetItem(QString("%1  (Class %2)%3").arg(cls.name).arg(i + 1).arg(roleText), classList_);
+    item->setForeground(cls.color);
+    item->setData(Qt::UserRole, i);
+    probabilityCombo_->addItem(cls.name, i);
+  }
+  if (classList_->count() > 0 && !classList_->currentItem()) {
+    classList_->setCurrentRow(0);
   }
 }
 
-void ImageViewer::mouseMoveEvent(QMouseEvent* e) {
-  if (toolMode_ == LineTool && lineDrawing_ && previewLine_) {
-    QPointF p = mapToScene(e->pos());
-    previewLine_->setLine(QLineF(lineStart_, p));
+void MainWindow::updateUiState() {
+  const bool hasImage = !originalImage_.empty();
+  const bool hasModel = model_.isValid();
+  const bool hasProbability = hasModel && model_.supportsProbability();
+  const int currentClass = currentSelectedClassIndex();
+  const bool hasClassSelection = currentClass >= 0 && currentClass < static_cast<int>(classes_.size());
+  trainButton_->setEnabled(hasImage && !trainingInProgress_);
+  stopTrainingButton_->setEnabled(trainingInProgress_);
+  removeTraceButton_->setEnabled(traceList_ && traceList_->currentRow() >= 0);
+  applyButton_->setEnabled(hasModel && !trainingInProgress_);
+  createResultButton_->setEnabled(hasImage && hasModel && !trainingInProgress_);
+  probabilityButton_->setEnabled(hasImage && hasProbability && !trainingInProgress_);
+  brushSizeSpin_->setEnabled(hasImage);
+  probabilityCombo_->setEnabled(hasProbability && !trainingInProgress_);
+  classifierCombo_->setEnabled(!trainingInProgress_);
+  addTraceButton_->setEnabled(hasImage && hasClassSelection && !trainingInProgress_);
+  traceList_->setEnabled(hasImage && hasClassSelection && !trainingInProgress_);
+  if (traceGroup_) {
+    traceGroup_->setEnabled(hasImage && hasClassSelection);
+  }
+  overlayCheck_->setEnabled(hasModel || !labelResult_.empty());
+  contourCheck_->setEnabled(hasModel || !labelResult_.empty());
+  view_->setPaintEnabled(hasImage);
+  modelLabel_->setText(hasModel
+                           ? tr("Model: %1 | %2 classes, %3 samples, acc=%4%")
+                                 .arg(model_.classifierName())
+                                 .arg(trainingStats_.classCount)
+                                 .arg(trainingStats_.sampleCount)
+                                 .arg(QString::number(trainingStats_.trainingAccuracy * 100.0, 'f', 2))
+                           : tr("Model: not trained"));
+}
+
+void MainWindow::rebuildFeatureStack() {
+  if (originalImage_.empty()) {
+    featureStack_.release();
     return;
   }
-  QGraphicsView::mouseMoveEvent(e);
+  featureStack_ = SegmentationEngine::computeFeatureStack(originalImage_, featureSettings_);
 }
 
-void ImageViewer::resizeEvent(QResizeEvent* e) {
-  QGraphicsView::resizeEvent(e);
-  if (zoomFactor_ == 1.0 && pixmapItem_ && !pixmapItem_->pixmap().isNull()) {
-    resetTransform();
-    fitInView(pixmapItem_, Qt::KeepAspectRatio);
-  }
-}
-
-MainWindow::MainWindow(const std::vector<InputSource>& sources,
-                       int board_w, int board_h, double square_m,
-                       QWidget* parent)
-  : QMainWindow(parent),
-    sources_(sources),
-    num_cams_((int)sources.size()),
-    board_w_(board_w),
-    board_h_(board_h),
-    square_(square_m),
-    settings_("YourCompany", "Multi6DTracker")
-{
-    setWindowFlags(Qt::FramelessWindowHint | Qt::Window);
-    setWindowTitle("Multi6DTracker");
-    if (QScreen* screen = QGuiApplication::primaryScreen()) {
-      setGeometry(screen->availableGeometry());
-    } else {
-      resize(1280, 800);
-    }
-
-    calibrator_.reset(new MultiCamCalibrator(std::max(1,num_cams_), cv::Size(board_w_, board_h_), square_));
-
-    source_enabled_.assign(std::max(0,num_cams_), true);
-    last_frames_.resize(std::max(0,num_cams_));
-    buildUI();
-    connect(&timer_, &QTimer::timeout, this, &MainWindow::onTick);
-    timer_.start(33);
-
-    // Start capture/solve threads
-    captureWorker_ = new CaptureWorker(&sources_, &source_enabled_, &last_frames_, &sources_mutex_, 33);
-    captureWorker_->moveToThread(&captureThread_);
-    connect(&captureThread_, &QThread::started, captureWorker_, &CaptureWorker::start);
-    connect(this, &MainWindow::destroyed, captureWorker_, &CaptureWorker::stop);
-
-    solveWorker_ = new SolveWorker();
-    solveWorker_->setStaticData(&cams_, &tag_corner_map_);
-    solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true);
-    solveWorker_->setInitPose(R_wr_, t_wr_);
-    solveWorker_->moveToThread(&solveThread_);
-
-    // Wire signals
-    connect(captureWorker_, &CaptureWorker::framesReady, this, &MainWindow::onFramesFromWorker, Qt::QueuedConnection);
-    connect(captureWorker_, &CaptureWorker::framesReady, solveWorker_, &SolveWorker::onFrames, Qt::QueuedConnection);
-    connect(solveWorker_, &SolveWorker::poseReady, this, &MainWindow::onPoseFromWorker, Qt::QueuedConnection);
-
-    captureThread_.start();
-    solveThread_.start();
-}
-
-MainWindow::~MainWindow() 
-{
-    timer_.stop();
-    // Stop workers/threads
-    if (captureWorker_) 
-        captureWorker_->stop();
-    captureThread_.quit();
-    captureThread_.wait();
-    solveThread_.quit();
-    solveThread_.wait();
-    delete solveWorker_;
-    solveWorker_ = nullptr;
-    delete captureWorker_;
-    captureWorker_ = nullptr;
-
-    for (auto& s : sources_) 
-    {
-        if (s.cap.isOpened()) 
-            s.cap.release();
-    }
-}
-
-void MainWindow::buildUI() {
-    // Top title bar spans the full QMainWindow width (including dock area)
-    TitleBarWidget* titleBar = new TitleBarWidget(this);
-    titleBar->setObjectName("customTitleBar");
-    titleBar->setFixedHeight(34);
-    QHBoxLayout* titleLayout = new QHBoxLayout(titleBar);
-    titleLayout->setContentsMargins(10, 0, 0, 0);
-    titleLayout->setSpacing(6);
-
-    QLabel* titleText = new QLabel("Multi6DTracker", titleBar);
-    titleText->setStyleSheet("color:#c7d2df;font-weight:600;");
-    titleLayout->addWidget(titleText);
-    titleLayout->addStretch(1);
-
-    auto makeTitleBtn = [titleBar](const QString& text, const QString& objName) {
-      QToolButton* b = new QToolButton(titleBar);
-      b->setObjectName(objName);
-      b->setText(text);
-      b->setFixedSize(46, 34);
-      return b;
-    };
-
-    QToolButton* btnMin = makeTitleBtn("-", "titleMinBtn");
-    QToolButton* btnMax = makeTitleBtn("[]", "titleMaxBtn");
-    QToolButton* btnClose = makeTitleBtn("X", "titleCloseBtn");
-    titleLayout->addWidget(btnMin);
-    titleLayout->addWidget(btnMax);
-    titleLayout->addWidget(btnClose);
-
-    titleBar->setStyleSheet(
-      "#customTitleBar{background:#1f232b;border-bottom:1px solid #3a4250;}"
-      "QToolButton{background:#2b3340;color:#cfd8e3;border:none;border-left:1px solid #4b586d;border-radius:0;font-size:12px;}"
-      "QToolButton:hover{background:#374255;}"
-      "QToolButton#titleCloseBtn:hover{background:#b42318;color:#ffffff;}");
-
-    connect(btnMin, &QToolButton::clicked, this, &QWidget::showMinimized);
-    connect(btnClose, &QToolButton::clicked, this, &QWidget::close);
-    connect(btnMax, &QToolButton::clicked, this, [this]() {
-      isMaximized() ? showNormal() : showMaximized();
-    });
-    titleBar->onToggleMaxRestore = [this]() {
-      isMaximized() ? showNormal() : showMaximized();
-    };
-    titleBar->onDragMove = [this](const QPoint& p) {
-      if (!isMaximized()) move(p);
-    };
-    setMenuWidget(titleBar);
-
-    QWidget* central = new QWidget(this);
-    QHBoxLayout* root = new QHBoxLayout();
-    root->setContentsMargins(0, 0, 0, 0);
-    root->setSpacing(0);
-
-    QWidget* sideBar = new QWidget(central);
-    sideBar->setObjectName("leftSidebar");
-    sideBar->setFixedWidth(64);
-    QVBoxLayout* sv = new QVBoxLayout(sideBar);
-    sv->setContentsMargins(6, 8, 6, 8);
-    sv->setSpacing(10);
-
-    QLabel* appTitle = new QLabel("Multi6DTracker", sideBar);
-    appTitle->setObjectName("sidebarTitle");
-    appTitle->setWordWrap(true);
-    appTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    sv->addWidget(appTitle);
-
-    QFrame* titleSep = new QFrame(sideBar);
-    titleSep->setFrameShape(QFrame::HLine);
-    titleSep->setFrameShadow(QFrame::Plain);
-    sv->addWidget(titleSep);
-
-    sideModeTabs_ = new QTabBar(sideBar);
-    sideModeTabs_->addTab("Capture");
-    sideModeTabs_->addTab("Calibration");
-    sideModeTabs_->addTab("Tracking");
-    sideModeTabs_->setExpanding(true);
-    sideModeTabs_->setShape(QTabBar::RoundedWest);
-    sideModeTabs_->setDrawBase(false);
-    sideModeTabs_->setCurrentIndex(0);
-    sideModeTabs_->setMovable(false);
-    sideModeTabs_->setUsesScrollButtons(false);
-    sideModeTabs_->setElideMode(Qt::ElideRight);
-    sideModeTabs_->setDocumentMode(true);
-    sv->addWidget(sideModeTabs_);
-
-    sv->addStretch(1);
-
-    QFrame* bottomSep = new QFrame(sideBar);
-    bottomSep->setFrameShape(QFrame::HLine);
-    bottomSep->setFrameShadow(QFrame::Plain);
-    sv->addWidget(bottomSep);
-
-    btnFileMenu_ = new QToolButton(sideBar);
-    btnFileMenu_->setObjectName("fileMenuBtn");
-    btnFileMenu_->setText("File");
-    btnFileMenu_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    btnFileMenu_->setIcon(style()->standardIcon(QStyle::SP_ArrowRight));
-    btnFileMenu_->setLayoutDirection(Qt::RightToLeft);
-    btnFileMenu_->setPopupMode(QToolButton::InstantPopup);
-    btnFileMenu_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    btnFileMenu_->setToolTip("Software info, Save Project, Load Project");
-    sv->addWidget(btnFileMenu_);
-    root->addWidget(sideBar);
-    sideBar->setStyleSheet(
-      "#leftSidebar{background:#1f232b;border-right:1px solid #4a5568;}"
-      "#sidebarTitle{font-size:11px;font-weight:600;color:#b8c4d6;padding:4px 4px;line-height:1.1;}"
-      "QTabBar::tab{background:transparent;color:#c8d0da;padding:4px 4px;text-align:left;border-radius:6px;margin:2px 0;min-width:44px;}"
-      "QTabBar::tab:selected{background:#3b82f6;color:white;font-weight:600;}"
-      "QTabBar::tab:hover:!selected{background:#2a3140;color:#f0f4f8;}"
-      "QToolButton{background:#2b3340;border:1px solid #4b586d;border-radius:6px;padding:6px 6px;color:#eef2f8;text-align:left;}"
-      "QToolButton::menu-indicator{subcontrol-position:right center;right:8px;}"
-      "QFrame{color:#394150;background:#394150;}");
-
-    const int sidebarReserved = sideBar->width() + 12;
-    statusBar()->setStyleSheet(QString("QStatusBar{padding-left:%1px;border-top:1px solid #3a4250;}"
-                                      "QStatusBar::item{border:none;}").arg(sidebarReserved));
-
-    QWidget* mainPane = new QWidget(central);
-    QVBoxLayout* v = new QVBoxLayout(mainPane);
-
-    // Top mode tabs
-    modeTabs_ = new QTabWidget(central);
-    modeTabs_->addTab(new QWidget(modeTabs_), "Capture");
-    modeTabs_->addTab(new QWidget(modeTabs_), "Calibration");
-    modeTabs_->addTab(new QWidget(modeTabs_), "Tracking");
-    modeTabs_->setCurrentIndex(0);
-    modeTabs_->setVisible(false);
-    connect(modeTabs_, &QTabWidget::currentChanged, this, &MainWindow::onModeTabChanged);
-
-    QHBoxLayout* topSourceBar = new QHBoxLayout();
-    btnAddCam_ = new QToolButton(central);
-    btnAddVideo_ = new QToolButton(central);
-    btnAddImgSeq_ = new QToolButton(central);
-    btnRemoveSource_ = new QToolButton(central);
-    btnAddCam_->setText("AddCamera");
-    btnAddVideo_->setText("AddVideo");
-    btnAddImgSeq_->setText("AddImageSeq");
-    btnRemoveSource_->setText("Remove");
-    btnAddCam_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    btnAddVideo_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    btnAddImgSeq_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    btnRemoveSource_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    btnAddCam_->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
-    btnAddVideo_->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
-    btnAddImgSeq_->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
-    btnRemoveSource_->setIcon(style()->standardIcon(QStyle::SP_TrashIcon));
-    topSourceBar->addWidget(btnAddVideo_);
-    topSourceBar->addWidget(btnAddImgSeq_);
-    topSourceBar->addWidget(btnRemoveSource_);
-    topSourceBar->addStretch(1);
-    v->addLayout(topSourceBar);
-
-    QFrame* topSep = new QFrame(central);
-    topSep->setFrameShape(QFrame::HLine);
-    topSep->setFrameShadow(QFrame::Sunken);
-    v->addWidget(topSep);
-
-    btnPlayAll_ = new QToolButton(central);
-    btnStopAll_ = new QToolButton(central);
-    btnStepPrev_ = new QToolButton(central);
-    btnStepNext_ = new QToolButton(central);
-
-    btnPlayAll_->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
-    btnPlayAll_->setCheckable(true);
-    btnStopAll_->setIcon(style()->standardIcon(QStyle::SP_MediaStop));
-    btnStepPrev_->setIcon(style()->standardIcon(QStyle::SP_MediaSkipBackward));
-    btnStepNext_->setIcon(style()->standardIcon(QStyle::SP_MediaSkipForward));
-    btnPlayAll_->setToolTip("Play/Pause");
-    btnStopAll_->setToolTip("Stop");
-    btnStepPrev_->setToolTip("Prev Frame");
-    btnStepNext_->setToolTip("Next Frame");
-
-    // Per-view toolbars are created in rebuildSourceViews(), one toolbar per player.
-
-    viewsHost_ = new QWidget(this);
-    viewsGrid_ = new QGridLayout(viewsHost_);
-    viewsGrid_->setContentsMargins(0,0,0,0);
-    viewsGrid_->setSpacing(8);
-    viewsHost_->setMinimumSize(960, 540);
-    v->addWidget(viewsHost_, 1);
-    rebuildSourceViews();
-
-    QHBoxLayout* playProgressRow = new QHBoxLayout();
-    playProgressRow->addWidget(btnPlayAll_);
-    playProgressRow->addWidget(btnStopAll_);
-    playProgressRow->addWidget(btnStepPrev_);
-    playProgressRow->addWidget(btnStepNext_);
-    playProgressRow->addSpacing(10);
-    progressSlider_ = new ClickJumpSlider(Qt::Horizontal, central);
-    progressSlider_->setRange(0, 0);
-    progressSlider_->setSingleStep(1);
-    progressSlider_->setPageStep(30);
-    playProgressRow->addWidget(progressSlider_, 1);
-    editCurFrame_ = new QLineEdit("0", central);
-    editCurFrame_->setFixedWidth(70);
-    editCurFrame_->setAlignment(Qt::AlignCenter);
-    editCurFrame_->setValidator(new QIntValidator(0, 9999999, editCurFrame_));
-    lblTotalFrame_ = new QLabel("/ 0", central);
-    playProgressRow->addWidget(editCurFrame_);
-    playProgressRow->addWidget(lblTotalFrame_);
-    v->addLayout(playProgressRow);
-
-    root->addWidget(mainPane, 1);
-    central->setLayout(root);
-    setCentralWidget(central);
-    //menuBar()->hide();
-
-    connect(btnAddCam_, &QToolButton::clicked, this, &MainWindow::onAddCamera);
-    connect(btnAddVideo_, &QToolButton::clicked, this, &MainWindow::onAddVideo);
-    connect(btnAddImgSeq_, &QToolButton::clicked, this, &MainWindow::onAddImageSequence);
-    connect(btnRemoveSource_, &QToolButton::clicked, this, &MainWindow::onRemoveSource);
-    connect(btnPlayAll_, &QToolButton::clicked, this, &MainWindow::onPlayAll);
-    connect(btnStopAll_, &QToolButton::clicked, this, &MainWindow::onStopAll);
-    connect(btnStepPrev_, &QToolButton::clicked, this, &MainWindow::onStepPrevFrame);
-    connect(btnStepNext_, &QToolButton::clicked, this, &MainWindow::onStepNextFrame);
-    connect(progressSlider_, &QSlider::sliderReleased, this, &MainWindow::onProgressSliderReleased);
-    connect(progressSlider_, &QSlider::valueChanged, this, [this](int) {
-      if (!progressSlider_ || progressSlider_->isSliderDown()) return;
-      onProgressSliderReleased();
-    });
-    connect(editCurFrame_, &QLineEdit::returnPressed, this, &MainWindow::onFrameJumpReturnPressed);
-    QMenu* fileMenu = new QMenu(btnFileMenu_);
-    QAction* actAbout = fileMenu->addAction("Software Info");
-    fileMenu->addSeparator();
-    actSaveProject_ = fileMenu->addAction("Save Project...");
-    actLoadProject_ = fileMenu->addAction("Load Project...");
-    btnFileMenu_->setMenu(fileMenu);
-    connect(actAbout, &QAction::triggered, this, [this](){
-      QMessageBox::information(this, "Software Info",
-                               "Multi6DTracker\n\nCapture / Calibration / Tracking workflow.");
-    });
-    connect(actSaveProject_, &QAction::triggered, this, &MainWindow::onSaveProject);
-    connect(actLoadProject_, &QAction::triggered, this, &MainWindow::onLoadProject);
-    connect(sideModeTabs_, &QTabBar::currentChanged, this, &MainWindow::onModeTabChanged);
-
-    // Right actions panel (embedded in central layout to keep top bar full-width)
-    QWidget* dock = new QWidget(central);
-    dock->setObjectName("actionsPanel");
-    dock->setMinimumWidth(320);
-    dock->setMaximumWidth(420);
-
-    QWidget* dockw = new QWidget(dock);
-    QVBoxLayout* dv = new QVBoxLayout(dockw);
-
-    actionTabs_ = new QTabWidget(dockw);
-
-    // Capture tab
-    QWidget* tabCap = new QWidget(actionTabs_);
-    QVBoxLayout* capv = new QVBoxLayout(tabCap);
-    capv->addWidget(new QLabel("Live capture source management", tabCap));
-    btnCaptureNow_ = new QPushButton("Capture", tabCap);
-    capv->addWidget(btnAddCam_);
-    capv->addWidget(btnCaptureNow_);
-    capv->addStretch(1);
-    connect(btnCaptureNow_, &QPushButton::clicked, this, &MainWindow::onCaptureNow);
-
-    // Calibration tab
-    QWidget* tabCal = new QWidget(actionTabs_);
-    QVBoxLayout* calv = new QVBoxLayout(tabCal);
-
-    QGroupBox* gbMethod = new QGroupBox("Calibration Method", tabCal);
-    QVBoxLayout* ml = new QVBoxLayout(gbMethod);
-    cbCalibMethod_ = new QComboBox(gbMethod);
-    cbCalibMethod_->addItem("Chessboard Calibration (available)");
-    cbCalibMethod_->addItem("Total Station Calibration (reserved)");
-    cbCalibMethod_->addItem("UAV Calibration (reserved)");
-    cbCalibMethod_->setCurrentIndex(0);
-    ml->addWidget(cbCalibMethod_);
-    ml->addWidget(new QLabel("Reserved methods are placeholders for future implementation.", gbMethod));
-    gbMethod->setLayout(ml);
-
-    QGroupBox* gbBoard = new QGroupBox("Chessboard Parameters", tabCal);
-    QGridLayout* gl = new QGridLayout(gbBoard);
-
-    spBoardW_ = new QSpinBox(gbBoard);
-    spBoardH_ = new QSpinBox(gbBoard);
-    spSquare_ = new QDoubleSpinBox(gbBoard);
-    spBoardW_->setRange(2, 50);
-    spBoardH_->setRange(2, 50);
-    spSquare_->setRange(1e-6, 10.0);
-    spSquare_->setDecimals(6);
-    spSquare_->setSingleStep(0.001);
-
-    spBoardW_->setValue(board_w_);
-    spBoardH_->setValue(board_h_);
-    spSquare_->setValue(square_);
-
-    gl->addWidget(new QLabel("Inner corners W:", gbBoard), 0, 0);
-    gl->addWidget(spBoardW_, 0, 1);
-    gl->addWidget(new QLabel("Inner corners H:", gbBoard), 1, 0);
-    gl->addWidget(spBoardH_, 1, 1);
-    gl->addWidget(new QLabel("Square size (m):", gbBoard), 2, 0);
-    gl->addWidget(spSquare_, 2, 1);
-    gbBoard->setLayout(gl);
-
-    btnGrab_ = new QPushButton("Grab Frame (Chessboard)", tabCal);
-    btnReset_ = new QPushButton("Reset Captures", tabCal);
-    btnGrab_->setVisible(false);
-    btnReset_->setVisible(false);
-    btnComputeCalib_ = new QPushButton("Compute Calibration", tabCal);
-    btnRecomputeCalib_ = new QPushButton("Recompute (Selected Frames)", tabCal);
-    btnSaveCalib_ = new QPushButton("Save rig_calib.yaml", tabCal);
-    btnSaveCalib_->setEnabled(false);
-    calibProgressBar_ = new QProgressBar(tabCal);
-    calibProgressBar_->setRange(0, 100);
-    calibProgressBar_->setValue(0);
-    lblCalibProgress_ = new QLabel("Progress: idle", tabCal);
-    calibErrorTable_ = new QTableWidget(tabCal);
-    calibErrorTable_->setColumnCount(3);
-    calibErrorTable_->setHorizontalHeaderLabels(QStringList() << "Use" << "Frame" << "RMSE(px)");
-    calibErrorTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    calibErrorTable_->verticalHeader()->setVisible(false);
-    calibErrorTable_->setAlternatingRowColors(true);
-    calibErrorTable_->setStyleSheet(
-      "QTableWidget{alternate-background-color:#2b313a;background:#252b33;color:#e8edf2;gridline-color:#3a4350;}"
-      "QHeaderView::section{background:#303744;color:#e8edf2;border:1px solid #3d4654;padding:4px;}"
-      "QTableWidget::item{padding:4px;}");
-    lblCaptured_ = new QLabel("Captured: 0", tabCal);
-
-    calv->addWidget(gbMethod);
-    calv->addWidget(gbBoard);
-    calv->addWidget(btnComputeCalib_);
-    calv->addWidget(btnRecomputeCalib_);
-    calv->addWidget(btnSaveCalib_);
-    calv->addWidget(calibProgressBar_);
-    calv->addWidget(lblCalibProgress_);
-    calv->addWidget(calibErrorTable_);
-    calv->addWidget(lblCaptured_);
-    calv->addStretch(1);
-
-    connect(btnGrab_, &QPushButton::clicked, this, &MainWindow::onGrabFrame);
-    connect(btnReset_, &QPushButton::clicked, this, &MainWindow::onResetFrames);
-    connect(btnComputeCalib_, &QPushButton::clicked, this, &MainWindow::onComputeCalibration);
-    connect(btnRecomputeCalib_, &QPushButton::clicked, this, &MainWindow::onRecomputeCalibrationSelected);
-    connect(btnSaveCalib_, &QPushButton::clicked, this, &MainWindow::onSaveCalibrationYaml);
-
-    // If board params change, rebuild calibrator and reset captures
-    connect(spBoardW_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int){ rebuildCalibratorFromUI(true); });
-    connect(spBoardH_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int){ rebuildCalibratorFromUI(true); });
-    connect(spSquare_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double){ rebuildCalibratorFromUI(true); });
-
-    // Tracking tab
-    QWidget* tabTrk = new QWidget(actionTabs_);
-    QVBoxLayout* trkv = new QVBoxLayout(tabTrk);
-    QTabWidget* trkTabs = new QTabWidget(tabTrk);
-    QWidget* trkMainPage = new QWidget(trkTabs);
-    QWidget* trkVisPage = new QWidget(trkTabs);
-    QVBoxLayout* trkMainLayout = new QVBoxLayout(trkMainPage);
-    QVBoxLayout* trkVisRoot = new QVBoxLayout(trkVisPage);
-    QScrollArea* visScrollArea = new QScrollArea(trkVisPage);
-    visScrollArea->setWidgetResizable(true);
-    visScrollArea->setFrameShape(QFrame::NoFrame);
-    QWidget* visContainer = new QWidget(visScrollArea);
-    visChartsLayout_ = new QVBoxLayout(visContainer);
-    visScrollArea->setWidget(visContainer);
-    trkVisRoot->addWidget(visScrollArea);
-
-    btnLoadTag_ = new QPushButton("Load Tag Map (TXT)", tabTrk);
-    btnLoadYaml_ = new QPushButton("Load Calibration (YAML)", tabTrk);
-  //  chkPose_ = new QCheckBox("Pose Estimation ON", tabTrk);
-  //  chkPose_->setChecked(false);
-
-    QGroupBox* gbParams = new QGroupBox("Tracking Parameters", tabTrk);
-    QGridLayout* tg = new QGridLayout(gbParams);
-    spRansacIters_ = new QSpinBox(gbParams);
-    spRansacIters_->setRange(10, 5000);
-    spRansacIters_->setValue(ransac_iters_);
-    spInlierThresh_ = new QDoubleSpinBox(gbParams);
-    spInlierThresh_->setRange(0.1, 50.0);
-    spInlierThresh_->setDecimals(2);
-    spInlierThresh_->setValue(inlier_thresh_px_);
-    cbTagDict_ = new QComboBox(gbParams);
-    cbTagDict_->addItem("APRILTAG_36h11", (int)cv::aruco::DICT_APRILTAG_36h11);
-    cbTagDict_->addItem("APRILTAG_25h9",  (int)cv::aruco::DICT_APRILTAG_25h9);
-    cbTagDict_->addItem("APRILTAG_16h5",  (int)cv::aruco::DICT_APRILTAG_16h5);
-    cbTagDict_->setCurrentIndex(0);
-
-    tg->addWidget(new QLabel("RANSAC iters:"), 0, 0);
-    tg->addWidget(spRansacIters_, 0, 1);
-    tg->addWidget(new QLabel("Inlier thresh (px):"), 1, 0);
-    tg->addWidget(spInlierThresh_, 1, 1);
-    tg->addWidget(new QLabel("Tag dictionary:"), 2, 0);
-    tg->addWidget(cbTagDict_, 2, 1);
-    gbParams->setLayout(tg);
-
-    lblFps_ = new QLabel("FPS: 0", tabTrk);
-    btnDetectAll_ = new QPushButton("Detect All Frames", tabTrk);
-    lblInliers_ = new QLabel("Inliers: 0", tabTrk);
-    lblPose_ = new QLabel("Pose: -", tabTrk);
-    lblPose_->setWordWrap(true);
-
-    trkMainLayout->addWidget(btnLoadTag_);
-    lblTagPath_ = new QLabel("TagMap: (none)", tabTrk);
-    trkMainLayout->addWidget(lblTagPath_);
-    trkMainLayout->addWidget(btnLoadYaml_);
-    lblYamlPath_ = new QLabel("Calib: (none)", tabTrk);
-    trkMainLayout->addWidget(lblYamlPath_);
-    trkMainLayout->addWidget(gbParams);
-   // trkMainLayout->addWidget(chkPose_);
-    trkMainLayout->addWidget(btnDetectAll_);
-    btnExportTraj_ = new QPushButton("Export Trajectory CSV", tabTrk);
-    trkMainLayout->addWidget(btnExportTraj_);
-    trkMainLayout->addWidget(lblInliers_);
-    trkMainLayout->addWidget(lblPose_);
-    trkMainLayout->addWidget(lblFps_);
-    lblLatency_ = new QLabel("Latency: 0 ms", tabTrk);
-    trkMainLayout->addWidget(lblLatency_);
-    trkMainLayout->addStretch(1);
-
-    btnAddVisChart_ = new QPushButton("add gragh", trkVisPage);
-    visChartsLayout_->addWidget(btnAddVisChart_);
-
-    auto makeSeriesSelector = [trkVisPage]() {
-      QComboBox* cb = new QComboBox(trkVisPage);
-      cb->setToolTip(QString::fromUtf8("choose curve to show"));
-      cb->addItem(QString::fromUtf8("all"));
-      return cb;
-    };
-
-    lblTrajPosPlot_ = new QCustomPlot(trkVisPage);
-    lblTrajPosPlot_->setMinimumHeight(160);
-    lblTrajPosPlot_->setStyleSheet("background:#1d232b;border:1px solid #3a4250;color:#9fb0c4;");
-    lblTrajPosPlot_->xAxis->setLabel("t");
-    lblTrajPosPlot_->yAxis->setLabel("Position");
-    lblTrajPosPlot_->addGraph();
-    lblTrajPosPlot_->addGraph();
-    lblTrajPosPlot_->addGraph();
-    lblTrajPosPlot_->addGraph(); // red cursor line
-    lblTrajPosPlot_->graph(0)->setPen(QPen(QColor(255,99,132), 1.8));
-    lblTrajPosPlot_->graph(1)->setPen(QPen(QColor(80,220,255), 1.8));
-    lblTrajPosPlot_->graph(2)->setPen(QPen(QColor(120,220,120), 1.8));
-    lblTrajPosPlot_->graph(3)->setPen(QPen(QColor(255,70,70), 1.2));
-    lblTrajPosPlot_->legend->setVisible(false);
-    QComboBox* posSelector = makeSeriesSelector();
-    visChartsLayout_->addWidget(posSelector);
-    visChartsLayout_->addWidget(lblTrajPosPlot_);
-
-    lblTrajAngPlot_ = new QCustomPlot(trkVisPage);
-    lblTrajAngPlot_->setMinimumHeight(160);
-    lblTrajAngPlot_->setStyleSheet("background:#1d232b;border:1px solid #3a4250;color:#9fb0c4;");
-    lblTrajAngPlot_->xAxis->setLabel("t");
-    lblTrajAngPlot_->yAxis->setLabel("Angle-axis");
-    lblTrajAngPlot_->addGraph();
-    lblTrajAngPlot_->addGraph();
-    lblTrajAngPlot_->addGraph();
-    lblTrajAngPlot_->addGraph(); // red cursor line
-    lblTrajAngPlot_->graph(0)->setPen(QPen(QColor(255,179,71), 1.8));
-    lblTrajAngPlot_->graph(1)->setPen(QPen(QColor(186,104,200), 1.8));
-    lblTrajAngPlot_->graph(2)->setPen(QPen(QColor(121,134,203), 1.8));
-    lblTrajAngPlot_->graph(3)->setPen(QPen(QColor(255,70,70), 1.2));
-    lblTrajAngPlot_->legend->setVisible(false);
-    QComboBox* angSelector = makeSeriesSelector();
-    visChartsLayout_->addWidget(angSelector);
-    visChartsLayout_->addWidget(lblTrajAngPlot_);
-    visChartsLayout_->addStretch(1);
-
-    trkTabs->addTab(trkMainPage, "Tracking");
-    trkTabs->addTab(trkVisPage, QString::fromUtf8("Visual"));
-    trkv->addWidget(trkTabs);
-
-    connect(btnLoadTag_, &QPushButton::clicked, this, &MainWindow::onLoadTagMap);
-    connect(btnLoadYaml_, &QPushButton::clicked, this, &MainWindow::onLoadCalibYaml);
-  //  connect(chkPose_, &QCheckBox::toggled, this, &MainWindow::onTogglePose);
-    connect(btnDetectAll_, &QPushButton::clicked, this, &MainWindow::onDetectAllTrackingFrames);
-    connect(btnExportTraj_, &QPushButton::clicked, this, &MainWindow::onExportTrajectory);
-    connect(btnAddVisChart_, &QPushButton::clicked, this, &MainWindow::onAddVisualizationChart);
-    connect(spRansacIters_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v){ ransac_iters_=v; if(solveWorker_) solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true); });
-    connect(spInlierThresh_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this](double v){ inlier_thresh_px_=v; if(solveWorker_) solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true); });
-    connect(cbTagDict_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ tag_dict_id_=cbTagDict_->currentData().toInt(); if(solveWorker_) solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, true); });
-
-    lblTrajPosPlot_->setContextMenuPolicy(Qt::CustomContextMenu);
-    lblTrajAngPlot_->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(lblTrajPosPlot_, &QWidget::customContextMenuRequested, this, &MainWindow::onVisualizationPlotContextMenu);
-    connect(lblTrajAngPlot_, &QWidget::customContextMenuRequested, this, &MainWindow::onVisualizationPlotContextMenu);
-
-    visCharts_.clear();
-    visCharts_.push_back({lblTrajPosPlot_, posSelector, {0,1,2}, "Position", false});
-    visCharts_.push_back({lblTrajAngPlot_, angSelector, {3,4,5}, "Angle-axis", false});
-
-    connect(posSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); });
-    connect(angSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); });
-
-    actionTabs_->addTab(tabCap, "Capture");
-    actionTabs_->addTab(tabCal, "Calibration");
-    actionTabs_->addTab(tabTrk, "Tracking");
-    // Right-side parameters must follow left mode; hide tab labels completely.
-    if (actionTabs_->tabBar()) actionTabs_->tabBar()->hide();
-
-    dv->addWidget(actionTabs_);
-
-    // Log window
-    log_ = new QTextEdit(dockw);
-    log_->setReadOnly(true);
-    log_->setMinimumHeight(120);
-    dv->addWidget(log_);
-
-    dockw->setLayout(dv);
-    QVBoxLayout* panelLayout = new QVBoxLayout(dock);
-    panelLayout->setContentsMargins(0,0,0,0);
-    panelLayout->addWidget(dockw);
-    dock->setLayout(panelLayout);
-    dock->setStyleSheet("#actionsPanel{background:#222831;border-left:1px solid #3a4250;}");
-
-    root->addWidget(dock);
-
-    lblResolution_ = new QLabel("Resolution: -", this);
-    statusBar()->addPermanentWidget(lblResolution_);
-
-    refreshTrajectoryPlot();
-    onModeCapture();
-    statusBar()->showMessage("Ready");
-    refreshSourceList();
-    // Per-source docks are OFF by default to avoid duplicate display.
-    logLine("App started. Configure sources and chessboard in the UI.");
-}
-
-void MainWindow::logLine(const QString& s) {
-    log_->append(QString("[%1] %2").arg(nowStr(), s));
-}
-
-bool MainWindow::openAllSources() {
-  closeAllSources();
-  bool okAll = true;
-  for (auto& s : sources_) {
-    if (s.is_image_seq) {
-      if (s.seq_files.isEmpty()) okAll = false;
-      continue;
-    }
-    if (s.is_cam) s.cap.open(s.cam_id);
-    else s.cap.open(s.video_path.toStdString());
-    if (!s.cap.isOpened()) okAll = false;
-  }
-  return okAll;
-}
-
-void MainWindow::closeAllSources() {
-  for (auto& s : sources_) {
-    if (s.cap.isOpened()) s.cap.release();
-  }
-}
-
-void MainWindow::refreshSourceList() {
-  QStringList status;
-  QMutexLocker locker(&sources_mutex_);
-  for (int i=0;i<(int)sources_.size();++i) {
-    const auto& s = sources_[i];
-    QString label;
-    if (s.is_cam) label = QString("Camera %1").arg(s.cam_id);
-    else if (s.is_image_seq) label = QString("ImgSeq:%1").arg(QFileInfo(s.seq_dir).fileName());
-    else label = QFileInfo(s.video_path).fileName();
-    bool en = (i < (int)source_enabled_.size()) ? source_enabled_[i] : true;
-    QString owner = "{Capture}";
-    if (s.mode_owner == (int)CALIB) owner = "{Calib}";
-    else if (s.mode_owner == (int)TRACK) owner = "{Track}";
-    label += owner;
-    label += en ? "[RUN]" : "[PAUSED]";
-    status << label;
-  }
-  Q_UNUSED(status); // status bar text is centralized in updateStatus().
-}
-
-std::vector<int> MainWindow::activeSourceIndices() const {
-  std::vector<int> idx;
-  for (int i=0;i<(int)sources_.size();++i) {
-    if (sources_[i].mode_owner == (int)mode_) idx.push_back(i);
-  }
-  return idx;
-}
-
-void MainWindow::rebuildSourceViews() {
-  if (!viewsGrid_) return;
-
-  while (QLayoutItem* item = viewsGrid_->takeAt(0)) {
-    if (item->widget()) item->widget()->deleteLater();
-    delete item;
-  }
-  sourceViews_.clear();
-
-  active_view_source_indices_ = activeSourceIndices();
-  const int n = std::min(2, (int)active_view_source_indices_.size());
-  if (n <= 0) {
-    QLabel* hint = new QLabel("No sources. Click AddVideo to create a viewer.", viewsHost_);
-    hint->setAlignment(Qt::AlignCenter);
-    hint->setStyleSheet("background-color:#111; border:1px solid #333; color:#ddd;");
-    hint->setMinimumSize(960, 540);
-    viewsGrid_->addWidget(hint, 0, 0);
+void MainWindow::updateViewer() {
+  if (originalImage_.empty()) {
+    view_->clearAllLayers();
     return;
   }
-
-  int cols = (n <= 1) ? 1 : 2;
-
-  for (int i=0; i<n; ++i) {
-    QWidget* panel = new QWidget(viewsHost_);
-    panel->setStyleSheet("background:#1f2328; border:1px solid #3f4650;");
-    QVBoxLayout* pv = new QVBoxLayout(panel);
-    pv->setContentsMargins(4,4,4,4);
-    pv->setSpacing(4);
-
-    //QToolButton* panBtn = new QToolButton(panel);
-    QToolButton* pointBtn = new QToolButton(panel);
-    QToolButton* lineBtn = new QToolButton(panel);
-    QToolButton* zoomInBtn = new QToolButton(panel);
-    QToolButton* zoomOutBtn = new QToolButton(panel);
-    QToolButton* resetBtn = new QToolButton(panel);
-   // QToolButton* clearBtn = new QToolButton(panel);
-
-    QSize btnIconSize(24, 24);
-    pointBtn->setIcon(QIcon(":/icons/Point.png"));
-    pointBtn->setIconSize(btnIconSize);
-    lineBtn->setIcon(QIcon(":/icons/Line.png"));
-    lineBtn->setIconSize(btnIconSize);
-    zoomInBtn->setIcon(QIcon(":/icons/Zoom-.png"));
-    zoomInBtn->setIconSize(btnIconSize);
-    zoomOutBtn->setIcon(QIcon(":/icons/Zoom+.png"));
-    zoomOutBtn->setIconSize(btnIconSize);
-    resetBtn->setIcon(QIcon(":/icons/Auto.png"));
-    resetBtn->setIconSize(btnIconSize);
-
-
-   // panBtn->setCheckable(true);
-    pointBtn->setCheckable(true);
-    lineBtn->setCheckable(true);
-    //panBtn->setChecked(true);
-
-    //panBtn->setText("Pan");
-    pointBtn->setText("Point");
-    lineBtn->setText("Line");
-    zoomInBtn->setText("Zoom+");
-    zoomOutBtn->setText("Zoom-");
-    resetBtn->setText("Reset");
-   // clearBtn->setText("Clear");
-
-   // panBtn->setToolTip("Pan view");
-    pointBtn->setToolTip("Draw point");
-    lineBtn->setToolTip("Draw line");
-    zoomInBtn->setToolTip("Zoom in");
-    zoomOutBtn->setToolTip("Zoom out");
-    resetBtn->setToolTip("Reset view");
-   // clearBtn->setToolTip("Clear drawings");
-
-    QWidget* canvas = new QWidget(panel);
-    QGridLayout* overlay = new QGridLayout(canvas);
-    overlay->setContentsMargins(0,0,0,0);
-    overlay->setSpacing(0);
-
-    QWidget* topBar = new QWidget(canvas);
-    topBar->setAttribute(Qt::WA_StyledBackground, false);
-    topBar->setStyleSheet("background: transparent; border: none;");
-    topBar->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
-    QHBoxLayout* tb = new QHBoxLayout(topBar);
-    tb->setContentsMargins(6,0,6,6);
-    tb->setSpacing(2);
-    for (QToolButton* b : {pointBtn, lineBtn, zoomInBtn, zoomOutBtn, resetBtn}) {
-      b->setAutoRaise(true);
-      b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-      tb->addWidget(b);
-    }
-    tb->addStretch(1);
-
-    ImageViewer* v = new ImageViewer(canvas);
-    v->setMinimumSize(480, 270);
-    v->setToolMode(ImageViewer::PanTool);
-    //connect(panBtn, &QToolButton::clicked, this, [v, panBtn, pointBtn, lineBtn]() {
-    //  panBtn->setChecked(true); pointBtn->setChecked(false); lineBtn->setChecked(false);
-    //  v->setToolMode(ImageViewer::PanTool);
-    //});
-    connect(pointBtn, &QToolButton::clicked, this, [v, pointBtn, lineBtn]() {
-      pointBtn->setChecked(true); lineBtn->setChecked(false);
-      v->setToolMode(ImageViewer::PointTool);
-    });
-    connect(lineBtn, &QToolButton::clicked, this, [v, pointBtn, lineBtn]() {
-      pointBtn->setChecked(false); lineBtn->setChecked(true);
-      v->setToolMode(ImageViewer::LineTool);
-    });
-    connect(zoomInBtn, &QToolButton::clicked, this, [v, pointBtn, lineBtn]() {
-      pointBtn->setChecked(false); lineBtn->setChecked(false);
-      v->setToolMode(ImageViewer::PanTool);
-      v->zoomIn();
-    });
-    connect(zoomOutBtn, &QToolButton::clicked, this, [v, pointBtn, lineBtn]() {
-     pointBtn->setChecked(false); lineBtn->setChecked(false);
-      v->setToolMode(ImageViewer::PanTool);
-      v->zoomOut();
-    });
-    connect(resetBtn, &QToolButton::clicked, this, [v, pointBtn, lineBtn]() {
-      pointBtn->setChecked(false); lineBtn->setChecked(false);
-      v->setToolMode(ImageViewer::PanTool);
-      v->resetView();
-    });
-    //connect(clearBtn, &QToolButton::clicked, this, [v, panBtn, pointBtn, lineBtn]() {
-    //  panBtn->setChecked(true); pointBtn->setChecked(false); lineBtn->setChecked(false);
-    //  v->setToolMode(ImageViewer::PanTool);
-    //  v->clearAnnotations();
-    //});
-
-    overlay->addWidget(v, 0, 0);
-    overlay->addWidget(topBar, 0, 0, Qt::AlignBottom | Qt::AlignLeft);
-    overlay->setRowStretch(0, 1);
-    overlay->setColumnStretch(0, 1);
-    topBar->raise();
-    pv->addWidget(canvas, 1);
-
-    sourceViews_.push_back(v);
-    int r = i / cols;
-    int c = i % cols;
-    viewsGrid_->addWidget(panel, r, c);
-  }
-}
-
-void MainWindow::updateSourceViews(const std::vector<cv::Mat>& frames) {
-  int n = std::min((int)sourceViews_.size(), std::min(2, (int)active_view_source_indices_.size()));
-  QStringList resText;
-  for (int i=0; i<n; ++i) {
-    int srcIdx = active_view_source_indices_[i];
-    if (!sourceViews_[i] || srcIdx < 0 || srcIdx >= (int)frames.size()) continue;
-    if (frames[srcIdx].empty()) {
-      sourceViews_[i]->setImage(QImage());
-      continue;
-    }
-    resText << QString("S%1: %2x%3").arg(i+1).arg(frames[srcIdx].cols).arg(frames[srcIdx].rows);
-    sourceViews_[i]->setImage(matToQImage(frames[srcIdx]));
-  }
-  for (int i=n; i<(int)sourceViews_.size(); ++i) {
-    if (sourceViews_[i]) sourceViews_[i]->setImage(QImage());
-  }
-  if (lblResolution_) {
-    lblResolution_->setText(resText.isEmpty() ? "Resolution: -" : QString("Resolution: %1").arg(resText.join(" | ")));
-  }
-}
-
-void MainWindow::rebuildCalibratorFromUI(bool reset) {
-  board_w_ = spBoardW_ ? spBoardW_->value() : board_w_;
-  board_h_ = spBoardH_ ? spBoardH_->value() : board_h_;
-  square_  = spSquare_ ? spSquare_->value() : square_;
-
-  if (reset) {
-    calibrator_.reset(new MultiCamCalibrator(std::max(1, (int)sources_.size()),
-                                             cv::Size(board_w_, board_h_), square_));
-    calib_pairs_.clear();
-    calib_pair_rmse_.clear();
-    has_computed_calib_ = false;
-    if (btnSaveCalib_) btnSaveCalib_->setEnabled(false);
-    if (calibErrorTable_) calibErrorTable_->setRowCount(0);
-    if (calibProgressBar_) calibProgressBar_->setValue(0);
-    if (lblCalibProgress_) lblCalibProgress_->setText("Progress: idle");
-    logLine(QString("Chessboard params updated: %1x%2 square=%3 m (captures reset)")
-            .arg(board_w_).arg(board_h_).arg(square_,0,'f',6));
-    last_inliers_ = 0;
-  }
-}
-
-// ---------------- Sources actions ----------------
-void MainWindow::onAddCamera() {
-  detect_overlay_cache_.clear();
-  bool ok=false;
-  int camId = QInputDialog::getInt(this, "Add Camera", "Camera index:", 0, 0, 64, 1, &ok);
-  if (!ok) return;
-  if (mode_ != CAPTURE) {
-    QMessageBox::information(this, "Add Camera", "Please switch to Capture tab to add camera sources.");
-    return;
-  }
-
-  InputSource s;
-  s.is_cam = true;
-  s.cam_id = camId;
-  s.mode_owner = (int)CAPTURE;
-
-  // Try open immediately
-  s.cap.open(camId);
-  if (!s.cap.isOpened()) {
-    QMessageBox::warning(this, "Camera", "Failed to open camera. Try another index or close other apps.");
-    logLine(QString("Failed to open camera %1").arg(camId));
+  if (view_->sceneRect().isEmpty()) {
+    view_->setBaseImage(cvMatToQImage(originalImage_));
   } else {
-    logLine(QString("Added camera %1").arg(camId));
+    view_->setBaseImage(cvMatToQImage(originalImage_));
   }
 
-  timer_.stop();
-  if (captureWorker_) QMetaObject::invokeMethod(captureWorker_, "stop", Qt::BlockingQueuedConnection);
-  sources_.push_back(std::move(s));
-  num_cams_ = (int)sources_.size();
-  // Do NOT auto-play on import
-  if ((int)source_enabled_.size() < num_cams_) source_enabled_.resize(num_cams_, true);
-  source_enabled_[num_cams_-1] = true;
-  if ((int)last_frames_.size() < num_cams_) last_frames_.resize(num_cams_);
-  cv::Mat firstFrame;
-  if (!sources_.empty() && sources_.back().cap.isOpened()) {
-    sources_.back().cap.read(firstFrame);
+  if (showOverlay_ && !labelResult_.empty()) {
+    overlayImage_ = SegmentationEngine::makeOverlay(originalImage_, labelResult_, classes_, overlayOpacity_, contourCheck_->isChecked());
+    view_->setOverlayImage(cvMatToQImage(overlayImage_));
+  } else {
+    view_->setOverlayImage(QImage());
   }
-  last_frames_[num_cams_ - 1] = firstFrame.clone();
-  source_enabled_.assign(std::max(0,num_cams_), true);
-  // last_frames_ will be populated by CaptureWorker when frames arrive.
-  last_frames_.resize(std::max(0,num_cams_));
-  // Rebuild calibrator with new cam count; reset captures
-  calibrator_.reset(new MultiCamCalibrator(std::max(1,num_cams_), cv::Size(board_w_, board_h_), square_));
-  refreshSourceList();
-  if (show_docks_) rebuildSourceDocks();
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
+  rebuildMasksFromAnnotations();
 }
 
-void MainWindow::onAddVideo() 
-{
-    detect_overlay_cache_.clear();
-    QString last = settings_.value("lastVideoDir", "").toString();
-    QString path = QFileDialog::getOpenFileName(this, "Add Video", last,"Video (*.mp4 *.avi *.mov *.mkv);;All (*.*)");
-    if (path.isEmpty()) return;
-
-    if ((int)activeSourceIndices().size() >= 2) {
-      QMessageBox::information(this, "Add Video", "Current tab already has 2 sources.");
-      return;
-    }
-
-    InputSource s;
-    s.is_cam = false;
-    s.mode_owner = (int)mode_;
-    s.video_path = path;
-    std::string p = QFile::encodeName(path).constData();
-    s.cap.open(p);
-    if (!s.cap.isOpened()) 
-    {
-        QMessageBox::warning(this, "Video", "Failed to open video file.");
-        logLine(QString("Failed to open video: %1").arg(path));
-        return;
-    }
-    settings_.setValue("lastVideoDir", QFileInfo(path).absolutePath());
-
-    timer_.stop();
-    if (captureWorker_) 
-        QMetaObject::invokeMethod(captureWorker_, "stop", Qt::BlockingQueuedConnection);
-    sources_.push_back(std::move(s));
-    num_cams_ = (int)sources_.size();
-    // Do NOT auto-play on import
-    if ((int)source_enabled_.size() < num_cams_) 
-        source_enabled_.resize(num_cams_, true);
-    source_enabled_[num_cams_-1] = false;
-    if ((int)last_frames_.size() < num_cams_) 
-        last_frames_.resize(num_cams_);
- 
-    cv::Mat firstFrame;
-    if (!sources_.empty() && sources_.back().cap.isOpened()) {
-      sources_.back().cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-      sources_.back().cap.read(firstFrame);
-      sources_.back().cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-    }
-    last_frames_[num_cams_ - 1] = firstFrame.clone();
-
-    source_enabled_.assign(std::max(0,num_cams_), true);
-    calibrator_.reset(new MultiCamCalibrator(std::max(1,num_cams_), cv::Size(board_w_, board_h_), square_));
-    refreshSourceList();
-    if (show_docks_) rebuildSourceDocks();
-    rebuildSourceViews();
-    updateSourceViews(last_frames_);
-    logLine(QString("Added video: %1").arg(path));
-}
-
-
-void MainWindow::onAddImageSequence()
-{
-    detect_overlay_cache_.clear();
-    QString last = settings_.value("lastImageSeqDir", "").toString();
-    QString dir = QFileDialog::getExistingDirectory(this, "Add Image Sequence Folder", last);
-    if (dir.isEmpty()) return;
-
-    QDir qdir(dir);
-    QFileInfoList files = qdir.entryInfoList(kImageNameFilters(), QDir::Files, QDir::Name);
-    if (files.isEmpty()) {
-      QMessageBox::warning(this, "Image Sequence", "No image files found in selected folder.");
-      return;
-    }
-
-    if ((int)activeSourceIndices().size() >= 2) {
-      QMessageBox::information(this, "Add Image Sequence", "Current tab already has 2 sources.");
-      return;
-    }
-
-    InputSource s;
-    s.is_cam = false;
-    s.is_image_seq = true;
-    s.mode_owner = (int)mode_;
-    s.seq_dir = dir;
-    s.video_path = dir;
-    s.seq_idx = 0;
-    for (const auto& fi : files) s.seq_files.push_back(fi.absoluteFilePath());
-
-    cv::Mat firstFrame = cv::imread(s.seq_files.front().toStdString(), cv::IMREAD_COLOR);
-    if (firstFrame.empty()) {
-      QMessageBox::warning(this, "Image Sequence", "Failed to read first image in selected folder.");
-      return;
-    }
-
-    settings_.setValue("lastImageSeqDir", dir);
-
-    timer_.stop();
-    if (captureWorker_) QMetaObject::invokeMethod(captureWorker_, "stop", Qt::BlockingQueuedConnection);
-
-    sources_.push_back(std::move(s));
-    num_cams_ = (int)sources_.size();
-    if ((int)source_enabled_.size() < num_cams_) source_enabled_.resize(num_cams_, true);
-    source_enabled_[num_cams_ - 1] = true;
-    if ((int)last_frames_.size() < num_cams_) last_frames_.resize(num_cams_);
-    last_frames_[num_cams_ - 1] = firstFrame.clone();
-
-    source_enabled_.assign(std::max(0, num_cams_), true);
-    calibrator_.reset(new MultiCamCalibrator(std::max(1, num_cams_), cv::Size(board_w_, board_h_), square_));
-    refreshSourceList();
-    if (show_docks_) rebuildSourceDocks();
-    rebuildSourceViews();
-    updateSourceViews(last_frames_);
-    logLine(QString("Added image sequence: %1 (%2 frames)").arg(dir).arg(files.size()));
-}
-
-void MainWindow::onRemoveSource() {
-  detect_overlay_cache_.clear();
-  int removed = 0;
-  timer_.stop();
-  if (captureWorker_) QMetaObject::invokeMethod(captureWorker_, "stop", Qt::BlockingQueuedConnection);
-
-  for (int i=(int)sources_.size()-1; i>=0; --i) {
-    if (sources_[i].mode_owner != (int)mode_) continue;
-    if (sources_[i].cap.isOpened()) sources_[i].cap.release();
-    sources_.erase(sources_.begin() + i);
-    ++removed;
+void MainWindow::updateProbabilityView() {
+  if (originalImage_.empty() || !model_.isValid() || featureStack_.empty()) {
+    probabilityImage_.release();
+    return;
   }
-  if (removed <= 0) return;
-
-  num_cams_ = (int)sources_.size();
-  source_enabled_.assign(std::max(0,num_cams_), true);
-  // last_frames_ will be populated by CaptureWorker when frames arrive.
-  last_frames_.resize(std::max(0,num_cams_));
-
-  calibrator_.reset(new MultiCamCalibrator(std::max(1,num_cams_), cv::Size(board_w_, board_h_), square_));
-  refreshSourceList();
-  if (show_docks_) rebuildSourceDocks();
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
-  updateStatus();
-  logLine(QString("Removed %1 source(s) in current mode.").arg(removed));
+  const int cls = probabilityCombo_->currentData().toInt();
+  probabilityImage_ = model_.supportsProbability()
+                          ? SegmentationEngine::applyModelProbabilities(model_, featureStack_, originalImage_.rows, originalImage_.cols, cls)
+                          : cv::Mat();
 }
 
-void MainWindow::onModeCalibration() {
-  mode_ = CALIB;
-  if (sideModeTabs_ && sideModeTabs_->currentIndex()!=1) sideModeTabs_->setCurrentIndex(1);
-  if (btnAddCam_) btnAddCam_->setVisible(false);
-  if (btnAddVideo_) btnAddVideo_->setVisible(true);
-  if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-  if (modeTabs_ && modeTabs_->currentIndex()!=1) modeTabs_->setCurrentIndex(1);
-  if (actionTabs_) actionTabs_->setCurrentIndex(1);
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
-  logLine("Switched to Calibration mode.");
+int MainWindow::currentSelectedClassIndex() const {
+  return classList_ && classList_->currentItem() ? classList_->currentItem()->data(Qt::UserRole).toInt() : -1;
 }
 
-void MainWindow::onModeTracking() {
-  mode_ = TRACK;
-  if (sideModeTabs_ && sideModeTabs_->currentIndex()!=2) sideModeTabs_->setCurrentIndex(2);
-  if (btnAddCam_) btnAddCam_->setVisible(false);
-  if (btnAddVideo_) btnAddVideo_->setVisible(true);
-  if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-  if (modeTabs_ && modeTabs_->currentIndex()!=2) modeTabs_->setCurrentIndex(2);
-  if (actionTabs_) actionTabs_->setCurrentIndex(2);
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
-  logLine("Switched to Tracking mode.");
-}
-
-void MainWindow::onModeCapture() {
-  mode_ = CAPTURE;
-  if (sideModeTabs_ && sideModeTabs_->currentIndex()!=0) sideModeTabs_->setCurrentIndex(0);
-  if (btnAddCam_) btnAddCam_->setVisible(true);
-  if (btnAddVideo_) btnAddVideo_->setVisible(false);
-  if (btnAddImgSeq_) btnAddImgSeq_->setVisible(false);
-  if (modeTabs_ && modeTabs_->currentIndex()!=0) modeTabs_->setCurrentIndex(0);
-  if (actionTabs_) actionTabs_->setCurrentIndex(0);
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
-  logLine("Switched to Capture mode.");
-}
-
-void MainWindow::onCaptureNow() {
-  stopCaptureBlocking();
-  {
-    QMutexLocker srcLock(&sources_mutex_);
-    if ((int)last_frames_.size() < (int)sources_.size()) last_frames_.resize(sources_.size());
-    for (int i=0;i<(int)sources_.size();++i) {
-      auto& s = sources_[i];
-      if (s.mode_owner != (int)CAPTURE) continue;
-      cv::Mat f;
-      if (s.is_image_seq) {
-        if (!s.seq_files.isEmpty()) {
-          int idx = std::max(0, std::min(s.seq_idx, s.seq_files.size()-1));
-          f = cv::imread(s.seq_files[idx].toStdString(), cv::IMREAD_COLOR);
+void MainWindow::repaintAnnotationPreview() {
+  if (originalImage_.empty()) {
+    view_->setAnnotationPreview(QImage());
+    return;
+  }
+  QImage annotation(originalImage_.cols, originalImage_.rows, QImage::Format_ARGB32_Premultiplied);
+  annotation.fill(Qt::transparent);
+  QPainter painter(&annotation);
+  painter.setRenderHint(QPainter::Antialiasing, false);
+  for (int cls = 0; cls < static_cast<int>(classMasks_.size()) && cls < static_cast<int>(classes_.size()); ++cls) {
+    if (classMasks_[cls].empty()) continue;
+    QImage maskImg(classMasks_[cls].data, classMasks_[cls].cols, classMasks_[cls].rows, static_cast<int>(classMasks_[cls].step), QImage::Format_Grayscale8);
+    QImage colored(maskImg.size(), QImage::Format_ARGB32_Premultiplied);
+    colored.fill(Qt::transparent);
+    for (int y = 0; y < maskImg.height(); ++y) {
+      const uchar* src = maskImg.constScanLine(y);
+      QRgb* dst = reinterpret_cast<QRgb*>(colored.scanLine(y));
+      for (int x = 0; x < maskImg.width(); ++x) {
+        if (src[x] > 0) {
+          const QColor c = classes_[cls].color;
+          dst[x] = qRgba(c.red(), c.green(), c.blue(), 140);
         }
-      } else if (s.cap.isOpened()) {
-        s.cap.read(f);
       }
-      if (!f.empty()) last_frames_[i] = f;
+    }
+    painter.drawImage(0, 0, colored);
+  }
+  painter.end();
+  view_->setAnnotationPreview(annotation);
+}
+
+void MainWindow::applyBrushStroke(const QPoint& imagePos, int radius, bool erase) {
+  if (originalImage_.empty()) {
+    return;
+  }
+  ensureAnnotationStorage();
+  const int cls = classList_->currentItem() ? classList_->currentItem()->data(Qt::UserRole).toInt() : 0;
+  if (cls < 0 || cls >= static_cast<int>(classMasks_.size())) {
+    return;
+  }
+  cv::Scalar value = erase ? cv::Scalar(0) : cv::Scalar(255);
+  cv::circle(classBrushMasks_[cls], cv::Point(imagePos.x(), imagePos.y()), radius, value, -1, cv::LINE_AA);
+  if (!erase) {
+    for (int other = 0; other < static_cast<int>(classMasks_.size()); ++other) {
+      if (other == cls) continue;
+      cv::circle(classBrushMasks_[other], cv::Point(imagePos.x(), imagePos.y()), radius, cv::Scalar(0), -1, cv::LINE_AA);
     }
   }
-  updateSourceViews(last_frames_);
-  logLine("Capture snapshot updated.");
+  rebuildMasksFromAnnotations();
 }
 
-void MainWindow::onModeTabChanged(int idx) {
-  if (modeTabs_ && modeTabs_->currentIndex() != idx) modeTabs_->setCurrentIndex(idx);
-  if (idx == 0) {
-    mode_ = CAPTURE;
-    if (btnAddCam_) btnAddCam_->setVisible(true);
-    if (btnAddVideo_) btnAddVideo_->setVisible(false);
-    if (btnAddImgSeq_) btnAddImgSeq_->setVisible(false);
-    if (actionTabs_) actionTabs_->setCurrentIndex(0);
-    logLine("Switched to Capture mode.");
-  } else if (idx == 1) {
-    mode_ = CALIB;
-    if (btnAddCam_) btnAddCam_->setVisible(false);
-    if (btnAddVideo_) btnAddVideo_->setVisible(true);
-    if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-    if (actionTabs_) actionTabs_->setCurrentIndex(1);
-    logLine("Switched to Calibration mode.");
+bool MainWindow::ensureImageLoaded(const QString& actionName) {
+  if (!originalImage_.empty()) {
+    return true;
+  }
+  QMessageBox::information(this, tr("No image"), tr("Please open an image before %1.").arg(actionName));
+  return false;
+}
+
+bool MainWindow::ensureModelReady(const QString& actionName) {
+  if (model_.isValid()) {
+    return true;
+  }
+  QMessageBox::information(this, tr("No classifier"), tr("Please train or load a classifier before %1.").arg(actionName));
+  return false;
+}
+
+void MainWindow::logMessage(const QString& message) {
+  logEdit_->append(QString("[%1] %2").arg(nowString(), message));
+}
+
+void MainWindow::activateLabelShortcut(int classIndex, const QString& semanticDescription) {
+  if (classIndex < 0 || classIndex >= classList_->count()) {
+    QMessageBox::information(this, tr("Class unavailable"), tr("The requested class shortcut is not available."));
+    return;
+  }
+  classList_->setCurrentRow(classIndex);
+  view_->setToolMode(SegmentationView::PaintTool);
+  const QString className = classes_[classIndex].name;
+  infoLabel_->setText(tr("Now painting %1 samples into %2.").arg(semanticDescription, className));
+  logMessage(tr("Activated %1 shortcut for %2.").arg(semanticDescription, className));
+}
+
+void MainWindow::ensureAnnotationStorage() {
+  if (originalImage_.empty()) {
+    return;
+  }
+  const int rows = originalImage_.rows;
+  const int cols = originalImage_.cols;
+  if (static_cast<int>(classMasks_.size()) != static_cast<int>(classes_.size())) {
+    classMasks_.assign(classes_.size(), cv::Mat(rows, cols, CV_8U, cv::Scalar(0)));
+  }
+  if (static_cast<int>(classBrushMasks_.size()) != static_cast<int>(classes_.size())) {
+    classBrushMasks_.assign(classes_.size(), cv::Mat(rows, cols, CV_8U, cv::Scalar(0)));
+  }
+  if (static_cast<int>(classTracePolygons_.size()) != static_cast<int>(classes_.size())) {
+    classTracePolygons_.resize(classes_.size());
+  }
+  for (auto& mask : classMasks_) {
+    if (mask.empty() || mask.rows != rows || mask.cols != cols) {
+      mask = cv::Mat(rows, cols, CV_8U, cv::Scalar(0));
+    }
+  }
+  for (auto& mask : classBrushMasks_) {
+    if (mask.empty() || mask.rows != rows || mask.cols != cols) {
+      mask = cv::Mat(rows, cols, CV_8U, cv::Scalar(0));
+    }
+  }
+}
+
+void MainWindow::clearAnnotationsForCurrentImage() {
+  if (originalImage_.empty()) {
+    classMasks_.clear();
+    classBrushMasks_.clear();
+    classTracePolygons_.clear();
+    pendingTrace_.clear();
+    view_->clearPendingTrace();
+    return;
+  }
+  ensureAnnotationStorage();
+  for (auto& mask : classBrushMasks_) {
+    mask = cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0));
+  }
+  for (auto& traces : classTracePolygons_) {
+    traces.clear();
+  }
+  pendingTrace_.clear();
+  view_->clearPendingTrace();
+  rebuildMasksFromAnnotations();
+}
+
+void MainWindow::clearInferenceOutputs() {
+  labelResult_.release();
+  overlayImage_.release();
+  probabilityImage_.release();
+}
+
+void MainWindow::rebuildMasksFromAnnotations() {
+  if (originalImage_.empty()) {
+    return;
+  }
+  ensureAnnotationStorage();
+  for (int i = 0; i < static_cast<int>(classes_.size()); ++i) {
+    classMasks_[i] = classBrushMasks_[i].clone();
+  }
+
+  for (int cls = 0; cls < static_cast<int>(classTracePolygons_.size()); ++cls) {
+    for (const QPolygon& polygon : classTracePolygons_[cls]) {
+      if (polygon.size() < 3) continue;
+      std::vector<cv::Point> cvPoints;
+      cvPoints.reserve(polygon.size());
+      for (const QPoint& pt : polygon) {
+        cvPoints.emplace_back(pt.x(), pt.y());
+      }
+      std::vector<std::vector<cv::Point>> fillPoints{cvPoints};
+      cv::Mat traceMask(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0));
+      cv::fillPoly(traceMask, fillPoints, cv::Scalar(255), cv::LINE_AA);
+      for (int other = 0; other < static_cast<int>(classes_.size()); ++other) {
+        if (other == cls) continue;
+        classMasks_[other].setTo(cv::Scalar(0), traceMask);
+      }
+      classMasks_[cls].setTo(cv::Scalar(255), traceMask);
+    }
+  }
+
+  repaintAnnotationPreview();
+  updateTraceLists();
+  updateUiState();
+}
+
+void MainWindow::updateTraceLists() {
+  if (!traceList_ || !traceGroup_) {
+    return;
+  }
+  traceList_->clear();
+  const int cls = currentSelectedClassIndex();
+  if (cls < 0 || cls >= static_cast<int>(classes_.size())) {
+    traceGroup_->setTitle(tr("Traces"));
+    return;
+  }
+  traceGroup_->setTitle(tr("Traces for %1").arg(classes_[cls].name));
+  if (cls < static_cast<int>(classTracePolygons_.size())) {
+    for (int i = 0; i < static_cast<int>(classTracePolygons_[cls].size()); ++i) {
+      QListWidgetItem* item = new QListWidgetItem(tr("Trace %1").arg(i + 1), traceList_);
+      item->setData(Qt::UserRole, i);
+      item->setForeground(classes_[cls].color);
+    }
+  }
+}
+
+void MainWindow::setPendingTrace(const QPolygon& trace) {
+  pendingTrace_ = trace;
+  const int cls = currentSelectedClassIndex();
+  const QColor color = (cls >= 0 && cls < static_cast<int>(classes_.size())) ? classes_[cls].color : QColor(255, 210, 90);
+  view_->setPendingTrace(pendingTrace_, color);
+  const QString className = (cls >= 0 && cls < static_cast<int>(classes_.size())) ? classes_[cls].name : tr("the selected class");
+  infoLabel_->setText(tr("ROI trace captured. Click Add ROI to selected class to commit it to %1.").arg(className));
+  logMessage(tr("Captured a pending ROI trace with %1 points for %2.").arg(pendingTrace_.size()).arg(className));
+}
+
+void MainWindow::addPendingTraceToSelectedClass() {
+  const int classIndex = currentSelectedClassIndex();
+  if (classIndex < 0 || classIndex >= static_cast<int>(classes_.size())) {
+    QMessageBox::information(this, tr("Class unavailable"), tr("Please select a class before adding a ROI trace."));
+    return;
+  }
+  if (pendingTrace_.size() < 3) {
+    view_->setToolMode(SegmentationView::TraceTool);
+    infoLabel_->setText(tr("Draw a freehand ROI for %1, then click Add ROI to selected class.").arg(classes_[classIndex].name));
+    logMessage(tr("Waiting for a ROI trace before adding to %1.").arg(classes_[classIndex].name));
+    return;
+  }
+  ensureAnnotationStorage();
+  classTracePolygons_[classIndex].push_back(pendingTrace_);
+  pendingTrace_.clear();
+  view_->clearPendingTrace();
+  view_->setToolMode(SegmentationView::TraceTool);
+  rebuildMasksFromAnnotations();
+  updateTraceLists();
+  if (traceList_) {
+    traceList_->setCurrentRow(traceList_->count() - 1);
+  }
+  infoLabel_->setText(tr("Added ROI trace to %1.").arg(classes_[classIndex].name));
+  logMessage(tr("Added ROI trace to %1.").arg(classes_[classIndex].name));
+}
+
+void MainWindow::removeSelectedTraceFromClass() {
+  const int classIndex = currentSelectedClassIndex();
+  if (!traceList_ || classIndex < 0 || classIndex >= static_cast<int>(classTracePolygons_.size())) {
+    return;
+  }
+  const int row = traceList_->currentRow();
+  if (row < 0 || row >= static_cast<int>(classTracePolygons_[classIndex].size())) {
+    return;
+  }
+  classTracePolygons_[classIndex].erase(classTracePolygons_[classIndex].begin() + row);
+  rebuildMasksFromAnnotations();
+  updateTraceLists();
+  logMessage(tr("Removed trace %1 from %2.").arg(row).arg(classes_[classIndex].name));
+}
+
+bool MainWindow::loadImageFile(const QString& path) {
+  cv::Mat image = cv::imread(path.toStdString(), cv::IMREAD_COLOR);
+  if (image.empty()) {
+    QMessageBox::warning(this, tr("Open image failed"), tr("Unable to load image: %1").arg(path));
+    return false;
+  }
+  originalImage_ = image;
+  imagePath_ = path;
+  imagePathLabel_->setText(path);
+  clearInferenceOutputs();
+  clearAnnotationsForCurrentImage();
+  model_.clear();
+  trainingStats_ = {};
+  rebuildFeatureStack();
+  updateViewer();
+  updateUiState();
+  logMessage(tr("Loaded image %1 (%2 x %3).")
+                 .arg(QFileInfo(path).fileName())
+                 .arg(originalImage_.cols)
+                 .arg(originalImage_.rows));
+  return true;
+}
+
+bool MainWindow::applyClassifierToImage(const cv::Mat& image, const QString& path, bool resetAnnotations) {
+  if (image.empty() || !model_.isValid()) {
+    return false;
+  }
+
+  originalImage_ = image.clone();
+  imagePath_ = path;
+  imagePathLabel_->setText(path.isEmpty() ? tr("Unsaved image") : path);
+  clearInferenceOutputs();
+  if (resetAnnotations) {
+    clearAnnotationsForCurrentImage();
   } else {
-    mode_ = TRACK;
-    if (btnAddCam_) btnAddCam_->setVisible(false);
-    if (btnAddVideo_) btnAddVideo_->setVisible(true);
-    if (btnAddImgSeq_) btnAddImgSeq_->setVisible(true);
-    if (actionTabs_) actionTabs_->setCurrentIndex(2);
-    logLine("Switched to Tracking mode.");
+    ensureAnnotationStorage();
+    rebuildMasksFromAnnotations();
   }
-  rebuildSourceViews();
-  updateSourceViews(last_frames_);
+  rebuildFeatureStack();
+  labelResult_ = SegmentationEngine::applyModelLabels(model_, featureStack_, originalImage_.rows, originalImage_.cols);
+  updateProbabilityView();
+  updateViewer();
+  updateUiState();
+  return !labelResult_.empty();
 }
 
-bool MainWindow::readFrames(std::vector<cv::Mat>& frames) {
-  frames.clear();
-  QMutexLocker locker(&frames_mutex_);
-  if (last_frames_.empty()) return false;
-  for (const auto& f : last_frames_) {
-    if (f.empty()) return false;
-    frames.push_back(f);
+bool MainWindow::saveTrainingData(const QString& path) {
+  if (!ensureImageLoaded(tr("saving training data"))) {
+    return false;
   }
-  return !frames.empty();
+  QFileInfo info(path);
+  QDir dir = info.dir();
+  const QString base = info.completeBaseName();
+  if (!dir.exists() && !dir.mkpath(".")) {
+    return false;
+  }
+
+  QJsonObject root;
+  root["imagePath"] = imagePath_;
+  root["maskWidth"] = originalImage_.cols;
+  root["maskHeight"] = originalImage_.rows;
+  QJsonArray classArray;
+  for (int i = 0; i < static_cast<int>(classes_.size()); ++i) {
+    const QString maskName = QString("%1_class_%2.png").arg(base).arg(i);
+    cv::imwrite(dir.filePath(maskName).toStdString(), classMasks_[i]);
+    QJsonObject cls;
+    cls["name"] = classes_[i].name;
+    cls["color"] = classes_[i].color.name(QColor::HexRgb);
+    cls["mask"] = maskName;
+    QJsonArray traces;
+    if (i < static_cast<int>(classTracePolygons_.size())) {
+      for (const QPolygon& polygon : classTracePolygons_[i]) {
+        QJsonArray tracePoints;
+        for (const QPoint& point : polygon) {
+          tracePoints.append(QJsonObject{{"x", point.x()}, {"y", point.y()}});
+        }
+        traces.append(tracePoints);
+      }
+    }
+    cls["traces"] = traces;
+    classArray.append(cls);
+  }
+  root["classes"] = classArray;
+  root["featureSettings"] = QJsonObject{{"intensity", featureSettings_.intensity},
+                                         {"gaussian3", featureSettings_.gaussian3},
+                                         {"gaussian7", featureSettings_.gaussian7},
+                                         {"differenceOfGaussians", featureSettings_.differenceOfGaussians},
+                                         {"gradient", featureSettings_.gradient},
+                                         {"laplacian", featureSettings_.laplacian},
+                                         {"hessian", featureSettings_.hessian},
+                                         {"localMean", featureSettings_.localMean},
+                                         {"localStd", featureSettings_.localStd},
+                                         {"entropy", featureSettings_.entropy},
+                                         {"texture", featureSettings_.texture},
+                                         {"gabor", featureSettings_.gabor},
+                                         {"membrane", featureSettings_.membrane},
+                                         {"xPosition", featureSettings_.xPosition},
+                                         {"yPosition", featureSettings_.yPosition}};
+  root["classifierSettings"] = QJsonObject{{"kind", static_cast<int>(classifierSettings_.kind)},
+                                           {"randomForestTrees", classifierSettings_.randomForestTrees},
+                                           {"randomForestMaxDepth", classifierSettings_.randomForestMaxDepth},
+                                           {"svmC", classifierSettings_.svmC},
+                                           {"svmGamma", classifierSettings_.svmGamma},
+                                           {"balanceClasses", classifierSettings_.balanceClasses}};
+
+  QFile file(path);
+  if (!file.open(QIODevice::WriteOnly)) {
+    return false;
+  }
+  file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+  logMessage(tr("Saved training data to %1.").arg(path));
+  return true;
 }
 
-QImage MainWindow::matToQImage(const cv::Mat& bgr) {
-  cv::Mat rgb;
-  if (bgr.channels()==3) cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
-  else if (bgr.channels()==4) cv::cvtColor(bgr, rgb, cv::COLOR_BGRA2RGBA);
-  else cv::cvtColor(bgr, rgb, cv::COLOR_GRAY2RGB);
+bool MainWindow::loadTrainingData(const QString& path) {
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly)) {
+    return false;
+  }
+  const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+  if (!doc.isObject()) {
+    return false;
+  }
+  const QJsonObject root = doc.object();
+  const QString imagePath = root["imagePath"].toString();
+  if (!loadImageFile(imagePath)) {
+    return false;
+  }
 
-  return QImage((const uchar*)rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888).copy();
+  const QJsonArray classArray = root["classes"].toArray();
+  classes_.clear();
+  classMasks_.clear();
+  classBrushMasks_.clear();
+  classTracePolygons_.clear();
+  for (int i = 0; i < classArray.size(); ++i) {
+    const QJsonObject clsObj = classArray[i].toObject();
+    classes_.push_back({clsObj["name"].toString(), QColor(clsObj["color"].toString()), true});
+    cv::Mat mask = cv::imread(QFileInfo(path).dir().filePath(clsObj["mask"].toString()).toStdString(), cv::IMREAD_GRAYSCALE);
+    if (mask.empty()) {
+      mask = cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0));
+    }
+    classBrushMasks_.push_back(mask.clone());
+    classMasks_.push_back(mask);
+    std::vector<QPolygon> traces;
+    for (const auto& traceValue : clsObj["traces"].toArray()) {
+      QPolygon poly;
+      for (const auto& ptValue : traceValue.toArray()) {
+        const QJsonObject pt = ptValue.toObject();
+        poly << QPoint(pt["x"].toInt(), pt["y"].toInt());
+      }
+      if (!poly.isEmpty()) traces.push_back(poly);
+    }
+    classTracePolygons_.push_back(traces);
+  }
+  const QJsonObject settings = root["featureSettings"].toObject();
+  featureSettings_.intensity = settings["intensity"].toBool(true);
+  featureSettings_.gaussian3 = settings["gaussian3"].toBool(true);
+  featureSettings_.gaussian7 = settings["gaussian7"].toBool(true);
+  featureSettings_.differenceOfGaussians = settings["differenceOfGaussians"].toBool(false);
+  featureSettings_.gradient = settings["gradient"].toBool(true);
+  featureSettings_.laplacian = settings["laplacian"].toBool(true);
+  featureSettings_.hessian = settings["hessian"].toBool(false);
+  featureSettings_.localMean = settings["localMean"].toBool(true);
+  featureSettings_.localStd = settings["localStd"].toBool(true);
+  featureSettings_.entropy = settings["entropy"].toBool(false);
+  featureSettings_.texture = settings["texture"].toBool(false);
+  featureSettings_.gabor = settings["gabor"].toBool(false);
+  featureSettings_.membrane = settings["membrane"].toBool(false);
+  featureSettings_.xPosition = settings["xPosition"].toBool(true);
+  featureSettings_.yPosition = settings["yPosition"].toBool(true);
+  const QJsonObject classifierSettings = root["classifierSettings"].toObject();
+  if (!classifierSettings.isEmpty()) {
+    classifierSettings_.kind = static_cast<SegmentationClassifierSettings::Kind>(
+        classifierSettings["kind"].toInt(static_cast<int>(classifierSettings_.kind)));
+    classifierSettings_.randomForestTrees = classifierSettings["randomForestTrees"].toInt(classifierSettings_.randomForestTrees);
+    classifierSettings_.randomForestMaxDepth = classifierSettings["randomForestMaxDepth"].toInt(classifierSettings_.randomForestMaxDepth);
+    classifierSettings_.svmC = classifierSettings["svmC"].toDouble(classifierSettings_.svmC);
+    classifierSettings_.svmGamma = classifierSettings["svmGamma"].toDouble(classifierSettings_.svmGamma);
+    classifierSettings_.balanceClasses = classifierSettings["balanceClasses"].toBool(classifierSettings_.balanceClasses);
+  }
+
+  refreshClassList();
+  pendingTrace_.clear();
+  view_->clearPendingTrace();
+  clearInferenceOutputs();
+  rebuildMasksFromAnnotations();
+  rebuildFeatureStack();
+  const int comboIndex = classifierCombo_->findData(classifierSettings_.kind);
+  if (comboIndex >= 0) {
+    classifierCombo_->setCurrentIndex(comboIndex);
+  }
+  updateUiState();
+  logMessage(tr("Loaded training data from %1.").arg(path));
+  return true;
 }
 
-cv::Mat MainWindow::makeMosaic(const std::vector<cv::Mat>& imgs, int cols) {
-  if (imgs.empty()) return cv::Mat();
-  cols = std::max(1, cols);
-  int rows = (int)std::ceil((double)imgs.size() / (double)cols);
-
-  // Find first non-empty to determine cell size
-  int cell_w = 0, cell_h = 0;
-  for (const auto& im : imgs) {
-    if (!im.empty()) { cell_w = im.cols; cell_h = im.rows; break; }
+QImage MainWindow::cvMatToQImage(const cv::Mat& mat) {
+  if (mat.empty()) {
+    return QImage();
   }
-  if (cell_w <= 0 || cell_h <= 0) return cv::Mat();
-
-  cv::Mat mosaic(cell_h * rows, cell_w * cols, CV_8UC3, cv::Scalar(16,16,16));
-
-  for (int i = 0; i < (int)imgs.size(); ++i) {
-    int r = i / cols;
-    int c = i % cols;
-    cv::Rect roi(c * cell_w, r * cell_h, cell_w, cell_h);
-
-    cv::Mat src = imgs[i];
+  if (mat.type() == CV_8UC3) {
     cv::Mat rgb;
-    if (src.empty()) {
-      rgb = cv::Mat(cell_h, cell_w, CV_8UC3, cv::Scalar(16,16,16));
-    } else {
-      if (src.channels() == 1) cv::cvtColor(src, rgb, cv::COLOR_GRAY2BGR);
-      else if (src.channels() == 3) rgb = src;
-      else cv::cvtColor(src, rgb, cv::COLOR_BGRA2BGR);
-
-      if (rgb.cols != cell_w || rgb.rows != cell_h) {
-        cv::resize(rgb, rgb, cv::Size(cell_w, cell_h), 0, 0, cv::INTER_AREA);
-      }
-    }
-
-    rgb.copyTo(mosaic(roi));
+    cv::cvtColor(mat, rgb, cv::COLOR_BGR2RGB);
+    return QImage(rgb.data, rgb.cols, rgb.rows, static_cast<int>(rgb.step), QImage::Format_RGB888).copy();
   }
-  return mosaic;
+  if (mat.type() == CV_8UC1) {
+    return QImage(mat.data, mat.cols, mat.rows, static_cast<int>(mat.step), QImage::Format_Grayscale8).copy();
+  }
+  if (mat.type() == CV_32F) {
+    cv::Mat normalized;
+    cv::normalize(mat, normalized, 0, 255, cv::NORM_MINMAX);
+    normalized.convertTo(normalized, CV_8U);
+    cv::Mat colored;
+    cv::applyColorMap(normalized, colored, cv::COLORMAP_TURBO);
+    return cvMatToQImage(colored);
+  }
+  if (mat.type() == CV_32S) {
+    cv::Mat converted;
+    mat.convertTo(converted, CV_8U);
+    return cvMatToQImage(converted);
+  }
+  return QImage();
 }
 
-void MainWindow::overlayCalibration(std::vector<cv::Mat>& vis, const std::vector<cv::Mat>& frames) {
-  std::vector<std::vector<cv::Point2f>> corners;
-  std::vector<bool> ok;
-  calibrator_->detectAndMaybeStore(frames, false, &corners, &ok);
-
-  for (int i=0;i<num_cams_;++i) {
-    if (ok[i]) {
-      cv::drawChessboardCorners(vis[i], cv::Size(board_w_, board_h_), corners[i], true);
-    }
-    cv::putText(vis[i], "cam"+std::to_string(i), cv::Point(15,30),
-                cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0,255,0), 2, cv::LINE_AA);
-  }
+cv::Mat MainWindow::qImageToCvMat(const QImage& image) {
+  QImage converted = image.convertToFormat(QImage::Format_RGB888);
+  cv::Mat mat(converted.height(), converted.width(), CV_8UC3, const_cast<uchar*>(converted.bits()), converted.bytesPerLine());
+  cv::Mat bgr;
+  cv::cvtColor(mat, bgr, cv::COLOR_RGB2BGR);
+  return bgr.clone();
 }
 
-void MainWindow::overlayTracking(std::vector<cv::Mat>& vis, const std::vector<cv::Mat>& frames) {
-  AprilTagDetections det;
-  std::vector<Observation> obs;
-
-  if (tagmap_loaded_) {
-    buildObservationsFromFrames(frames, tag_corner_map_, obs, &det, tag_dict_id_);
-    for (int i=0;i<num_cams_;++i) {
-      if (i < (int)det.ids_per_cam.size())
-        cv::aruco::drawDetectedMarkers(vis[i], det.corners_per_cam[i], det.ids_per_cam[i]);
-      cv::putText(vis[i], "cam"+std::to_string(i), cv::Point(15,30),
-                  cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0,255,0), 2, cv::LINE_AA);
-    }
-
-  } else {
-    for (int i=0;i<num_cams_;++i) {
-      cv::putText(vis[i], "Load tag map to start tracking", cv::Point(15,60),
-                  cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0,255,255), 2, cv::LINE_AA);
-    }
+void MainWindow::onOpenImage() {
+  const QString path = QFileDialog::getOpenFileName(this, tr("Open image"), QString(), tr("Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"));
+  if (!path.isEmpty()) {
+    loadImageFile(path);
   }
 }
 
-void MainWindow::updateStatus() {
-  lblCaptured_->setText(QString("Captured: %1").arg(calibrator_->captured()));
-  lblInliers_->setText(QString("Inliers: %1").arg(last_inliers_));
-
-  QString m = (mode_==CAPTURE) ? "Capture" : ((mode_==CALIB) ? "Calibration" : "Tracking");
-  statusBar()->showMessage(QString("Mode: %1 | Sources: %2 | Captured: %3 | Inliers: %4 | FPS: %5")
-    .arg(m)
-    .arg((int)sources_.size())
-    .arg(calibrator_->captured())
-    .arg(last_inliers_)
-    .arg(fps_, 0, 'f', 1));
-}
-
-void MainWindow::onTick() {
-  // UI refresh at a steady rate; frames arrive from CaptureWorker
-  if (sources_.empty()) {
-    updateSourceViews(std::vector<cv::Mat>());
-    updateStatus();
+void MainWindow::onTrainClassifier() {
+  if (!ensureImageLoaded(tr("training the classifier"))) {
     return;
   }
-  std::vector<cv::Mat> frames;
-  {
-    QMutexLocker locker(&frames_mutex_);
-    if (last_frames_.empty()) return;
-    frames = last_frames_;
-  }
-
-  // Note: some sources may not have frames yet; mosaic will show placeholders.
-
-  std::vector<cv::Mat> vis = frames;
-  // If sources count changed, rebuild calibrator to match to avoid crash
-  if (mode_==CALIB) {
-    int n = (int)frames.size();
-    if (n <= 0) { updateStatus(); return; }
-    if (num_cams_ != n) {
-      num_cams_ = n;
-      calibrator_.reset(new MultiCamCalibrator(num_cams_, cv::Size(board_w_, board_h_), square_));
-      //logLine(QString(\"Sources changed -> rebuild calibrator (num=%1)\").arg(num_cams_));
-    }
-  }
-  // Tracking overlay is triggered by the explicit Detect button to avoid
-  // repeatedly accumulating visual detections on static frames.
-
-  updateSourceViews(vis);
-
-  if (show_docks_) updateSourceDocks(frames);
-  updateStatus();
-}
-
-void MainWindow::updateFpsStats(double dt_ms) {
-  if (dt_ms <= 0.0) return;
-  double inst = 1000.0 / dt_ms;
-  // simple low-pass filter
-  fps_ = (fps_<=0.0) ? inst : (0.9*fps_ + 0.1*inst);
-  if (lblFps_) lblFps_->setText(QString("FPS: %1").arg(fps_, 0, 'f', 1));
-}
-
-void MainWindow::setSourceEnabled(int idx, bool enabled) {
-  {
-    QMutexLocker locker(&sources_mutex_);
-    if (idx < 0 || idx >= (int)source_enabled_.size()) return;
-    source_enabled_[idx] = enabled;
-  }
-  refreshSourceList();
-}
-
-QJsonObject MainWindow::toProjectJson() const {
-  QJsonObject o;
-  o["board_w"] = board_w_;
-  o["board_h"] = board_h_;
-  o["square"] = square_;
-  o["ransac_iters"] = ransac_iters_;
-  o["inlier_thresh_px"] = inlier_thresh_px_;
-  o["tag_dict_id"] = tag_dict_id_;
-
-  QJsonArray srcs;
-  for (int i=0;i<(int)sources_.size();++i) {
-    const auto& s = sources_[i];
-    QJsonObject si;
-    si["enabled"] = (i < (int)source_enabled_.size()) ? source_enabled_[i] : true;
-    si["mode_owner"] = s.mode_owner;
-    if (s.is_cam) {
-      si["type"] = "cam";
-      si["cam_id"] = s.cam_id;
-    } else if (s.is_image_seq) {
-      si["type"] = "imgseq";
-      si["dir"] = s.seq_dir;
-    } else {
-      si["type"] = "video";
-      si["path"] = s.video_path;
-    }
-    srcs.append(si);
-  }
-  o["sources"] = srcs;
-
-  o["tagmap_path"] = tagmap_path_;
-  o["calib_path"] = calib_path_;
-  o["layout_geometry_b64"] = QString(saveGeometry().toBase64());
-  o["layout_state_b64"] = QString(saveState().toBase64());
-  return o;
-}
-
-bool MainWindow::fromProjectJson(const QJsonObject& o) {
-  if (o.contains("board_w")) spBoardW_->setValue(o["board_w"].toInt(board_w_));
-  if (o.contains("board_h")) spBoardH_->setValue(o["board_h"].toInt(board_h_));
-  if (o.contains("square")) spSquare_->setValue(o["square"].toDouble(square_));
-  if (o.contains("ransac_iters")) spRansacIters_->setValue(o["ransac_iters"].toInt(ransac_iters_));
-  if (o.contains("inlier_thresh_px")) spInlierThresh_->setValue(o["inlier_thresh_px"].toDouble(inlier_thresh_px_));
-  if (o.contains("tag_dict_id")) {
-    int did = o["tag_dict_id"].toInt(tag_dict_id_);
-    // set combo if present
-    for (int i=0;i<cbTagDict_->count();++i) {
-      if (cbTagDict_->itemData(i).toInt() == did) { cbTagDict_->setCurrentIndex(i); break; }
-    }
-  }
-
-  // Rebuild sources
-  timer_.stop();
-  closeAllSources();
-  sources_.clear();
-  source_enabled_.clear();
-  last_frames_.clear();
-
-  if (o.contains("sources") && o["sources"].isArray()) {
-    QJsonArray srcs = o["sources"].toArray();
-    for (auto v : srcs) {
-      if (!v.isObject()) continue;
-      QJsonObject si = v.toObject();
-      QString type = si["type"].toString();
-      bool en = si["enabled"].toBool(true);
-      int owner = si["mode_owner"].toInt(0);
-
-      InputSource s;
-      if (type == "cam") {
-        s.is_cam = true;
-        s.mode_owner = owner;
-        s.cam_id = si["cam_id"].toInt(0);
-        s.cap.open(s.cam_id);
-      } else if (type == "video") {
-        s.is_cam = false;
-        s.mode_owner = owner;
-        s.is_image_seq = false;
-        s.video_path = si["path"].toString();
-        s.cap.open(s.video_path.toStdString());
-      } else if (type == "imgseq") {
-        s.is_cam = false;
-        s.mode_owner = owner;
-        s.is_image_seq = true;
-        s.seq_dir = si["dir"].toString();
-        s.video_path = s.seq_dir;
-        QDir qdir(s.seq_dir);
-        QFileInfoList files = qdir.entryInfoList(kImageNameFilters(), QDir::Files, QDir::Name);
-        for (const auto& fi : files) s.seq_files.push_back(fi.absoluteFilePath());
-        s.seq_idx = 0;
-      } else continue;
-
-      sources_.push_back(std::move(s));
-      source_enabled_.push_back(en);
-      last_frames_.emplace_back();
-    }
-  }
-
-  num_cams_ = (int)sources_.size();
-  source_enabled_.assign(std::max(0,num_cams_), true);
-  // last_frames_ will be populated by CaptureWorker when frames arrive.
-  last_frames_.resize(std::max(0,num_cams_));
-  calibrator_.reset(new MultiCamCalibrator(std::max(1,num_cams_), cv::Size(board_w_, board_h_), square_));
-  refreshSourceList();
-  rebuildSourceViews();
-
-  // Bind file paths
-  if (o.contains("tagmap_path")) {
-    tagmap_path_ = o["tagmap_path"].toString();
-    if (!tagmap_path_.isEmpty()) {
-      if (QFile::exists(tagmap_path_)) {
-        tagmap_loaded_ = loadTagCornersTxt(tagmap_path_.toStdString(), tag_corner_map_);
-      } else {
-        QMessageBox::warning(this, "Project", "Tag map file missing. Please locate it.");
-        QString p = QFileDialog::getOpenFileName(this, "Locate Tag Map TXT", "", "Text (*.txt);;All (*.*)");
-        if (!p.isEmpty()) { tagmap_path_=p; tagmap_loaded_=loadTagCornersTxt(p.toStdString(), tag_corner_map_); }
-      }
-      if (lblTagPath_) lblTagPath_->setText(QString("TagMap: %1").arg(tagmap_path_));
-    }
-  }
-  if (o.contains("calib_path")) {
-    calib_path_ = o["calib_path"].toString();
-    if (!calib_path_.isEmpty()) {
-      if (QFile::exists(calib_path_)) {
-        calib_loaded_ = loadRigCalibYaml(calib_path_.toStdString(), cams_);
-      } else {
-        QMessageBox::warning(this, "Project", "Calibration YAML missing. Please locate it.");
-        QString p = QFileDialog::getOpenFileName(this, "Locate Calibration YAML", "", "YAML (*.yaml *.yml);;All (*.*)");
-        if (!p.isEmpty()) { calib_path_=p; calib_loaded_=loadRigCalibYaml(p.toStdString(), cams_); }
-      }
-      if (lblYamlPath_) lblYamlPath_->setText(QString("Calib: %1").arg(calib_path_));
-    }
-  }
-  if (solveWorker_) solveWorker_->setStaticData(&cams_, &tag_corner_map_);
-
-  // Restore layout if present
-  if (o.contains("layout_geometry_b64")) {
-    QByteArray g = QByteArray::fromBase64(o["layout_geometry_b64"].toString().toUtf8());
-    if (!g.isEmpty()) restoreGeometry(g);
-  }
-  if (o.contains("layout_state_b64")) {
-    QByteArray s = QByteArray::fromBase64(o["layout_state_b64"].toString().toUtf8());
-    if (!s.isEmpty()) restoreState(s);
-  }
-
-  return true;
-}
-
-// ----------------- Calibration actions -----------------
-void MainWindow::onGrabFrame() {
-  std::vector<cv::Mat> frames;
-  if (!readFrames(frames)) return;
-
-  bool ok = calibrator_->detectAndMaybeStore(frames, true);
-  logLine(ok ? "Grabbed chessboard frame." : "No chessboard detected.");
-  updateStatus();
-}
-
-void MainWindow::onResetFrames() {
-  calibrator_->reset();
-  calib_pairs_.clear();
-  calib_pair_rmse_.clear();
-  has_computed_calib_ = false;
-  if (btnSaveCalib_) btnSaveCalib_->setEnabled(false);
-  if (calibErrorTable_) calibErrorTable_->setRowCount(0);
-  if (calibProgressBar_) calibProgressBar_->setValue(0);
-  if (lblCalibProgress_) lblCalibProgress_->setText("Progress: idle");
-  logLine("Reset captured frames.");
-  updateStatus();
-}
-
-void MainWindow::onComputeCalibration() {
-  if (cbCalibMethod_ && cbCalibMethod_->currentIndex() != 0) {
-    QMessageBox::information(this, "Calibration", "This calibration method is reserved and not implemented yet.");
+  trainingInProgress_ = true;
+  stopTrainingRequested_ = false;
+  updateUiState();
+  QApplication::processEvents();
+  rebuildFeatureStack();
+  if (stopTrainingRequested_) {
+    trainingInProgress_ = false;
+    updateUiState();
+    logMessage(tr("Training stopped before sample gathering."));
     return;
   }
-  // Use all frames from the two Calibration-tab sources (no Grab required).
-  std::vector<int> idx;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    for (int i=0;i<(int)sources_.size();++i) {
-      if (sources_[i].mode_owner == (int)CALIB && !sources_[i].is_cam) idx.push_back(i);
+  cv::Mat labels;
+  cv::Mat samples = SegmentationEngine::gatherSamples(featureStack_, classMasks_, &labels, 12000, classifierSettings_.balanceClasses);
+  QApplication::processEvents();
+  if (stopTrainingRequested_) {
+    trainingInProgress_ = false;
+    updateUiState();
+    logMessage(tr("Training stopped before classifier fitting."));
+    return;
+  }
+  if (samples.empty()) {
+    trainingInProgress_ = false;
+    updateUiState();
+    QMessageBox::information(this, tr("No annotations"), tr("Please paint at least one pixel for each class before training."));
+    return;
+  }
+  if (!model_.train(samples, labels, static_cast<int>(classes_.size()), classifierSettings_, &trainingStats_)) {
+    trainingInProgress_ = false;
+    updateUiState();
+    QMessageBox::warning(this, tr("Training failed"), tr("Training failed. Ensure every class has annotations."));
+    return;
+  }
+  if (stopTrainingRequested_) {
+    trainingInProgress_ = false;
+    updateUiState();
+    clearInferenceOutputs();
+    logMessage(tr("Training finished fitting but stopped before result generation."));
+    return;
+  }
+  labelResult_ = SegmentationEngine::applyModelLabels(model_, featureStack_, originalImage_.rows, originalImage_.cols);
+  updateProbabilityView();
+  updateViewer();
+  trainingInProgress_ = false;
+  updateUiState();
+  logMessage(tr("Trained classifier with %1 samples across %2 classes.").arg(trainingStats_.sampleCount).arg(trainingStats_.classCount));
+}
+
+void MainWindow::onStopTraining() {
+  if (!trainingInProgress_) {
+    return;
+  }
+  stopTrainingRequested_ = true;
+  logMessage(tr("Stop requested. The current training stage will stop as soon as it can."));
+}
+
+void MainWindow::onApplyClassifier() {
+  if (!ensureModelReady(tr("applying the classifier"))) {
+    return;
+  }
+  QString targetPath;
+  bool useCurrentImage = !originalImage_.empty();
+  if (!originalImage_.empty()) {
+    QMessageBox choiceBox(this);
+    choiceBox.setWindowTitle(tr("Apply classifier"));
+    choiceBox.setText(tr("Apply the classifier to the current image, or choose another image file?"));
+    QPushButton* currentButton = choiceBox.addButton(tr("Current image"), QMessageBox::AcceptRole);
+    QPushButton* chooseButton = choiceBox.addButton(tr("Choose image..."), QMessageBox::ActionRole);
+    choiceBox.addButton(QMessageBox::Cancel);
+    choiceBox.exec();
+    if (choiceBox.clickedButton() == chooseButton) {
+      useCurrentImage = false;
+    } else if (choiceBox.clickedButton() != currentButton) {
+      return;
     }
   }
-  if (idx.size() != 2) {
-    QMessageBox::warning(this, "Calibration", "Calibration tab must have exactly 2 video/image-sequence sources.");
+
+  if (!useCurrentImage) {
+    targetPath = QFileDialog::getOpenFileName(this, tr("Apply classifier to image"), imagePath_,
+                                              tr("Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"));
+    if (targetPath.isEmpty()) {
+      return;
+    }
+    cv::Mat targetImage = cv::imread(targetPath.toStdString(), cv::IMREAD_COLOR);
+    if (targetImage.empty()) {
+      QMessageBox::warning(this, tr("Open image failed"), tr("Unable to load image: %1").arg(targetPath));
+      return;
+    }
+    if (!applyClassifierToImage(targetImage, targetPath, true)) {
+      QMessageBox::warning(this, tr("Apply failed"), tr("Failed to apply the classifier to %1.").arg(targetPath));
+      return;
+    }
+    logMessage(tr("Applied classifier to %1.").arg(QFileInfo(targetPath).fileName()));
     return;
   }
 
-  has_computed_calib_ = false;
-  if (btnSaveCalib_) btnSaveCalib_->setEnabled(false);
-  calib_pairs_.clear();
-  calib_pair_rmse_.clear();
-  if (calibErrorTable_) calibErrorTable_->setRowCount(0);
-  if (calibProgressBar_) {
-    calibProgressBar_->setRange(0, 100);
-    calibProgressBar_->setValue(0);
-  }
-  if (lblCalibProgress_) lblCalibProgress_->setText("Progress: preparing...");
-
-  stopCaptureBlocking();
-  detect_overlay_cache_.clear();
-
-  int totalFrames = 0;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    for (int k : idx) {
-      if (k < 0 || k >= (int)sources_.size()) continue;
-      if (sources_[k].is_image_seq) sources_[k].seq_idx = 0;
-      else if (sources_[k].cap.isOpened()) {
-        sources_[k].cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-      }
-    }
-    auto frameCount = [&](const InputSource& s)->int {
-      if (s.is_image_seq) return s.seq_files.size();
-      if (!s.cap.isOpened()) return 0;
-      return std::max(0, (int)s.cap.get(cv::CAP_PROP_FRAME_COUNT));
-    };
-    int c0 = frameCount(sources_[idx[0]]);
-    int c1 = frameCount(sources_[idx[1]]);
-    totalFrames = (c0 > 0 && c1 > 0) ? std::min(c0, c1) : 0;
-  }
-  if (calibProgressBar_ && totalFrames > 0) calibProgressBar_->setRange(0, totalFrames);
-
-  auto readNext = [](InputSource& s, cv::Mat& out)->bool {
-    if (s.is_image_seq) {
-      if (s.seq_files.isEmpty() || s.seq_idx >= s.seq_files.size()) return false;
-      out = cv::imread(s.seq_files[s.seq_idx].toStdString(), cv::IMREAD_COLOR);
-      s.seq_idx++;
-      return !out.empty();
-    }
-    if (!s.cap.isOpened()) return false;
-    return s.cap.read(out) && !out.empty();
-  };
-
-  int frameId = 0;
-  MultiCamCalibrator previewCalib(2, cv::Size(board_w_, board_h_), square_);
-  while (true) {
-    cv::Mat a, b;
-    {
-      QMutexLocker lock(&sources_mutex_);
-      if (!readNext(sources_[idx[0]], a) || !readNext(sources_[idx[1]], b)) break;
-    }
-    CalibrationPair p;
-    p.frame_id = frameId;
-    p.left = a;
-    p.right = b;
-    calib_pairs_.push_back(std::move(p));
-
-    // Preview current frame and chessboard detection on the left viewer while scanning.
-    std::vector<cv::Mat> pair = {a, b};
-    std::vector<std::vector<cv::Point2f>> corners;
-    std::vector<bool> ok;
-    previewCalib.detectAndMaybeStore(pair, false, &corners, &ok);
-    cv::Mat visA = a.clone();
-    cv::Mat visB = b.clone();
-    if (!corners.empty() && corners.size() >= 2) {
-      cv::drawChessboardCorners(visA, cv::Size(board_w_, board_h_), corners[0], !ok.empty() && ok[0]);
-      cv::drawChessboardCorners(visB, cv::Size(board_w_, board_h_), corners[1], ok.size() > 1 && ok[1]);
-    }
-    {
-      QMutexLocker frameLock(&frames_mutex_);
-      if (idx[0] >= 0 && idx[0] < (int)last_frames_.size()) last_frames_[idx[0]] = visA;
-      if (idx[1] >= 0 && idx[1] < (int)last_frames_.size()) last_frames_[idx[1]] = visB;
-      updateSourceViews(last_frames_);
-    }
-
-    frameId++;
-
-    if (calibProgressBar_ && totalFrames > 0) calibProgressBar_->setValue(std::min(frameId, totalFrames));
-    play_frame_ = std::max<int64_t>(0, frameId - 1);
-    updateProgressUI(play_frame_, std::max<int64_t>(1, totalFrames));
-    if (lblCalibProgress_) lblCalibProgress_->setText(QString("Progress: scanning %1 / %2").arg(frameId).arg(std::max(totalFrames, frameId)));
-    QApplication::processEvents();
-  }
-
-  if (calib_pairs_.empty()) {
-    QMessageBox::warning(this, "Calibration", "No frame pairs found from the selected sources.");
+  if (!ensureImageLoaded(tr("applying the classifier"))) {
     return;
   }
-
-  if (calibErrorTable_) {
-    calibErrorTable_->setRowCount((int)calib_pairs_.size());
-    for (int i = 0; i < (int)calib_pairs_.size(); ++i) {
-      QTableWidgetItem* useItem = new QTableWidgetItem();
-      useItem->setCheckState(Qt::Checked);
-      useItem->setFlags(useItem->flags() | Qt::ItemIsUserCheckable);
-      calibErrorTable_->setItem(i, 0, useItem);
-      calibErrorTable_->setItem(i, 1, new QTableWidgetItem(QString::number(calib_pairs_[i].frame_id)));
-      calibErrorTable_->setItem(i, 2, new QTableWidgetItem("-"));
-    }
-  }
-
-  std::vector<int> selected;
-  selected.reserve(calib_pairs_.size());
-  for (int i = 0; i < (int)calib_pairs_.size(); ++i) selected.push_back(i);
-  if (!runCalibrationOnPairs(selected, true)) return;
-}
-
-bool MainWindow::runCalibrationOnPairs(const std::vector<int>& pairIndices, bool updateTable) {
-  if (pairIndices.empty()) {
-    QMessageBox::warning(this, "Calibration", "No frame selected for calibration.");
-    return false;
-  }
-
-  if (calibProgressBar_) {
-    calibProgressBar_->setRange(0, (int)pairIndices.size());
-    calibProgressBar_->setValue(0);
-  }
-  if (lblCalibProgress_) lblCalibProgress_->setText("Progress: detecting chessboard...");
-
-  MultiCamCalibrator workCalib(2, cv::Size(board_w_, board_h_), square_);
-  std::vector<cv::Size> sizes;
-  bool sizesSet = false;
-  int usedPairs = 0;
-  std::vector<int> acceptedPairIds;
-  for (int i = 0; i < (int)pairIndices.size(); ++i) {
-    int id = pairIndices[i];
-    if (id < 0 || id >= (int)calib_pairs_.size()) continue;
-    const auto& p = calib_pairs_[id];
-    std::vector<cv::Mat> pair = {p.left, p.right};
-    if (!sizesSet) {
-      sizes = {p.left.size(), p.right.size()};
-      sizesSet = true;
-    }
-    if (workCalib.detectAndMaybeStore(pair, true)) {
-      usedPairs++;
-      acceptedPairIds.push_back(id);
-    }
-    if (calibProgressBar_) calibProgressBar_->setValue(i + 1);
-    QApplication::processEvents();
-  }
-
-  if (usedPairs <= 0 || !sizesSet) {
-    QMessageBox::warning(this, "Calibration", "No valid chessboard pairs found in selected frames.");
-    return false;
-  }
-
-  if (lblCalibProgress_) lblCalibProgress_->setText("Progress: solving calibration...");
-  double rms=0.0;
-  std::vector<CameraModel> out;
-  if (!workCalib.calibrate(sizes, out, rms)) {
-    QMessageBox::warning(this, "Calibration", "Calibration failed. Ensure enough captures and paired frames with cam0.");
-    logLine("Calibration failed.");
-    return false;
-  }
-
-  std::vector<double> selectedRmse;
-  workCalib.computeFrameReprojErrors(out, selectedRmse);
-  calib_pair_rmse_.assign(calib_pairs_.size(), -1.0);
-  for (int i = 0; i < (int)acceptedPairIds.size() && i < (int)selectedRmse.size(); ++i) {
-    int id = acceptedPairIds[i];
-    if (id >= 0 && id < (int)calib_pair_rmse_.size()) calib_pair_rmse_[id] = selectedRmse[i];
-  }
-
-  if (updateTable && calibErrorTable_) {
-    for (int row = 0; row < calibErrorTable_->rowCount() && row < (int)calib_pair_rmse_.size(); ++row) {
-      const double e = calib_pair_rmse_[row];
-      calibErrorTable_->setItem(row, 2, new QTableWidgetItem(e >= 0.0 ? QString::number(e, 'f', 3) : "N/A"));
-    }
-  }
-
-  cams_ = out;
-  calib_loaded_ = true;
-  has_computed_calib_ = true;
-  if (btnSaveCalib_) btnSaveCalib_->setEnabled(true);
-  if (solveWorker_) solveWorker_->setStaticData(&cams_, &tag_corner_map_);
-  auto qualityText = [](double val)->QString {
-    if (val < 0.5) return "Excellent";
-    if (val < 1.0) return "Good";
-    if (val < 2.0) return "Fair";
-    return "Poor";
-  };
-  const QString quality = qualityText(rms);
-  if (lblCalibProgress_) {
-    lblCalibProgress_->setText(QString("Progress: done, mean RMS=%1 (%2)").arg(rms, 0, 'f', 4).arg(quality));
-  }
-  logLine(QString("Calibration OK. mean RMS=%1 (%2)").arg(rms, 0, 'f', 4).arg(quality));
-  return true;
-}
-
-void MainWindow::onRecomputeCalibrationSelected() {
-  if (calib_pairs_.empty() || !calibErrorTable_) {
-    QMessageBox::information(this, "Calibration", "Please run Compute Calibration first.");
+  if (!applyClassifierToImage(originalImage_, imagePath_, false)) {
+    QMessageBox::warning(this, tr("Apply failed"), tr("Failed to apply the classifier to the current image."));
     return;
   }
-
-  std::vector<int> selected;
-  for (int row = 0; row < calibErrorTable_->rowCount(); ++row) {
-    QTableWidgetItem* item = calibErrorTable_->item(row, 0);
-    if (item && item->checkState() == Qt::Checked) selected.push_back(row);
-  }
-  runCalibrationOnPairs(selected, true);
+  logMessage(tr("Applied classifier to the full current image."));
 }
 
-void MainWindow::onSaveCalibrationYaml() {
-  if (!has_computed_calib_ || cams_.empty()) {
-    QMessageBox::information(this, "Save", "Please compute calibration first.");
-    return;
-  }
-
-  QString savePath = QFileDialog::getSaveFileName(this, "Save rig_calib.yaml", "rig_calib.yaml", "YAML (*.yaml *.yml)");
-  if (savePath.isEmpty()) return;
-
-  calib_path_ = savePath;
-  if (lblYamlPath_) lblYamlPath_->setText(QString("Calib: %1").arg(calib_path_));
-  if (!saveRigCalibYaml(savePath.toStdString(), cams_)) {
-    QMessageBox::warning(this, "Save", "Failed to save YAML.");
-    return;
-  }
-  logLine(QString("Calibration YAML saved: %1").arg(savePath));
-  settings_.setValue("lastCalibYaml", savePath);
+void MainWindow::onToggleOverlay() {
+  showOverlay_ = !showOverlay_;
+  overlayCheck_->setChecked(showOverlay_);
+  updateViewer();
 }
 
-// ----------------- Tracking actions -----------------
-void MainWindow::onLoadTagMap() {
-  QString last = settings_.value("lastTagMap", "tag_corners_world.txt").toString();
-  QString path = QFileDialog::getOpenFileName(this, "Load tag map TXT", last, "Text (*.txt);;All (*.*)");
+void MainWindow::onCreateResult() {
+  if (!ensureImageLoaded(tr("creating the result")) || !ensureModelReady(tr("creating the result"))) {
+    return;
+  }
+  if (labelResult_.empty()) {
+    onApplyClassifier();
+    if (labelResult_.empty()) {
+      return;
+    }
+  }
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Segmentation result"));
+  dialog.resize(1200, 760);
+  auto* layout = new QHBoxLayout(&dialog);
+  auto* resultView = new SegmentationView(&dialog);
+  resultView->setPaintEnabled(false);
+  resultView->setToolMode(SegmentationView::PanTool);
+  resultView->setBaseImage(cvMatToQImage(originalImage_));
+  resultView->setOverlayImage(cvMatToQImage(SegmentationEngine::makeOverlay(originalImage_, labelResult_, classes_, overlayOpacity_, contourCheck_->isChecked())));
+  layout->addWidget(resultView);
+  dialog.exec();
+}
+
+void MainWindow::onGetProbability() {
+  if (!ensureImageLoaded(tr("getting probability")) || !ensureModelReady(tr("getting probability"))) {
+    return;
+  }
+  if (!model_.supportsProbability()) {
+    QMessageBox::information(this, tr("Probability unavailable"),
+                             tr("The current classifier does not expose probabilities for this view."));
+    return;
+  }
+  updateProbabilityView();
+  if (probabilityImage_.empty()) {
+    QMessageBox::information(this, tr("Probability unavailable"),
+                             tr("Probability output is not available for the current image/classifier combination."));
+    return;
+  }
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Probability map"));
+  dialog.resize(1180, 760);
+  auto* layout = new QHBoxLayout(&dialog);
+  auto* resultView = new SegmentationView(&dialog);
+  resultView->setPaintEnabled(false);
+  resultView->setToolMode(SegmentationView::PanTool);
+  resultView->setBaseImage(cvMatToQImage(probabilityImage_));
+  layout->addWidget(resultView);
+  dialog.exec();
+}
+
+void MainWindow::onPlotResult() {
+  if (!ensureImageLoaded(tr("plotting the result"))) {
+    return;
+  }
+  if (labelResult_.empty()) {
+    if (!ensureModelReady(tr("plotting the result"))) {
+      return;
+    }
+    onApplyClassifier();
+    if (labelResult_.empty()) {
+      return;
+    }
+  }
+  QVector<double> ticks(classes_.size()), values(classes_.size());
+  QVector<QString> labels(classes_.size());
+  for (int cls = 0; cls < static_cast<int>(classes_.size()); ++cls) {
+    cv::Mat mask = (labelResult_ == cls);
+    values[cls] = static_cast<double>(cv::countNonZero(mask));
+    ticks[cls] = cls + 1;
+    labels[cls] = classes_[cls].name;
+  }
+
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Result statistics"));
+  dialog.resize(960, 600);
+  auto* layout = new QVBoxLayout(&dialog);
+  auto* plot = new QCustomPlot(&dialog);
+  plot->addGraph();
+  plot->graph(0)->setLineStyle(QCPGraph::lsNone);
+  plot->graph(0)->setScatterStyle(QCPScatterStyle(QCPScatterStyle::ssCircle, 8));
+  plot->graph(0)->setData(ticks, values);
+  plot->xAxis->setAutoTicks(false);
+  plot->xAxis->setAutoTickLabels(false);
+  plot->xAxis->setTickVector(ticks);
+  plot->xAxis->setTickVectorLabels(labels);
+  plot->xAxis->setLabel(tr("Class"));
+  plot->yAxis->setLabel(tr("Pixel count"));
+  plot->rescaleAxes();
+  plot->replot();
+  layout->addWidget(plot);
+  dialog.exec();
+}
+
+void MainWindow::onSaveClassifier() {
+  if (!ensureModelReady(tr("saving the classifier"))) {
+    return;
+  }
+  const QString path = QFileDialog::getSaveFileName(this, tr("Save classifier"), QString(), tr("Classifier (*.yml *.yaml)"));
   if (path.isEmpty()) return;
-
-  tagmap_path_ = path;
-  tagmap_loaded_ = loadTagCornersTxt(path.toStdString(), tag_corner_map_);
-  if (lblTagPath_) lblTagPath_->setText(QString("TagMap: %1").arg(tagmap_path_));
-  if (!tagmap_loaded_) {
-    QMessageBox::warning(this, "Tag map", "Failed to load tag map TXT.");
-    logLine("Failed to load tag map.");
+  if (!model_.save(path, classes_, featureSettings_, classifierSettings_, trainingStats_)) {
+    QMessageBox::warning(this, tr("Save failed"), tr("Failed to save classifier."));
     return;
   }
-  settings_.setValue("lastTagMap", path);
-  logLine(QString("Loaded tag map: %1").arg(path));
+  logMessage(tr("Saved classifier to %1.").arg(path));
 }
 
-void MainWindow::onLoadCalibYaml() {
-  QString last = settings_.value("lastCalibYaml", "rig_calib.yaml").toString();
-  QString path = QFileDialog::getOpenFileName(this, "Load calibration YAML", last, "YAML (*.yaml *.yml);;All (*.*)");
+void MainWindow::onLoadClassifier() {
+  const QString path = QFileDialog::getOpenFileName(this, tr("Load classifier"), QString(), tr("Classifier (*.yml *.yaml)"));
   if (path.isEmpty()) return;
-
-  calib_path_ = path;
-  calib_loaded_ = loadRigCalibYaml(path.toStdString(), cams_);
-  if (lblYamlPath_) lblYamlPath_->setText(QString("Calib: %1").arg(calib_path_));
-  if (solveWorker_) solveWorker_->setStaticData(&cams_, &tag_corner_map_);
-  if (!calib_loaded_) {
-    QMessageBox::warning(this, "Calibration", "Failed to load calibration YAML.");
-    logLine("Failed to load calibration yaml.");
+  std::vector<SegmentationClassInfo> loadedClasses;
+  SegmentationFeatureSettings settings;
+  SegmentationClassifierSettings classifierSettings;
+  SegmentationTrainingStats stats;
+  SegmentationClassifier loadedModel;
+  if (!loadedModel.load(path, &loadedClasses, &settings, &classifierSettings, &stats)) {
+    QMessageBox::warning(this, tr("Load failed"), tr("Failed to load classifier."));
     return;
   }
-  settings_.setValue("lastCalibYaml", path);
-  logLine(QString("Loaded calib yaml: %1").arg(path));
+  model_ = loadedModel;
+  classes_ = loadedClasses;
+  featureSettings_ = settings;
+  classifierSettings_ = classifierSettings;
+  trainingStats_ = stats;
+  if (!originalImage_.empty()) {
+    clearAnnotationsForCurrentImage();
+    rebuildFeatureStack();
+    clearInferenceOutputs();
+  }
+  refreshClassList();
+  const int comboIndex = classifierCombo_->findData(classifierSettings_.kind);
+  if (comboIndex >= 0) classifierCombo_->setCurrentIndex(comboIndex);
+  updateUiState();
+  updateViewer();
+  logMessage(tr("Loaded classifier from %1.").arg(path));
 }
 
-//void MainWindow::onTogglePose(bool on) {
-//  pose_on_ = on;
-//  if (solveWorker_) solveWorker_->setParams(ransac_iters_, inlier_thresh_px_, tag_dict_id_, pose_on_);
-//  logLine(QString("Pose estimation %1").arg(on ? "ON" : "OFF"));
-//}
-
-void MainWindow::onDetectAllTrackingFrames() {
-  if (mode_ != TRACK) {
-    QMessageBox::information(this, "Tracking", "Switch to Tracking mode first.");
-    return;
-  }
-  if (!tagmap_loaded_) {
-    QMessageBox::warning(this, "Tracking", "Load Tag Map first.");
-    return;
-  }
-
-  std::vector<int> idx;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    for (int i = 0; i < (int)sources_.size(); ++i) {
-      if (sources_[i].mode_owner == (int)TRACK && !sources_[i].is_cam) idx.push_back(i);
-    }
-  }
-  if (idx.empty()) {
-    QMessageBox::warning(this, "Tracking", "No video/image-sequence sources found in Tracking mode.");
-    return;
-  }
-
-  stopCaptureBlocking();
-  detect_overlay_cache_.clear();
-
-  int totalFrames = 0;
-  {
-    QMutexLocker lock(&sources_mutex_);
-    auto frameCount = [&](const InputSource& s)->int {
-      if (s.is_image_seq) return s.seq_files.size();
-      if (!s.cap.isOpened()) return 0;
-      return std::max(0, (int)s.cap.get(cv::CAP_PROP_FRAME_COUNT));
-    };
-    totalFrames = INT_MAX;
-    for (int k : idx) {
-      if (sources_[k].is_image_seq) sources_[k].seq_idx = 0;
-      else if (sources_[k].cap.isOpened()) sources_[k].cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-      int c = frameCount(sources_[k]);
-      if (c > 0) totalFrames = std::min(totalFrames, c);
-    }
-    if (totalFrames == INT_MAX) totalFrames = 0;
-  }
-
-  if (calibProgressBar_) {
-    calibProgressBar_->setRange(0, totalFrames > 0 ? totalFrames : 0);
-    calibProgressBar_->setValue(0);
-  }
-  if (lblCalibProgress_) lblCalibProgress_->setText("Progress: tracking detect...");
-
-  auto readNext = [](InputSource& s, cv::Mat& out)->bool {
-    if (s.is_image_seq) {
-      if (s.seq_files.isEmpty() || s.seq_idx >= s.seq_files.size()) return false;
-      out = cv::imread(s.seq_files[s.seq_idx].toStdString(), cv::IMREAD_COLOR);
-      s.seq_idx++;
-      return !out.empty();
-    }
-    if (!s.cap.isOpened()) return false;
-    return s.cap.read(out) && !out.empty();
-  };
-
-  int processed = 0;
-  int framesWithDetections = 0;
-  int poseOkCount = 0;
-
-  while (true) {
-    std::vector<cv::Mat> frames(idx.size());
-    {
-      QMutexLocker lock(&sources_mutex_);
-      bool ok = true;
-      for (int i = 0; i < (int)idx.size(); ++i) {
-        if (!readNext(sources_[idx[i]], frames[i])) { ok = false; break; }
-      }
-      if (!ok) break;
-    }
-
-    std::vector<cv::Mat> vis = frames;
-    AprilTagDetections det;
-    std::vector<Observation> obs;
-    buildObservationsFromFrames(frames, tag_corner_map_, obs, &det, tag_dict_id_);
-
-    bool hasDet = false;
-    for (int i = 0; i < (int)vis.size(); ++i) {
-      if (i < (int)det.ids_per_cam.size() && !det.ids_per_cam[i].empty()) hasDet = true;
-      if (i < (int)det.ids_per_cam.size()) {
-        cv::aruco::drawDetectedMarkers(vis[i], det.corners_per_cam[i], det.ids_per_cam[i]);
-      }
-      cv::putText(vis[i], "cam" + std::to_string(i), cv::Point(15,30),
-                  cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0,255,0), 2, cv::LINE_AA);
-    }
-    if (hasDet) framesWithDetections++;
-
-    if ((int)cams_.size() == (int)frames.size() && obs.size() >= 3) {
-      auto res = estimatePoseRansac(cams_, obs, R_wr_, t_wr_, ransac_iters_, inlier_thresh_px_);
-      if (res.ok) {
-        R_wr_ = res.R_wr;
-        t_wr_ = res.t_wr;
-        Eigen::AngleAxisd aa(res.R_wr);
-        Eigen::Vector3d aavec = aa.axis() * aa.angle();
-        last_inliers_ = (int)res.inliers.size();
-        traj_.push_back(TrajRow{QDateTime::currentMSecsSinceEpoch(), t_wr_, aavec, last_inliers_});
-        poseOkCount++;
-        if (lblPose_) {
-          lblPose_->setText(QString("Pose t=[%1, %2, %3], aa=[%4, %5, %6], inliers=%7")
-                            .arg(t_wr_.x(),0,'f',4).arg(t_wr_.y(),0,'f',4).arg(t_wr_.z(),0,'f',4)
-                            .arg(aavec.x(),0,'f',4).arg(aavec.y(),0,'f',4).arg(aavec.z(),0,'f',4)
-                            .arg(last_inliers_));
-        }
-      }
-    }
-
-    for (int i = 0; i < (int)idx.size(); ++i) {
-      detect_overlay_cache_[idx[i]][processed] = vis[i];
-    }
-
-    std::vector<cv::Mat> uiFrames;
-    {
-      QMutexLocker frameLock(&frames_mutex_);
-      if ((int)last_frames_.size() < (int)sources_.size()) last_frames_.resize(sources_.size());
-      for (int i = 0; i < (int)idx.size(); ++i) last_frames_[idx[i]] = vis[i];
-      uiFrames = last_frames_;
-    }
-    updateSourceViews(uiFrames);
-    refreshTrajectoryPlot();
-
-    processed++;
-    if (calibProgressBar_) calibProgressBar_->setValue(processed);
-    if (lblCalibProgress_) {
-      lblCalibProgress_->setText(QString("Progress: tracking detect %1 / %2 | det=%3 | pose=%4")
-                                 .arg(processed)
-                                 .arg(std::max(processed, totalFrames))
-                                 .arg(framesWithDetections)
-                                 .arg(poseOkCount));
-    }
-    QApplication::processEvents();
-  }
-
-  logLine(QString("Detect All finished. processed=%1 detFrames=%2 poseOK=%3")
-          .arg(processed).arg(framesWithDetections).arg(poseOkCount));
-}
-
-// ----------------- Sources: pause/resume -----------------
-void MainWindow::onPauseResumeSelected() {
-  bool toEnable = true;
-  {
-    QMutexLocker locker(&sources_mutex_);
-    if ((int)source_enabled_.size() != (int)sources_.size()) source_enabled_.assign(sources_.size(), true);
-    bool anyPaused = false;
-    for (bool en : source_enabled_) if (!en) { anyPaused = true; break; }
-    toEnable = anyPaused;
-    for (int i=0;i<(int)source_enabled_.size();++i) source_enabled_[i] = toEnable;
-  }
-  logLine(QString("All sources %1").arg(toEnable ? "RESUMED" : "PAUSED"));
-  refreshSourceList();
-}
-
-// ----------------- Tracking: export trajectory -----------------
-void MainWindow::onExportTrajectory() {
-  if (traj_.empty()) {
-    QMessageBox::information(this, "Export", "No trajectory collected yet. Turn Pose ON and ensure tags are detected.");
-    return;
-  }
-  QString path = QFileDialog::getSaveFileName(this, "Export Trajectory CSV", "trajectory.csv", "CSV (*.csv)");
-  if (path.isEmpty()) return;
-
-  QFile f(path);
-  if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-    QMessageBox::warning(this, "Export", "Failed to open file for writing.");
-    return;
-  }
-  QByteArray header = "t_ms,tx,ty,tz,aax,aay,aaz,inliers\n";
-  f.write(header);
-  for (const auto& r : traj_) {
-    QString line = QString("%1,%2,%3,%4,%5,%6,%7,%8\n")
-      .arg(r.t_ms)
-      .arg(r.t.x(),0,'f',9).arg(r.t.y(),0,'f',9).arg(r.t.z(),0,'f',9)
-      .arg(r.aa.x(),0,'f',9).arg(r.aa.y(),0,'f',9).arg(r.aa.z(),0,'f',9)
-      .arg(r.inliers);
-    f.write(line.toUtf8());
-  }
-  f.close();
-  logLine(QString("Trajectory exported: %1 (rows=%2)").arg(path).arg(traj_.size()));
-}
-
-// ----------------- Project config: save/load -----------------
-void MainWindow::onSaveProject() {
-  QString path = QFileDialog::getSaveFileName(this, "Save Project Config", "project.json", "JSON (*.json)");
-  if (path.isEmpty()) return;
-
-  QJsonObject o = toProjectJson();
-  QJsonDocument doc(o);
-
-  QFile f(path);
-  if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-    QMessageBox::warning(this, "Save Project", "Failed to write project file.");
-    return;
-  }
-  f.write(doc.toJson(QJsonDocument::Indented));
-  f.close();
-  logLine(QString("Project saved: %1").arg(path));
-}
-
-void MainWindow::onLoadProject() {
-  QString path = QFileDialog::getOpenFileName(this, "Load Project Config", "", "JSON (*.json)");
-  if (path.isEmpty()) return;
-
-  QFile f(path);
-  if (!f.open(QIODevice::ReadOnly)) {
-    QMessageBox::warning(this, "Load Project", "Failed to open project file.");
-    return;
-  }
-  QByteArray data = f.readAll();
-  f.close();
-
-  QJsonParseError err;
-  QJsonDocument doc = QJsonDocument::fromJson(data, &err);
-  if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-    QMessageBox::warning(this, "Load Project", "Invalid JSON.");
-    return;
-  }
-  fromProjectJson(doc.object());
-  logLine(QString("Project loaded: %1").arg(path));
-}
-
-
-void MainWindow::onFramesFromWorker(FramePack frames, qint64 capture_ts_ms) {
-  last_capture_ts_ms_ = capture_ts_ms;
-  {
-    QMutexLocker locker(&frames_mutex_);
-    last_frames_ = std::move(frames); // cv::Mat ref-counted
-  }
-
-  int64_t framePos = play_frame_;
-  int64_t frameEnd = play_end_frame_;
-  {
-    QMutexLocker srcLock(&sources_mutex_);
-    for (const auto& s : sources_) {
-      if (s.is_cam || s.mode_owner!=(int)mode_) continue;
-      if (s.is_image_seq) {
-        framePos = std::max<int64_t>(0, s.seq_idx);
-        if (frameEnd <= 0) frameEnd = (int64_t)s.seq_files.size();
-        break;
-      }
-      if (!s.cap.isOpened()) continue;
-      framePos = std::max<int64_t>(0, (int64_t)std::llround(s.cap.get(cv::CAP_PROP_POS_FRAMES)) - 1);
-      double fc = s.cap.get(cv::CAP_PROP_FRAME_COUNT);
-      if (frameEnd <= 0 && fc > 0) frameEnd = (int64_t)fc;
-      break;
-    }
-  }
-  play_frame_ = framePos;
-  if (play_end_frame_ <= 0 && frameEnd > 0) play_end_frame_ = frameEnd;
-  updateProgressUI(play_frame_, play_end_frame_);
-
-  // forward to solver thread (queued)
-  if (solveWorker_) {
-    // handled via signal/slot wiring in constructor
+void MainWindow::onSaveData() {
+  const QString path = QFileDialog::getSaveFileName(this, tr("Save training data"), QString(), tr("Training data (*.json)"));
+  if (!path.isEmpty() && !saveTrainingData(path)) {
+    QMessageBox::warning(this, tr("Save failed"), tr("Failed to save training data."));
   }
 }
 
-void MainWindow::onAddVisualizationChart() {
-  if (!visChartsLayout_) return;
-
-  QVector<int> comps;
-  QString ylabel;
-  if (!chooseVisualizationDataTypes(comps, ylabel)) return;
-
-  QCustomPlot* plot = new QCustomPlot(actionTabs_);
-  plot->setMinimumHeight(160);
-  plot->setStyleSheet("background:#1d232b;border:1px solid #3a4250;color:#9fb0c4;");
-  plot->xAxis->setLabel("t");
-  plot->yAxis->setLabel(ylabel);
-  for (int i=0;i<comps.size()+1;++i) plot->addGraph();
-  plot->legend->setVisible(false);
-  plot->setContextMenuPolicy(Qt::CustomContextMenu);
-  connect(plot, &QWidget::customContextMenuRequested, this, &MainWindow::onVisualizationPlotContextMenu);
-
-  QComboBox* selector = new QComboBox(actionTabs_);
-  selector->addItem(QString::fromUtf8("all"));
-  selector->setToolTip(QString::fromUtf8("choose graph to show"));
-  connect(selector, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int){ refreshTrajectoryPlot(); });
-
-  int insertAt = std::max(1, visChartsLayout_->count()-1);
-  visChartsLayout_->insertWidget(insertAt, selector);
-  visChartsLayout_->insertWidget(insertAt+1, plot);
-  visCharts_.push_back({plot, selector, comps, ylabel, true});
-  refreshTrajectoryPlot();
-}
-
-bool MainWindow::chooseVisualizationDataTypes(QVector<int>& components, QString& labelOut) {
-  QDialog dlg(this);
-  dlg.setWindowTitle(QString::fromUtf8("choose data type"));
-  QVBoxLayout* layout = new QVBoxLayout(&dlg);
-
-  QCheckBox* c[6];
-  const QString names[6] = {"x", "y", "z", "aa_x", "aa_y", "aa_z"};
-  for (int i=0;i<6;++i) {
-    c[i] = new QCheckBox(names[i], &dlg);
-    if (i < 3) c[i]->setChecked(true);
-    layout->addWidget(c[i]);
-  }
-
-  QDialogButtonBox* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-  connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-  connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-  layout->addWidget(box);
-
-  if (dlg.exec() != QDialog::Accepted) return false;
-
-  components.clear();
-  QStringList labels;
-  for (int i=0;i<6;++i) {
-    if (c[i]->isChecked()) {
-      components.push_back(i);
-      labels << names[i];
-    }
-  }
-  if (components.isEmpty()) return false;
-
-  labelOut = labels.join("/");
-  return true;
-}
-
-void MainWindow::onVisualizationPlotContextMenu(const QPoint& pos) {
-  auto* plot = qobject_cast<QCustomPlot*>(sender());
-  if (!plot) return;
-
-  int idx = -1;
-  for (int i=0;i<(int)visCharts_.size(); ++i) {
-    if (visCharts_[i].plot == plot) { idx = i; break; }
-  }
-  if (idx < 0) return;
-
-  QMenu menu(this);
-  QAction* actSelect = menu.addAction(QString::fromUtf8("选择数据类型"));
-  QAction* actRemove = nullptr;
-  if (visCharts_[idx].removable) {
-    actRemove = menu.addAction(QString::fromUtf8("删除图表"));
-  }
-
-  QAction* picked = menu.exec(plot->mapToGlobal(pos));
-  if (!picked) return;
-
-  if (picked == actSelect) {
-    QVector<int> comps;
-    QString ylabel;
-    if (!chooseVisualizationDataTypes(comps, ylabel)) return;
-    visCharts_[idx].components = comps;
-    visCharts_[idx].yLabel = ylabel;
-    plot->yAxis->setLabel(ylabel);
-
-    while (plot->graphCount() > comps.size()+1) plot->removeGraph(plot->graphCount()-1);
-    while (plot->graphCount() < comps.size()+1) plot->addGraph();
-    refreshTrajectoryPlot();
-    return;
-  }
-
-  if (actRemove && picked == actRemove) {
-    QCustomPlot* p = visCharts_[idx].plot;
-    QComboBox* s = visCharts_[idx].selector;
-    visCharts_.erase(visCharts_.begin() + idx);
-    if (visChartsLayout_) {
-      if (s) visChartsLayout_->removeWidget(s);
-      visChartsLayout_->removeWidget(p);
-    }
-    if (s) s->deleteLater();
-    p->deleteLater();
-    refreshTrajectoryPlot();
+void MainWindow::onLoadData() {
+  const QString path = QFileDialog::getOpenFileName(this, tr("Load training data"), QString(), tr("Training data (*.json)"));
+  if (!path.isEmpty() && !loadTrainingData(path)) {
+    QMessageBox::warning(this, tr("Load failed"), tr("Failed to load training data."));
   }
 }
 
-void MainWindow::refreshTrajectoryPlot() {
-  if (visCharts_.empty()) return;
-
-  static const QString kNames[6] = {"x", "y", "z", "aa_x", "aa_y", "aa_z"};
-  static const QColor kColors[6] = {
-    QColor(255,99,132), QColor(80,220,255), QColor(120,220,120),
-    QColor(255,179,71), QColor(186,104,200), QColor(121,134,203)
-  };
-
-  auto currentTrajIndex = [this]() -> int {
-    if (traj_.empty()) return -1;
-    if (play_end_frame_ > 1) {
-      double r = double(std::max<int64_t>(0, play_frame_)) / double(play_end_frame_ - 1);
-      int idx = (int)std::llround(r * double(std::max(0, (int)traj_.size() - 1)));
-      return std::max(0, std::min((int)traj_.size() - 1, idx));
-    }
-    return (int)traj_.size() - 1;
-  };
-
-  auto getComp = [&](const TrajRow& row, int comp) {
-    switch (comp) {
-      case 0: return row.t.x();
-      case 1: return row.t.y();
-      case 2: return row.t.z();
-      case 3: return row.aa.x();
-      case 4: return row.aa.y();
-      default: return row.aa.z();
-    }
-  };
-
-  for (auto& cfg : visCharts_) {
-    QCustomPlot* plot = cfg.plot;
-    if (!plot) continue;
-    const int nSeries = cfg.components.size();
-    if (nSeries <= 0) continue;
-
-    while (plot->graphCount() > nSeries + 1) plot->removeGraph(plot->graphCount()-1);
-    while (plot->graphCount() < nSeries + 1) plot->addGraph();
-
-    if (traj_.size() < 2) {
-      for (int g=0; g<plot->graphCount(); ++g) plot->graph(g)->setData({}, {});
-      plot->replot();
-      continue;
-    }
-
-    QVector<double> xs((int)traj_.size());
-    for (int i=0;i<(int)traj_.size();++i) xs[i] = i;
-
-    double yMin = 1e18, yMax = -1e18;
-    for (int g=0; g<nSeries; ++g) {
-      int comp = cfg.components[g];
-      QVector<double> ys((int)traj_.size());
-      for (int i=0;i<(int)traj_.size(); ++i) {
-        ys[i] = getComp(traj_[i], comp);
-        yMin = std::min(yMin, ys[i]);
-        yMax = std::max(yMax, ys[i]);
-      }
-      plot->graph(g)->setData(xs, ys);
-      plot->graph(g)->setPen(QPen(kColors[comp], 1.8));
-      plot->graph(g)->setName(kNames[comp]);
-    }
-    if (yMax - yMin < 1e-12) { yMax += 1.0; yMin -= 1.0; }
-
-    plot->xAxis->setRange(0, std::max(1, (int)traj_.size()-1));
-    plot->yAxis->setRange(yMin, yMax);
-
-    const int curIdx = currentTrajIndex();
-    const int cursorGraph = nSeries;
-    if (curIdx >= 0 && curIdx < (int)traj_.size()) {
-      QVector<double> cx(2), cy(2);
-      cx[0] = curIdx; cx[1] = curIdx;
-      cy[0] = yMin;   cy[1] = yMax;
-      plot->graph(cursorGraph)->setData(cx, cy);
-      plot->graph(cursorGraph)->setPen(QPen(QColor(255,70,70), 1.2));
-
-      QStringList vals;
-      vals << QString("t=%1").arg(curIdx);
-      for (int g=0; g<nSeries; ++g) {
-        int comp = cfg.components[g];
-        vals << QString("%1=%2").arg(kNames[comp]).arg(getComp(traj_[curIdx], comp), 0, 'f', 3);
-      }
-      plot->graph(cursorGraph)->setName(vals.join(" | "));
-    } else {
-      plot->graph(cursorGraph)->setData({}, {});
-      plot->graph(cursorGraph)->setName("cursor");
-    }
-
-    if (cfg.selector) {
-      QStringList options;
-      options << QString::fromUtf8("全部");
-      for (int g=0; g<nSeries; ++g) {
-        options << kNames[cfg.components[g]];
-      }
-      const int keepIndex = std::max(0, std::min(cfg.selector->currentIndex(), options.size()-1));
-      cfg.selector->blockSignals(true);
-      cfg.selector->clear();
-      cfg.selector->addItems(options);
-      cfg.selector->setCurrentIndex(keepIndex);
-      cfg.selector->blockSignals(false);
-
-      const int sel = cfg.selector->currentIndex();
-      for (int g=0; g<nSeries; ++g) {
-        const bool visible = (sel == 0) || (sel == g+1);
-        plot->graph(g)->setVisible(visible);
-      }
-    }
-
-    plot->graph(cursorGraph)->setVisible(true);
-    plot->legend->setVisible(false);
-    plot->replot();
-  }
-}
-
-void MainWindow::onPoseFromWorker(const PoseResult& r) {
-  if (r.ok) {
-    t_wr_ = Eigen::Vector3d(r.t[0], r.t[1], r.t[2]);
-    Eigen::Vector3d aavec(r.aa[0], r.aa[1], r.aa[2]);
-    double angle = aavec.norm();
-    Eigen::Vector3d axis = (angle < 1e-12) ? Eigen::Vector3d(1,0,0) : (aavec/angle);
-    R_wr_ = Eigen::AngleAxisd(angle, axis).toRotationMatrix();
-    last_inliers_ = r.inliers;
-    traj_.push_back(TrajRow{ r.solve_ts_ms, t_wr_, aavec, r.inliers });
-  }
-  if (lblLatency_) lblLatency_->setText(QString("Latency: %1 ms (obs=%2)")
-                                       .arg(r.latency_ms,0,'f',1).arg(r.obs_count));
-  if (lblPose_) {
-    if (r.ok) {
-      lblPose_->setText(QString("Pose t=[%1, %2, %3], aa=[%4, %5, %6], inliers=%7")
-                        .arg(r.t[0],0,'f',4).arg(r.t[1],0,'f',4).arg(r.t[2],0,'f',4)
-                        .arg(r.aa[0],0,'f',4).arg(r.aa[1],0,'f',4).arg(r.aa[2],0,'f',4)
-                        .arg(r.inliers));
-    } else {
-      lblPose_->setText("Pose: no valid solution");
-    }
-  }
-  refreshTrajectoryPlot();
-}
-
-void MainWindow::rebuildSourceDocks() {
-  // Remove existing docks
-  for (auto* d : camDocks_) {
-    if (d) { removeDockWidget(d); d->deleteLater(); }
-  }
-  camDocks_.clear();
-  camLabels_.clear();
-
-  for (int i=0;i<(int)sources_.size();++i) {
-    QDockWidget* d = new QDockWidget(QString("View %1").arg(i), this);
-    d->setAllowedAreas(Qt::AllDockWidgetAreas);
-    QLabel* lab = new QLabel(d);
-    lab->setAlignment(Qt::AlignCenter);
-    lab->setMinimumSize(320, 240);
-    lab->setStyleSheet("background-color: #111; border: 1px solid #333;");
-    d->setWidget(lab);
-    addDockWidget(Qt::BottomDockWidgetArea, d);
-    camDocks_.push_back(d);
-    camLabels_.push_back(lab);
-  }
-}
-
-void MainWindow::updateSourceDocks(const std::vector<cv::Mat>& frames) {
-  if ((int)camLabels_.size() != (int)frames.size()) return;
-  for (int i=0;i<(int)frames.size();++i) {
-    if (!camLabels_[i]) continue;
-    if (frames[i].empty()) continue;
-    QImage img = matToQImage(frames[i]);
-    camLabels_[i]->setPixmap(QPixmap::fromImage(img).scaled(
-      camLabels_[i]->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-  }
-}
-
-void MainWindow::onSaveLayout() {
-  settings_.setValue("mainWindow/geometry", saveGeometry());
-  settings_.setValue("mainWindow/state", saveState());
-  logLine("Layout saved to settings.");
-}
-
-void MainWindow::onRestoreLayout() {
-  if (settings_.contains("mainWindow/geometry")) restoreGeometry(settings_.value("mainWindow/geometry").toByteArray());
-  if (settings_.contains("mainWindow/state")) restoreState(settings_.value("mainWindow/state").toByteArray());
-  logLine("Layout restored from settings.");
-}
-
-void MainWindow::onToggleDocks(bool on) {
-  show_docks_ = on;
-  if (show_docks_) {
-    rebuildSourceDocks();
-    logLine("Per-source docks: ON");
-  } else {
-    // remove existing docks
-    for (auto* d : camDocks_) {
-      if (d) { removeDockWidget(d); d->deleteLater(); }
-    }
-    camDocks_.clear();
-    camLabels_.clear();
-    logLine("Per-source docks: OFF");
-  }
-}
-
-
-int MainWindow::videoSourceCount() const {
-  int c=0;
-  for (const auto& s : sources_) if (!s.is_cam && s.mode_owner==(int)mode_) c++;
-  return c;
-}
-
-void MainWindow::stopCaptureBlocking() {
-  if (!captureWorker_) return;
-  // BlockingQueuedConnection ensures timer stops before returning
-  QMetaObject::invokeMethod(captureWorker_, "stop", Qt::BlockingQueuedConnection);
-}
-
-void MainWindow::updatePlaybackParams() {
-  if (!captureWorker_) return;
-  int vidN = videoSourceCount();
-  bool sync = sync_play_ && (vidN >= 2); // only meaningful with >=2 videos
-  QMetaObject::invokeMethod(captureWorker_, "setSyncModeSlot", Qt::BlockingQueuedConnection, Q_ARG(bool, sync));
-
-  // compute range and fps for sync video playback
-  if (sync) {
-    int64_t minFrames = (int64_t)9e18;
-    double fps = 0.0;
-    bool found=false;
-    QMutexLocker srcLock(&sources_mutex_);
-    for (auto& s : sources_) {
-      if (s.is_cam || s.mode_owner!=(int)mode_) continue;
-      if (s.is_image_seq) {
-        int64_t fc = (int64_t)s.seq_files.size();
-        if (fc > 0) { minFrames = std::min(minFrames, fc); found = true; }
-        if (fps <= 0.0) fps = 30.0;
-        continue;
-      }
-      if (!s.cap.isOpened()) continue;
-      double fc = s.cap.get(cv::CAP_PROP_FRAME_COUNT);
-      if (fc > 0) { minFrames = std::min(minFrames, (int64_t)fc); found=true; }
-      if (fps <= 0.0) {
-        double vf = s.cap.get(cv::CAP_PROP_FPS);
-        if (vf > 0.0) fps = vf;
-      }
-    }
-    if (!found || minFrames <= 0) {
-      minFrames = 0;
-    }
-    play_end_frame_ = minFrames;
-    play_fps_ = (fps > 0.0 ? fps : 30.0);
-    QMetaObject::invokeMethod(captureWorker_, "setPlaybackRangeSlot", Qt::BlockingQueuedConnection,
-                              Q_ARG(qint64, (qint64)0), Q_ARG(qint64, (qint64)play_end_frame_), Q_ARG(double, play_fps_));
-  } else {
-    int64_t maxFrames = 0;
-    QMutexLocker srcLock(&sources_mutex_);
-    for (const auto& s : sources_) {
-      if (s.is_cam || s.mode_owner!=(int)mode_) continue;
-      if (s.is_image_seq) {
-        maxFrames = std::max<int64_t>(maxFrames, (int64_t)s.seq_files.size());
-        continue;
-      }
-      if (!s.cap.isOpened()) continue;
-      double fc = s.cap.get(cv::CAP_PROP_FRAME_COUNT);
-      if (fc > 0) maxFrames = std::max<int64_t>(maxFrames, (int64_t)fc);
-    }
-    play_end_frame_ = maxFrames;
-  }
-  updateProgressUI(play_frame_, play_end_frame_);
-}
-
-
-void MainWindow::updateProgressUI(int64_t frame, int64_t endFrame) {
-  if (!progressSlider_) return;
-  int maxVal = (int)std::max<int64_t>(0, endFrame > 0 ? (endFrame - 1) : 0);
-  int val = (int)std::max<int64_t>(0, std::min<int64_t>(frame, maxVal));
-  progressSlider_->setRange(0, maxVal);
-  progressSlider_->blockSignals(true);
-  progressSlider_->setValue(val);
-  progressSlider_->blockSignals(false);
-  if (editCurFrame_) editCurFrame_->setText(QString::number(val));
-  if (lblTotalFrame_) lblTotalFrame_->setText(QString("/ %1").arg(maxVal));
-  refreshTrajectoryPlot();
-}
-
-
-void MainWindow::stepAllVideos(int delta) {
-  updatePlaybackParams();
-  stopCaptureBlocking();
-  playback_running_ = false;
-  bool stepped = false;
-  int64_t progressFrame = play_frame_;
-  int64_t desiredFrame = std::max<int64_t>(0, play_frame_ + delta);
-  if (play_end_frame_ > 0) desiredFrame = std::min<int64_t>(desiredFrame, play_end_frame_-1);
-  std::vector<cv::Mat> steppedFrames;
-
-  {
-    QMutexLocker srcLock(&sources_mutex_);
-    steppedFrames.resize(sources_.size());
-    for (int i=0;i<(int)sources_.size();++i) {
-      auto& src = sources_[i];
-      if (src.is_cam || src.mode_owner!=(int)mode_) continue;
-      cv::Mat f;
-      int64_t target = desiredFrame;
-      if (src.is_image_seq) {
-        if (src.seq_files.isEmpty()) continue;
-        target = std::max<int64_t>(0, std::min<int64_t>(target, (int64_t)src.seq_files.size()-1));
-        src.seq_idx = (int)target;
-        f = cv::imread(src.seq_files[(int)target].toStdString(), cv::IMREAD_COLOR);
-      } else {
-        if (!src.cap.isOpened()) continue;
-        if (play_end_frame_ <= 0) {
-          double cnt = src.cap.get(cv::CAP_PROP_FRAME_COUNT);
-          if (cnt > 0) target = std::min<int64_t>(target, std::max<int64_t>(0, (int64_t)std::llround(cnt)-1));
-        }
-        src.cap.set(cv::CAP_PROP_POS_FRAMES, (double)target);
-        src.cap.read(f);
-      }
-      if (!f.empty()) {
-        // If Detect-All generated a visualized frame for this source/frame, reuse it
-        // so marker overlays remain persistent when stepping prev/next.
-        auto srcIt = detect_overlay_cache_.find(i);
-        if (srcIt != detect_overlay_cache_.end()) {
-          auto frameIt = srcIt->second.find(target);
-          if (frameIt != srcIt->second.end() && !frameIt->second.empty()) {
-            f = frameIt->second;
-          }
-        }
-        steppedFrames[i] = f;
-        progressFrame = target;
-        stepped = true;
-      }
-    }
-  }
-
-  if (stepped) {
-    std::vector<cv::Mat> uiFrames;
-    {
-      QMutexLocker frameLock(&frames_mutex_);
-      if ((int)last_frames_.size() != (int)steppedFrames.size()) last_frames_.resize(steppedFrames.size());
-      for (int i=0;i<(int)steppedFrames.size();++i) {
-        if (!steppedFrames[i].empty()) last_frames_[i] = steppedFrames[i];
-      }
-      uiFrames = last_frames_;
-    }
-    play_frame_ = progressFrame;
-    updateProgressUI(play_frame_, play_end_frame_);
-    updateSourceViews(uiFrames);
-    if (show_docks_) updateSourceDocks(uiFrames);
-    updateStatus();
-    logLine(QString("Step frame: %1").arg(delta > 0 ? "next" : "prev"));
-  } else {
-    logLine("Step frame ignored: no video source ready.");
-  }
-}
-
-void MainWindow::onStepPrevFrame() { stepAllVideos(-1); }
-void MainWindow::onStepNextFrame() { stepAllVideos(1); }
-
-void MainWindow::onToolPan() {
-  if (btnToolPan_) btnToolPan_->setChecked(true);
-  if (btnToolPoint_) btnToolPoint_->setChecked(false);
-  if (btnToolLine_) btnToolLine_->setChecked(false);
-  for (auto* v : sourceViews_) if (v) v->setToolMode(ImageViewer::PanTool);
-}
-
-void MainWindow::onToolPoint() {
-  if (btnToolPan_) btnToolPan_->setChecked(false);
-  if (btnToolPoint_) btnToolPoint_->setChecked(true);
-  if (btnToolLine_) btnToolLine_->setChecked(false);
-  for (auto* v : sourceViews_) if (v) v->setToolMode(ImageViewer::PointTool);
-}
-
-void MainWindow::onToolLine() {
-  if (btnToolPan_) btnToolPan_->setChecked(false);
-  if (btnToolPoint_) btnToolPoint_->setChecked(false);
-  if (btnToolLine_) btnToolLine_->setChecked(true);
-  for (auto* v : sourceViews_) if (v) v->setToolMode(ImageViewer::LineTool);
-}
-
-void MainWindow::onZoomIn() { for (auto* v : sourceViews_) if (v) v->zoomIn(); }
-void MainWindow::onZoomOut() { for (auto* v : sourceViews_) if (v) v->zoomOut(); }
-void MainWindow::onResetView() { for (auto* v : sourceViews_) if (v) v->resetView(); }
-void MainWindow::onClearAnnotations() { for (auto* v : sourceViews_) if (v) v->clearAnnotations(); }
-
-void MainWindow::onProgressSliderReleased() {
-  if (!progressSlider_) return;
-  int target = progressSlider_->value();
-  {
-    QMutexLocker srcLock(&sources_mutex_);
-    for (auto& src : sources_) {
-      if (src.is_cam || src.mode_owner!=(int)mode_) continue;
-      if (src.is_image_seq) {
-        if (!src.seq_files.isEmpty()) src.seq_idx = std::max(0, std::min(target, (int)src.seq_files.size()-1));
-        continue;
-      }
-      if (!src.cap.isOpened()) continue;
-      src.cap.set(cv::CAP_PROP_POS_FRAMES, (double)target);
-    }
-  }
-  play_frame_ = target;
-  stepAllVideos(0);
-}
-
-void MainWindow::onFrameJumpReturnPressed() {
-  if (!editCurFrame_ || !progressSlider_) return;
+void MainWindow::onCreateNewClass() {
   bool ok = false;
-  int target = editCurFrame_->text().toInt(&ok);
-  if (!ok) return;
-  target = std::max(progressSlider_->minimum(), std::min(progressSlider_->maximum(), target));
-  progressSlider_->setValue(target);
-  onProgressSliderReleased();
-}
-
-void MainWindow::onPlayAll() {
-  if (playback_running_) {
-    playback_running_ = false;
-    stopCaptureBlocking();
-    {
-      QMutexLocker srcLock(&sources_mutex_);
-      for (int i=0;i<(int)sources_.size();++i) {
-        if (!sources_[i].is_cam && sources_[i].mode_owner==(int)mode_) source_enabled_[i] = false;
-      }
-    }
-    if (btnPlayAll_) {
-      btnPlayAll_->setChecked(false);
-      btnPlayAll_->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
-      btnPlayAll_->setToolTip("Play");
-    }
-    logLine("Playback paused.");
-    refreshSourceList();
+  const QString name = QInputDialog::getText(this, tr("Create class"), tr("Class name"), QLineEdit::Normal,
+                                             tr("Class %1").arg(classes_.size() + 1), &ok);
+  if (!ok || name.trimmed().isEmpty()) {
     return;
   }
-
-  // Start playback when user presses Play.
-  int vidN = videoSourceCount();
-  if (vidN < 1) {
-    QMessageBox::information(this, "Play", "Need at least 1 video/image source in current tab.");
+  const QColor color = QColorDialog::getColor(defaultColorForIndex(classes_.size()), this, tr("Choose class color"));
+  if (!color.isValid()) {
     return;
   }
-
-  stopCaptureBlocking();
-
-  {
-    QMutexLocker srcLock(&sources_mutex_);
-    // Enable all video sources for playback
-    for (int i=0;i<(int)sources_.size();++i) if (!sources_[i].is_cam && sources_[i].mode_owner==(int)mode_) source_enabled_[i]=true;
-
+  classes_.push_back({name.trimmed(), color, true});
+  if (!originalImage_.empty()) {
+    classMasks_.push_back(cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)));
+    classBrushMasks_.push_back(cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)));
+    classTracePolygons_.push_back({});
   }
-  playback_running_ = true;
-  if (btnPlayAll_) {
-    btnPlayAll_->setChecked(true);
-    btnPlayAll_->setIcon(style()->standardIcon(QStyle::SP_MediaPause));
-    btnPlayAll_->setToolTip("Pause");
-  }
-  updateProgressUI(play_frame_, play_end_frame_);
-  //if (lblPlayState_) 
-  //    lblPlayState_->setText("State: PLAY (SYNC)");
-
-  updatePlaybackParams();
-  timer_.start(33);
-  QMetaObject::invokeMethod(captureWorker_, "start", Qt::QueuedConnection);
+  model_.clear();
+  trainingStats_ = {};
+  clearInferenceOutputs();
+  refreshClassList();
+  updateTraceLists();
+  rebuildMasksFromAnnotations();
+  updateViewer();
+  logMessage(tr("Added class %1.").arg(name.trimmed()));
 }
 
-void MainWindow::onStopAll() {
-  playback_running_ = false;
-  if (btnPlayAll_) {
-    btnPlayAll_->setChecked(false);
-    btnPlayAll_->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
-    btnPlayAll_->setToolTip("Play");
+void MainWindow::onSettings() {
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Feature and classifier settings"));
+  auto* layout = new QVBoxLayout(&dialog);
+  auto* featureGroup = new QGroupBox(tr("Feature extraction"), &dialog);
+  auto* featureLayout = new QVBoxLayout(featureGroup);
+  auto* intensity = new QCheckBox(tr("Intensity"), &dialog);
+  auto* gaussian3 = new QCheckBox(tr("Gaussian sigma small"), &dialog);
+  auto* gaussian7 = new QCheckBox(tr("Gaussian sigma large"), &dialog);
+  auto* differenceOfGaussians = new QCheckBox(tr("Difference of Gaussians"), &dialog);
+  auto* gradient = new QCheckBox(tr("Gradient magnitude"), &dialog);
+  auto* laplacian = new QCheckBox(tr("Laplacian"), &dialog);
+  auto* hessian = new QCheckBox(tr("Hessian norm"), &dialog);
+  auto* localMean = new QCheckBox(tr("Local mean"), &dialog);
+  auto* localStd = new QCheckBox(tr("Local std-dev"), &dialog);
+  auto* entropy = new QCheckBox(tr("Local entropy"), &dialog);
+  auto* texture = new QCheckBox(tr("Texture energy"), &dialog);
+  auto* gabor = new QCheckBox(tr("Gabor response"), &dialog);
+  auto* membrane = new QCheckBox(tr("Membrane response"), &dialog);
+  auto* xpos = new QCheckBox(tr("X position"), &dialog);
+  auto* ypos = new QCheckBox(tr("Y position"), &dialog);
+  intensity->setChecked(featureSettings_.intensity);
+  gaussian3->setChecked(featureSettings_.gaussian3);
+  gaussian7->setChecked(featureSettings_.gaussian7);
+  differenceOfGaussians->setChecked(featureSettings_.differenceOfGaussians);
+  gradient->setChecked(featureSettings_.gradient);
+  laplacian->setChecked(featureSettings_.laplacian);
+  hessian->setChecked(featureSettings_.hessian);
+  localMean->setChecked(featureSettings_.localMean);
+  localStd->setChecked(featureSettings_.localStd);
+  entropy->setChecked(featureSettings_.entropy);
+  texture->setChecked(featureSettings_.texture);
+  gabor->setChecked(featureSettings_.gabor);
+  membrane->setChecked(featureSettings_.membrane);
+  xpos->setChecked(featureSettings_.xPosition);
+  ypos->setChecked(featureSettings_.yPosition);
+  for (QCheckBox* checkbox : {intensity, gaussian3, gaussian7, differenceOfGaussians, gradient, laplacian, hessian,
+                              localMean, localStd, entropy, texture, gabor, membrane, xpos, ypos}) {
+    featureLayout->addWidget(checkbox);
   }
-  //if (lblPlayState_) lblPlayState_->setText("State: STOP");
-  stopCaptureBlocking();
-  updateProgressUI(play_frame_, play_end_frame_);
+
+  auto* classifierGroup = new QGroupBox(tr("Classifier parameters"), &dialog);
+  auto* classifierLayout = new QFormLayout(classifierGroup);
+  auto* balanceClasses = new QCheckBox(tr("Balance class sampling"), classifierGroup);
+  balanceClasses->setChecked(classifierSettings_.balanceClasses);
+  auto* rfTrees = new QSpinBox(classifierGroup);
+  rfTrees->setRange(10, 5000);
+  rfTrees->setValue(classifierSettings_.randomForestTrees);
+  auto* rfDepth = new QSpinBox(classifierGroup);
+  rfDepth->setRange(1, 128);
+  rfDepth->setValue(classifierSettings_.randomForestMaxDepth);
+  auto* svmC = new QDoubleSpinBox(classifierGroup);
+  svmC->setDecimals(3);
+  svmC->setRange(0.001, 10000.0);
+  svmC->setSingleStep(0.25);
+  svmC->setValue(classifierSettings_.svmC);
+  auto* svmGamma = new QDoubleSpinBox(classifierGroup);
+  svmGamma->setDecimals(4);
+  svmGamma->setRange(0.0001, 1000.0);
+  svmGamma->setSingleStep(0.05);
+  svmGamma->setValue(classifierSettings_.svmGamma);
+  classifierLayout->addRow(balanceClasses);
+  classifierLayout->addRow(tr("RF trees"), rfTrees);
+  classifierLayout->addRow(tr("RF max depth"), rfDepth);
+  classifierLayout->addRow(tr("SVM C"), svmC);
+  classifierLayout->addRow(tr("SVM gamma"), svmGamma);
+
+  layout->addWidget(featureGroup);
+  layout->addWidget(classifierGroup);
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  layout->addWidget(buttons);
+  connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  if (dialog.exec() != QDialog::Accepted) {
+    return;
+  }
+  featureSettings_.intensity = intensity->isChecked();
+  featureSettings_.gaussian3 = gaussian3->isChecked();
+  featureSettings_.gaussian7 = gaussian7->isChecked();
+  featureSettings_.differenceOfGaussians = differenceOfGaussians->isChecked();
+  featureSettings_.gradient = gradient->isChecked();
+  featureSettings_.laplacian = laplacian->isChecked();
+  featureSettings_.hessian = hessian->isChecked();
+  featureSettings_.localMean = localMean->isChecked();
+  featureSettings_.localStd = localStd->isChecked();
+  featureSettings_.entropy = entropy->isChecked();
+  featureSettings_.texture = texture->isChecked();
+  featureSettings_.gabor = gabor->isChecked();
+  featureSettings_.membrane = membrane->isChecked();
+  featureSettings_.xPosition = xpos->isChecked();
+  featureSettings_.yPosition = ypos->isChecked();
+  classifierSettings_.balanceClasses = balanceClasses->isChecked();
+  classifierSettings_.randomForestTrees = rfTrees->value();
+  classifierSettings_.randomForestMaxDepth = rfDepth->value();
+  classifierSettings_.svmC = svmC->value();
+  classifierSettings_.svmGamma = svmGamma->value();
+  model_.clear();
+  trainingStats_ = {};
+  rebuildFeatureStack();
+  clearInferenceOutputs();
+  updateViewer();
+  updateUiState();
+  logMessage(tr("Updated feature extraction settings."));
+}
+
+void MainWindow::onExportMask() {
+  if (labelResult_.empty()) {
+    QMessageBox::information(this, tr("No result"), tr("Please train/apply the classifier before exporting a mask."));
+    return;
+  }
+  const QString path = QFileDialog::getSaveFileName(this, tr("Export label mask"), QString(), tr("PNG (*.png);;TIFF (*.tif *.tiff)"));
+  if (path.isEmpty()) return;
+  cv::Mat exportMask;
+  labelResult_.convertTo(exportMask, CV_8U);
+  if (!cv::imwrite(path.toStdString(), exportMask)) {
+    QMessageBox::warning(this, tr("Export failed"), tr("Failed to export the label mask."));
+    return;
+  }
+  logMessage(tr("Exported label mask to %1.").arg(path));
+}
+
+void MainWindow::onBrushRadiusChanged(int value) {
+  view_->setBrushRadius(value);
+}
+
+void MainWindow::onClassSelectionChanged() {
+  const int cls = currentSelectedClassIndex();
+  if (cls >= 0 && cls < static_cast<int>(classes_.size())) {
+    view_->setActiveClass(cls, classes_[cls].color);
+    if (!pendingTrace_.isEmpty()) {
+      view_->setPendingTrace(pendingTrace_, classes_[cls].color);
+    }
+    addTraceButton_->setText(tr("Add ROI to %1").arg(classes_[cls].name));
+    addTraceButton_->setToolTip(tr("Commit the current ROI trace to %1.").arg(classes_[cls].name));
+    infoLabel_->setText(tr("Active class: %1 — use left mouse to paint samples, or draw a ROI trace and commit it to the selected class.").arg(classes_[cls].name));
+  } else if (addTraceButton_) {
+    addTraceButton_->setText(tr("Add ROI to selected class"));
+    addTraceButton_->setToolTip(tr("Commit the current ROI trace to the currently selected class."));
+  }
+  updateTraceLists();
+  updateUiState();
+}
+
+void MainWindow::onProbabilityClassChanged(int index) {
+  Q_UNUSED(index);
+  updateProbabilityView();
+}
+
+void MainWindow::onOpacityChanged(int value) {
+  overlayOpacity_ = static_cast<double>(value) / 100.0;
+  updateViewer();
+}
+
+void MainWindow::onPaintTool() {
+  view_->setToolMode(SegmentationView::PaintTool);
+}
+
+void MainWindow::onTraceTool() {
+  view_->setToolMode(SegmentationView::TraceTool);
+  infoLabel_->setText(tr("Draw a freehand ROI, then click Add ROI to selected class to commit it."));
+}
+
+void MainWindow::onEraseTool() {
+  view_->setToolMode(SegmentationView::EraseTool);
+}
+
+void MainWindow::onPanTool() {
+  view_->setToolMode(SegmentationView::PanTool);
+}
+
+void MainWindow::onResetZoom() {
+  view_->resetView();
+}
+
+void MainWindow::onAddTraceToSelectedClass() {
+  addPendingTraceToSelectedClass();
+}
+
+void MainWindow::onRemoveSelectedTrace() {
+  removeSelectedTraceFromClass();
 }
