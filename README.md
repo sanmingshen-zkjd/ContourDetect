@@ -67,6 +67,17 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/Qt/6.x/gcc_64
 1. `OpenCV_DIR` 是否指向与你当前编译器/架构匹配的 OpenCV CMake 配置目录。
 2. Debug 构建是否对应 Debug OpenCV 库，Release 构建是否对应 Release OpenCV 库。
 3. `cmake` 配置输出中的 `OpenCV link libs:` 是否包含 `opencv_imgproc` / `opencv_imgcodecs` 或 `opencv_world`。
+4. 如果你使用的是 OpenCV 4.8.0 官方/自编译 Windows 包，确认其 `lib` 目录里确实存在类似 `opencv_core480d.lib`、`opencv_imgproc480d.lib`、`opencv_imgcodecs480d.lib`（Debug）以及对应的不带 `d` 的 Release 库。
+
+对于这种目录结构，现在的 CMake 会优先尝试直接解析这些具体 `.lib` 文件。
+
+一个典型的 VS2019 + Qt5.15 + OpenCV 4.8.0 配置示例是：
+
+```bash
+cmake -S . -B build -G "Visual Studio 16 2019" -A x64 ^
+  -DQt5_DIR="C:/Qt/5.15.2/msvc2019_64/lib/cmake/Qt5" ^
+  -DOpenCV_DIR="C:/opencv/build"
+```
 
 ## 使用流程
 
