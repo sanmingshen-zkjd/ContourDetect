@@ -8,6 +8,7 @@
 #include <random>
 #include <cmath>
 #include <limits>
+#include <algorithm>
 
 namespace {
 constexpr double kMinVariance = 1e-6;
@@ -25,6 +26,69 @@ void appendFeature(const cv::Mat& feature, std::vector<cv::Mat>& channels) {
     normalized = feature;
   }
   channels.push_back(normalized);
+}
+
+cv::Mat rotateKernel(const cv::Mat& kernel, double angleDegrees) {
+  cv::Point2f center((kernel.cols - 1) * 0.5f, (kernel.rows - 1) * 0.5f);
+  cv::Mat rotation = cv::getRotationMatrix2D(center, angleDegrees, 1.0);
+  cv::Mat rotated;
+  cv::warpAffine(kernel, rotated, rotation, kernel.size(), cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0));
+  return rotated;
+}
+
+cv::Mat computeLocalEntropy(const cv::Mat& gray, int radius = 4, int bins = 16) {
+  cv::Mat entropy(gray.size(), CV_32F, cv::Scalar(0));
+  for (int row = 0; row < gray.rows; ++row) {
+    float* out = entropy.ptr<float>(row);
+    for (int col = 0; col < gray.cols; ++col) {
+      std::vector<int> histogram(bins, 0);
+      int count = 0;
+      for (int y = std::max(0, row - radius); y <= std::min(gray.rows - 1, row + radius); ++y) {
+        const float* src = gray.ptr<float>(y);
+        for (int x = std::max(0, col - radius); x <= std::min(gray.cols - 1, col + radius); ++x) {
+          const int bin = std::clamp(static_cast<int>(src[x] * bins), 0, bins - 1);
+          histogram[bin] += 1;
+          ++count;
+        }
+      }
+      double value = 0.0;
+      for (int frequency : histogram) {
+        if (frequency == 0) continue;
+        const double probability = static_cast<double>(frequency) / static_cast<double>(count);
+        value -= probability * std::log2(probability);
+      }
+      out[col] = static_cast<float>(value);
+    }
+  }
+  return entropy;
+}
+
+cv::Mat computeGaborResponse(const cv::Mat& gray) {
+  cv::Mat response(gray.size(), CV_32F, cv::Scalar(0));
+  for (double theta : {0.0, CV_PI * 0.25, CV_PI * 0.5, CV_PI * 0.75}) {
+    cv::Mat kernel = cv::getGaborKernel(cv::Size(15, 15), 3.0, theta, 8.0, 0.6, 0.0, CV_32F);
+    cv::Mat filtered, magnitude;
+    cv::filter2D(gray, filtered, CV_32F, kernel);
+    magnitude = cv::abs(filtered);
+    cv::max(response, magnitude, response);
+  }
+  return response;
+}
+
+cv::Mat computeMembraneResponse(const cv::Mat& gray) {
+  cv::Mat baseKernel = cv::Mat::zeros(15, 15, CV_32F);
+  baseKernel.row(baseKernel.rows / 2).setTo(1.0f);
+  baseKernel /= cv::sum(baseKernel)[0];
+
+  cv::Mat response(gray.size(), CV_32F, cv::Scalar(0));
+  for (double angle : {0.0, 30.0, 60.0, 90.0, 120.0, 150.0}) {
+    cv::Mat rotatedKernel = rotateKernel(baseKernel, angle);
+    cv::Mat filtered, magnitude;
+    cv::filter2D(gray, filtered, CV_32F, rotatedKernel);
+    magnitude = cv::abs(filtered);
+    cv::max(response, magnitude, response);
+  }
+  return response;
 }
 
 QString classifierKindToString(SegmentationClassifierSettings::Kind kind) {
@@ -411,10 +475,16 @@ bool SegmentationClassifier::save(const QString& path,
   fs << "intensity" << static_cast<int>(featureSettings.intensity);
   fs << "gaussian3" << static_cast<int>(featureSettings.gaussian3);
   fs << "gaussian7" << static_cast<int>(featureSettings.gaussian7);
+  fs << "differenceOfGaussians" << static_cast<int>(featureSettings.differenceOfGaussians);
   fs << "gradient" << static_cast<int>(featureSettings.gradient);
   fs << "laplacian" << static_cast<int>(featureSettings.laplacian);
+  fs << "hessian" << static_cast<int>(featureSettings.hessian);
   fs << "localMean" << static_cast<int>(featureSettings.localMean);
   fs << "localStd" << static_cast<int>(featureSettings.localStd);
+  fs << "entropy" << static_cast<int>(featureSettings.entropy);
+  fs << "texture" << static_cast<int>(featureSettings.texture);
+  fs << "gabor" << static_cast<int>(featureSettings.gabor);
+  fs << "membrane" << static_cast<int>(featureSettings.membrane);
   fs << "xPosition" << static_cast<int>(featureSettings.xPosition);
   fs << "yPosition" << static_cast<int>(featureSettings.yPosition);
   fs << "}";
@@ -425,6 +495,7 @@ bool SegmentationClassifier::save(const QString& path,
   fs << "randomForestMaxDepth" << classifierSettings.randomForestMaxDepth;
   fs << "svmC" << classifierSettings.svmC;
   fs << "svmGamma" << classifierSettings.svmGamma;
+  fs << "balanceClasses" << static_cast<int>(classifierSettings.balanceClasses);
   fs << "}";
 
   fs << "classes" << "[";
@@ -490,10 +561,16 @@ bool SegmentationClassifier::load(const QString& path,
       featureSettings->intensity = static_cast<int>(node["intensity"]) != 0;
       featureSettings->gaussian3 = static_cast<int>(node["gaussian3"]) != 0;
       featureSettings->gaussian7 = static_cast<int>(node["gaussian7"]) != 0;
+      featureSettings->differenceOfGaussians = static_cast<int>(node["differenceOfGaussians"]) != 0;
       featureSettings->gradient = static_cast<int>(node["gradient"]) != 0;
       featureSettings->laplacian = static_cast<int>(node["laplacian"]) != 0;
+      featureSettings->hessian = static_cast<int>(node["hessian"]) != 0;
       featureSettings->localMean = static_cast<int>(node["localMean"]) != 0;
       featureSettings->localStd = static_cast<int>(node["localStd"]) != 0;
+      featureSettings->entropy = static_cast<int>(node["entropy"]) != 0;
+      featureSettings->texture = static_cast<int>(node["texture"]) != 0;
+      featureSettings->gabor = static_cast<int>(node["gabor"]) != 0;
+      featureSettings->membrane = static_cast<int>(node["membrane"]) != 0;
       featureSettings->xPosition = static_cast<int>(node["xPosition"]) != 0;
       featureSettings->yPosition = static_cast<int>(node["yPosition"]) != 0;
     }
@@ -508,6 +585,7 @@ bool SegmentationClassifier::load(const QString& path,
       classifierSettings->randomForestMaxDepth = static_cast<int>(node["randomForestMaxDepth"]);
       classifierSettings->svmC = static_cast<double>(node["svmC"]);
       classifierSettings->svmGamma = static_cast<double>(node["svmGamma"]);
+      classifierSettings->balanceClasses = static_cast<int>(node["balanceClasses"]) != 0;
     } else {
       classifierSettings->kind = kind_;
     }
@@ -588,6 +666,13 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
     cv::GaussianBlur(gray, blur, cv::Size(7, 7), 1.8);
     appendFeature(blur, channels);
   }
+  if (settings.differenceOfGaussians) {
+    cv::Mat blurSmall, blurLarge, dog;
+    cv::GaussianBlur(gray, blurSmall, cv::Size(5, 5), 1.0);
+    cv::GaussianBlur(gray, blurLarge, cv::Size(11, 11), 2.5);
+    cv::absdiff(blurSmall, blurLarge, dog);
+    appendFeature(dog, channels);
+  }
   if (settings.gradient) {
     cv::Mat gx, gy, mag;
     cv::Sobel(gray, gx, CV_32F, 1, 0, 3);
@@ -600,6 +685,15 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
     cv::Laplacian(gray, lap, CV_32F, 3);
     appendFeature(cv::abs(lap), channels);
   }
+  if (settings.hessian) {
+    cv::Mat dxx, dxy, dyy, hessianNorm;
+    cv::Sobel(gray, dxx, CV_32F, 2, 0, 3);
+    cv::Sobel(gray, dxy, CV_32F, 1, 1, 3);
+    cv::Sobel(gray, dyy, CV_32F, 0, 2, 3);
+    hessianNorm = dxx.mul(dxx) + dyy.mul(dyy) + dxy.mul(dxy) * 2.0f;
+    cv::sqrt(hessianNorm, hessianNorm);
+    appendFeature(hessianNorm, channels);
+  }
   if (settings.localMean || settings.localStd) {
     cv::Mat mean, sqMean, variance;
     cv::blur(gray, mean, cv::Size(9, 9));
@@ -609,6 +703,23 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
     cv::sqrt(variance, variance);
     if (settings.localMean) appendFeature(mean, channels);
     if (settings.localStd) appendFeature(variance, channels);
+  }
+  if (settings.entropy) {
+    appendFeature(computeLocalEntropy(gray), channels);
+  }
+  if (settings.texture) {
+    cv::Mat gx, gy, mag, textureEnergy;
+    cv::Sobel(gray, gx, CV_32F, 1, 0, 3);
+    cv::Sobel(gray, gy, CV_32F, 0, 1, 3);
+    cv::magnitude(gx, gy, mag);
+    cv::blur(mag.mul(mag), textureEnergy, cv::Size(9, 9));
+    appendFeature(textureEnergy, channels);
+  }
+  if (settings.gabor) {
+    appendFeature(computeGaborResponse(gray), channels);
+  }
+  if (settings.membrane) {
+    appendFeature(computeMembraneResponse(gray), channels);
   }
   if (settings.xPosition || settings.yPosition) {
     cv::Mat x(gray.size(), CV_32F), y(gray.size(), CV_32F);
@@ -637,7 +748,8 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
 cv::Mat SegmentationEngine::gatherSamples(const cv::Mat& featureStack,
                                           const std::vector<cv::Mat>& classMasks,
                                           cv::Mat* labels,
-                                          int maxSamplesPerClass) {
+                                          int maxSamplesPerClass,
+                                          bool balanceClasses) {
   if (featureStack.empty() || classMasks.empty() || !labels) {
     return cv::Mat();
   }
@@ -645,6 +757,8 @@ cv::Mat SegmentationEngine::gatherSamples(const cv::Mat& featureStack,
   std::vector<cv::Mat> rows;
   std::vector<int> outputLabels;
   std::mt19937 rng(12345);
+  std::vector<std::vector<int>> sampledIndices(classMasks.size());
+  int balancedTarget = std::numeric_limits<int>::max();
 
   for (int cls = 0; cls < static_cast<int>(classMasks.size()); ++cls) {
     const cv::Mat& mask = classMasks[cls];
@@ -665,7 +779,20 @@ cv::Mat SegmentationEngine::gatherSamples(const cv::Mat& featureStack,
     if (static_cast<int>(indices.size()) > maxSamplesPerClass) {
       indices.resize(maxSamplesPerClass);
     }
-    for (int idx : indices) {
+    balancedTarget = std::min(balancedTarget, static_cast<int>(indices.size()));
+    sampledIndices[cls] = std::move(indices);
+  }
+
+  if (balanceClasses && balancedTarget > 0 && balancedTarget != std::numeric_limits<int>::max()) {
+    for (auto& indices : sampledIndices) {
+      if (!indices.empty() && static_cast<int>(indices.size()) > balancedTarget) {
+        indices.resize(balancedTarget);
+      }
+    }
+  }
+
+  for (int cls = 0; cls < static_cast<int>(sampledIndices.size()); ++cls) {
+    for (int idx : sampledIndices[cls]) {
       rows.push_back(featureStack.row(idx));
       outputLabels.push_back(cls);
     }

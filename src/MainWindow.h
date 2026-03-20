@@ -32,6 +32,7 @@ public:
 private slots:
   void onOpenImage();
   void onTrainClassifier();
+  void onStopTraining();
   void onApplyClassifier();
   void onToggleOverlay();
   void onCreateResult();
@@ -104,6 +105,7 @@ private:
   QCheckBox* contourCheck_ = nullptr;
 
   QPushButton* trainButton_ = nullptr;
+  QPushButton* stopTrainingButton_ = nullptr;
   QPushButton* applyButton_ = nullptr;
   QPushButton* createResultButton_ = nullptr;
   QPushButton* probabilityButton_ = nullptr;
@@ -129,4 +131,6 @@ private:
   QString imagePath_;
   bool showOverlay_ = true;
   double overlayOpacity_ = 0.45;
+  bool trainingInProgress_ = false;
+  bool stopTrainingRequested_ = false;
 };

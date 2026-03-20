@@ -25,6 +25,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QLineEdit>
+#include <QDoubleSpinBox>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -89,11 +90,13 @@ void MainWindow::buildUi() {
   auto* trainingGroup = new QGroupBox(tr("Training"), leftPanel);
   auto* trainingLayout = new QVBoxLayout(trainingGroup);
   trainButton_ = new QPushButton(tr("Train classifier"), trainingGroup);
+  stopTrainingButton_ = new QPushButton(tr("Stop training"), trainingGroup);
   QPushButton* overlayButton = new QPushButton(tr("Toggle overlay"), trainingGroup);
   createResultButton_ = new QPushButton(tr("Create result"), trainingGroup);
   probabilityButton_ = new QPushButton(tr("Get probability"), trainingGroup);
   QPushButton* plotButton = new QPushButton(tr("Plot result"), trainingGroup);
   trainingLayout->addWidget(trainButton_);
+  trainingLayout->addWidget(stopTrainingButton_);
   trainingLayout->addWidget(overlayButton);
   trainingLayout->addWidget(createResultButton_);
   trainingLayout->addWidget(probabilityButton_);
@@ -213,6 +216,7 @@ void MainWindow::buildUi() {
 
 void MainWindow::connectSignals() {
   connect(trainButton_, &QPushButton::clicked, this, &MainWindow::onTrainClassifier);
+  connect(stopTrainingButton_, &QPushButton::clicked, this, &MainWindow::onStopTraining);
   connect(applyButton_, &QPushButton::clicked, this, &MainWindow::onApplyClassifier);
   connect(createResultButton_, &QPushButton::clicked, this, &MainWindow::onCreateResult);
   connect(probabilityButton_, &QPushButton::clicked, this, &MainWindow::onGetProbability);
@@ -289,16 +293,17 @@ void MainWindow::updateUiState() {
   const bool hasProbability = hasModel && model_.supportsProbability();
   const int currentClass = currentSelectedClassIndex();
   const bool hasClassSelection = currentClass >= 0 && currentClass < static_cast<int>(classes_.size());
-  trainButton_->setEnabled(hasImage);
+  trainButton_->setEnabled(hasImage && !trainingInProgress_);
+  stopTrainingButton_->setEnabled(trainingInProgress_);
   removeTraceButton_->setEnabled(traceList_ && traceList_->currentRow() >= 0);
-  applyButton_->setEnabled(hasModel);
-  createResultButton_->setEnabled(hasImage && hasModel);
-  probabilityButton_->setEnabled(hasImage && hasProbability);
+  applyButton_->setEnabled(hasModel && !trainingInProgress_);
+  createResultButton_->setEnabled(hasImage && hasModel && !trainingInProgress_);
+  probabilityButton_->setEnabled(hasImage && hasProbability && !trainingInProgress_);
   brushSizeSpin_->setEnabled(hasImage);
-  probabilityCombo_->setEnabled(hasProbability);
-  classifierCombo_->setEnabled(true);
-  addTraceButton_->setEnabled(hasImage && hasClassSelection);
-  traceList_->setEnabled(hasImage && hasClassSelection);
+  probabilityCombo_->setEnabled(hasProbability && !trainingInProgress_);
+  classifierCombo_->setEnabled(!trainingInProgress_);
+  addTraceButton_->setEnabled(hasImage && hasClassSelection && !trainingInProgress_);
+  traceList_->setEnabled(hasImage && hasClassSelection && !trainingInProgress_);
   if (traceGroup_) {
     traceGroup_->setEnabled(hasImage && hasClassSelection);
   }
@@ -683,12 +688,24 @@ bool MainWindow::saveTrainingData(const QString& path) {
   root["featureSettings"] = QJsonObject{{"intensity", featureSettings_.intensity},
                                          {"gaussian3", featureSettings_.gaussian3},
                                          {"gaussian7", featureSettings_.gaussian7},
+                                         {"differenceOfGaussians", featureSettings_.differenceOfGaussians},
                                          {"gradient", featureSettings_.gradient},
                                          {"laplacian", featureSettings_.laplacian},
+                                         {"hessian", featureSettings_.hessian},
                                          {"localMean", featureSettings_.localMean},
                                          {"localStd", featureSettings_.localStd},
+                                         {"entropy", featureSettings_.entropy},
+                                         {"texture", featureSettings_.texture},
+                                         {"gabor", featureSettings_.gabor},
+                                         {"membrane", featureSettings_.membrane},
                                          {"xPosition", featureSettings_.xPosition},
                                          {"yPosition", featureSettings_.yPosition}};
+  root["classifierSettings"] = QJsonObject{{"kind", static_cast<int>(classifierSettings_.kind)},
+                                           {"randomForestTrees", classifierSettings_.randomForestTrees},
+                                           {"randomForestMaxDepth", classifierSettings_.randomForestMaxDepth},
+                                           {"svmC", classifierSettings_.svmC},
+                                           {"svmGamma", classifierSettings_.svmGamma},
+                                           {"balanceClasses", classifierSettings_.balanceClasses}};
 
   QFile file(path);
   if (!file.open(QIODevice::WriteOnly)) {
@@ -743,12 +760,28 @@ bool MainWindow::loadTrainingData(const QString& path) {
   featureSettings_.intensity = settings["intensity"].toBool(true);
   featureSettings_.gaussian3 = settings["gaussian3"].toBool(true);
   featureSettings_.gaussian7 = settings["gaussian7"].toBool(true);
+  featureSettings_.differenceOfGaussians = settings["differenceOfGaussians"].toBool(false);
   featureSettings_.gradient = settings["gradient"].toBool(true);
   featureSettings_.laplacian = settings["laplacian"].toBool(true);
+  featureSettings_.hessian = settings["hessian"].toBool(false);
   featureSettings_.localMean = settings["localMean"].toBool(true);
   featureSettings_.localStd = settings["localStd"].toBool(true);
+  featureSettings_.entropy = settings["entropy"].toBool(false);
+  featureSettings_.texture = settings["texture"].toBool(false);
+  featureSettings_.gabor = settings["gabor"].toBool(false);
+  featureSettings_.membrane = settings["membrane"].toBool(false);
   featureSettings_.xPosition = settings["xPosition"].toBool(true);
   featureSettings_.yPosition = settings["yPosition"].toBool(true);
+  const QJsonObject classifierSettings = root["classifierSettings"].toObject();
+  if (!classifierSettings.isEmpty()) {
+    classifierSettings_.kind = static_cast<SegmentationClassifierSettings::Kind>(
+        classifierSettings["kind"].toInt(static_cast<int>(classifierSettings_.kind)));
+    classifierSettings_.randomForestTrees = classifierSettings["randomForestTrees"].toInt(classifierSettings_.randomForestTrees);
+    classifierSettings_.randomForestMaxDepth = classifierSettings["randomForestMaxDepth"].toInt(classifierSettings_.randomForestMaxDepth);
+    classifierSettings_.svmC = classifierSettings["svmC"].toDouble(classifierSettings_.svmC);
+    classifierSettings_.svmGamma = classifierSettings["svmGamma"].toDouble(classifierSettings_.svmGamma);
+    classifierSettings_.balanceClasses = classifierSettings["balanceClasses"].toBool(classifierSettings_.balanceClasses);
+  }
 
   refreshClassList();
   pendingTrace_.clear();
@@ -756,6 +789,10 @@ bool MainWindow::loadTrainingData(const QString& path) {
   clearInferenceOutputs();
   rebuildMasksFromAnnotations();
   rebuildFeatureStack();
+  const int comboIndex = classifierCombo_->findData(classifierSettings_.kind);
+  if (comboIndex >= 0) {
+    classifierCombo_->setCurrentIndex(comboIndex);
+  }
   updateUiState();
   logMessage(tr("Loaded training data from %1.").arg(path));
   return true;
@@ -808,22 +845,59 @@ void MainWindow::onTrainClassifier() {
   if (!ensureImageLoaded(tr("training the classifier"))) {
     return;
   }
+  trainingInProgress_ = true;
+  stopTrainingRequested_ = false;
+  updateUiState();
+  QApplication::processEvents();
   rebuildFeatureStack();
+  if (stopTrainingRequested_) {
+    trainingInProgress_ = false;
+    updateUiState();
+    logMessage(tr("Training stopped before sample gathering."));
+    return;
+  }
   cv::Mat labels;
-  cv::Mat samples = SegmentationEngine::gatherSamples(featureStack_, classMasks_, &labels);
+  cv::Mat samples = SegmentationEngine::gatherSamples(featureStack_, classMasks_, &labels, 12000, classifierSettings_.balanceClasses);
+  QApplication::processEvents();
+  if (stopTrainingRequested_) {
+    trainingInProgress_ = false;
+    updateUiState();
+    logMessage(tr("Training stopped before classifier fitting."));
+    return;
+  }
   if (samples.empty()) {
+    trainingInProgress_ = false;
+    updateUiState();
     QMessageBox::information(this, tr("No annotations"), tr("Please paint at least one pixel for each class before training."));
     return;
   }
   if (!model_.train(samples, labels, static_cast<int>(classes_.size()), classifierSettings_, &trainingStats_)) {
+    trainingInProgress_ = false;
+    updateUiState();
     QMessageBox::warning(this, tr("Training failed"), tr("Training failed. Ensure every class has annotations."));
+    return;
+  }
+  if (stopTrainingRequested_) {
+    trainingInProgress_ = false;
+    updateUiState();
+    clearInferenceOutputs();
+    logMessage(tr("Training finished fitting but stopped before result generation."));
     return;
   }
   labelResult_ = SegmentationEngine::applyModelLabels(model_, featureStack_, originalImage_.rows, originalImage_.cols);
   updateProbabilityView();
   updateViewer();
+  trainingInProgress_ = false;
   updateUiState();
   logMessage(tr("Trained classifier with %1 samples across %2 classes.").arg(trainingStats_.sampleCount).arg(trainingStats_.classCount));
+}
+
+void MainWindow::onStopTraining() {
+  if (!trainingInProgress_) {
+    return;
+  }
+  stopTrainingRequested_ = true;
+  logMessage(tr("Stop requested. The current training stage will stop as soon as it can."));
 }
 
 void MainWindow::onApplyClassifier() {
@@ -1061,29 +1135,73 @@ void MainWindow::onCreateNewClass() {
 
 void MainWindow::onSettings() {
   QDialog dialog(this);
-  dialog.setWindowTitle(tr("Feature settings"));
+  dialog.setWindowTitle(tr("Feature and classifier settings"));
   auto* layout = new QVBoxLayout(&dialog);
+  auto* featureGroup = new QGroupBox(tr("Feature extraction"), &dialog);
+  auto* featureLayout = new QVBoxLayout(featureGroup);
   auto* intensity = new QCheckBox(tr("Intensity"), &dialog);
   auto* gaussian3 = new QCheckBox(tr("Gaussian sigma small"), &dialog);
   auto* gaussian7 = new QCheckBox(tr("Gaussian sigma large"), &dialog);
+  auto* differenceOfGaussians = new QCheckBox(tr("Difference of Gaussians"), &dialog);
   auto* gradient = new QCheckBox(tr("Gradient magnitude"), &dialog);
   auto* laplacian = new QCheckBox(tr("Laplacian"), &dialog);
+  auto* hessian = new QCheckBox(tr("Hessian norm"), &dialog);
   auto* localMean = new QCheckBox(tr("Local mean"), &dialog);
   auto* localStd = new QCheckBox(tr("Local std-dev"), &dialog);
+  auto* entropy = new QCheckBox(tr("Local entropy"), &dialog);
+  auto* texture = new QCheckBox(tr("Texture energy"), &dialog);
+  auto* gabor = new QCheckBox(tr("Gabor response"), &dialog);
+  auto* membrane = new QCheckBox(tr("Membrane response"), &dialog);
   auto* xpos = new QCheckBox(tr("X position"), &dialog);
   auto* ypos = new QCheckBox(tr("Y position"), &dialog);
   intensity->setChecked(featureSettings_.intensity);
   gaussian3->setChecked(featureSettings_.gaussian3);
   gaussian7->setChecked(featureSettings_.gaussian7);
+  differenceOfGaussians->setChecked(featureSettings_.differenceOfGaussians);
   gradient->setChecked(featureSettings_.gradient);
   laplacian->setChecked(featureSettings_.laplacian);
+  hessian->setChecked(featureSettings_.hessian);
   localMean->setChecked(featureSettings_.localMean);
   localStd->setChecked(featureSettings_.localStd);
+  entropy->setChecked(featureSettings_.entropy);
+  texture->setChecked(featureSettings_.texture);
+  gabor->setChecked(featureSettings_.gabor);
+  membrane->setChecked(featureSettings_.membrane);
   xpos->setChecked(featureSettings_.xPosition);
   ypos->setChecked(featureSettings_.yPosition);
-  for (QCheckBox* checkbox : {intensity, gaussian3, gaussian7, gradient, laplacian, localMean, localStd, xpos, ypos}) {
-    layout->addWidget(checkbox);
+  for (QCheckBox* checkbox : {intensity, gaussian3, gaussian7, differenceOfGaussians, gradient, laplacian, hessian,
+                              localMean, localStd, entropy, texture, gabor, membrane, xpos, ypos}) {
+    featureLayout->addWidget(checkbox);
   }
+
+  auto* classifierGroup = new QGroupBox(tr("Classifier parameters"), &dialog);
+  auto* classifierLayout = new QFormLayout(classifierGroup);
+  auto* balanceClasses = new QCheckBox(tr("Balance class sampling"), classifierGroup);
+  balanceClasses->setChecked(classifierSettings_.balanceClasses);
+  auto* rfTrees = new QSpinBox(classifierGroup);
+  rfTrees->setRange(10, 5000);
+  rfTrees->setValue(classifierSettings_.randomForestTrees);
+  auto* rfDepth = new QSpinBox(classifierGroup);
+  rfDepth->setRange(1, 128);
+  rfDepth->setValue(classifierSettings_.randomForestMaxDepth);
+  auto* svmC = new QDoubleSpinBox(classifierGroup);
+  svmC->setDecimals(3);
+  svmC->setRange(0.001, 10000.0);
+  svmC->setSingleStep(0.25);
+  svmC->setValue(classifierSettings_.svmC);
+  auto* svmGamma = new QDoubleSpinBox(classifierGroup);
+  svmGamma->setDecimals(4);
+  svmGamma->setRange(0.0001, 1000.0);
+  svmGamma->setSingleStep(0.05);
+  svmGamma->setValue(classifierSettings_.svmGamma);
+  classifierLayout->addRow(balanceClasses);
+  classifierLayout->addRow(tr("RF trees"), rfTrees);
+  classifierLayout->addRow(tr("RF max depth"), rfDepth);
+  classifierLayout->addRow(tr("SVM C"), svmC);
+  classifierLayout->addRow(tr("SVM gamma"), svmGamma);
+
+  layout->addWidget(featureGroup);
+  layout->addWidget(classifierGroup);
   auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
   layout->addWidget(buttons);
   connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
@@ -1094,12 +1212,23 @@ void MainWindow::onSettings() {
   featureSettings_.intensity = intensity->isChecked();
   featureSettings_.gaussian3 = gaussian3->isChecked();
   featureSettings_.gaussian7 = gaussian7->isChecked();
+  featureSettings_.differenceOfGaussians = differenceOfGaussians->isChecked();
   featureSettings_.gradient = gradient->isChecked();
   featureSettings_.laplacian = laplacian->isChecked();
+  featureSettings_.hessian = hessian->isChecked();
   featureSettings_.localMean = localMean->isChecked();
   featureSettings_.localStd = localStd->isChecked();
+  featureSettings_.entropy = entropy->isChecked();
+  featureSettings_.texture = texture->isChecked();
+  featureSettings_.gabor = gabor->isChecked();
+  featureSettings_.membrane = membrane->isChecked();
   featureSettings_.xPosition = xpos->isChecked();
   featureSettings_.yPosition = ypos->isChecked();
+  classifierSettings_.balanceClasses = balanceClasses->isChecked();
+  classifierSettings_.randomForestTrees = rfTrees->value();
+  classifierSettings_.randomForestMaxDepth = rfDepth->value();
+  classifierSettings_.svmC = svmC->value();
+  classifierSettings_.svmGamma = svmGamma->value();
   model_.clear();
   trainingStats_ = {};
   rebuildFeatureStack();

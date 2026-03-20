@@ -12,10 +12,16 @@ struct SegmentationFeatureSettings {
   bool intensity = true;
   bool gaussian3 = true;
   bool gaussian7 = true;
+  bool differenceOfGaussians = false;
   bool gradient = true;
   bool laplacian = true;
+  bool hessian = false;
   bool localMean = true;
   bool localStd = true;
+  bool entropy = false;
+  bool texture = false;
+  bool gabor = false;
+  bool membrane = false;
   bool xPosition = true;
   bool yPosition = true;
 };
@@ -44,6 +50,7 @@ struct SegmentationClassifierSettings {
   int randomForestMaxDepth = 20;
   double svmC = 2.0;
   double svmGamma = 0.5;
+  bool balanceClasses = false;
 };
 
 class GaussianNaiveBayesModel {
@@ -120,7 +127,8 @@ public:
   static cv::Mat gatherSamples(const cv::Mat& featureStack,
                                const std::vector<cv::Mat>& classMasks,
                                cv::Mat* labels,
-                               int maxSamplesPerClass = 12000);
+                               int maxSamplesPerClass = 12000,
+                               bool balanceClasses = false);
 
   static cv::Mat applyModelLabels(const SegmentationClassifier& model,
                                   const cv::Mat& featureStack,

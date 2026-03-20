@@ -10,11 +10,16 @@
 - 自动提取多种像素特征：
   - 原始灰度
   - 多尺度高斯平滑
+  - Difference of Gaussians (DoG)
   - 梯度幅值
   - Laplacian
+  - Hessian 响应
   - 局部均值 / 局部标准差
+  - 局部 entropy / texture energy
+  - Gabor / membrane 响应
   - 归一化 X/Y 空间位置
 - 支持多种可切换分类器：**Gaussian Naive Bayes / Random Forest / SVM (RBF)**。
+- 支持在设置面板中调节分类器参数，并可启用 **balance classes** 采样。
 - 生成整图分割结果与按类别概率图。
 - 支持结果统计绘图。
 - 支持保存 / 加载：
@@ -36,7 +41,8 @@
 - **Load / Save classifier**：加载/保存训练好的模型
 - **Load / Save data**：加载/保存标注数据
 - **Create new class**：新增类别
-- **Settings**：配置特征提取项
+- **Settings**：配置特征提取项与分类器参数
+- **Stop training**：请求停止当前训练流程（会在当前可中断阶段尽快停下）
 - **Classifier**：选择当前训练器（GaussianNB / Random Forest / SVM）
 - **Trace ROI**：先画出一个自由曲线 ROI
 - **Add ROI to selected class**：把当前 ROI 提交到当前选中的类别
@@ -109,7 +115,7 @@ cmake -S . -B build -G "Visual Studio 16 2019" -A x64 ^
 ## 说明
 
 - 当前实现面向 **2D 单张图像** 的交互式训练分割。
-- 为保证项目可直接在 C++/Qt/OpenCV 中落地，分类器采用轻量级的高斯朴素贝叶斯实现，而不是直接依赖 Java/Weka 运行时。
+- 为保证项目可直接在 C++/Qt/OpenCV 中落地，分类器采用轻量级内置 Gaussian Naive Bayes，并封装 OpenCV 的 Random Forest / SVM，而不是直接依赖 Java/Weka 运行时。
 - 如果需要进一步逼近 Fiji 版本，还可以继续扩展：
   - 更多滤波器特征（Hessian、Gabor、膜结构、纹理特征）
   - 超像素
