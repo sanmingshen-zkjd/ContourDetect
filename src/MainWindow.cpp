@@ -172,7 +172,13 @@ void MainWindow::buildUi() {
 
   auto* labelsGroup = new QGroupBox(tr("Labels"), rightPanel);
   auto* labelsLayout = new QVBoxLayout(labelsGroup);
+  addToClass1Button_ = new QPushButton(tr("Add to Class 1"), labelsGroup);
+  addToClass2Button_ = new QPushButton(tr("Add to Class 2"), labelsGroup);
+  addToClass1Button_->setToolTip(tr("Add foreground target samples to Class 1."));
+  addToClass2Button_->setToolTip(tr("Add background object samples to Class 2."));
   classList_ = new QListWidget(labelsGroup);
+  labelsLayout->addWidget(addToClass1Button_);
+  labelsLayout->addWidget(addToClass2Button_);
   labelsLayout->addWidget(classList_);
   rightLayout->addWidget(labelsGroup, 2);
 
@@ -210,6 +216,8 @@ void MainWindow::connectSignals() {
   connect(contourCheck_, &QCheckBox::toggled, this, [this](bool) {
     updateViewer();
   });
+  connect(addToClass1Button_, &QPushButton::clicked, this, &MainWindow::onAddToClass1);
+  connect(addToClass2Button_, &QPushButton::clicked, this, &MainWindow::onAddToClass2);
 
   view_->onBrushStroke = [this](const QPoint& imagePos, int radius, bool erase) {
     applyBrushStroke(imagePos, radius, erase);
@@ -233,8 +241,8 @@ void MainWindow::connectSignals() {
 
 void MainWindow::initializeDefaultClasses() {
   classes_.clear();
-  classes_.push_back({tr("Class 1"), defaultColorForIndex(0), true});
-  classes_.push_back({tr("Class 2"), defaultColorForIndex(1), true});
+  classes_.push_back({tr("Foreground target"), defaultColorForIndex(0), true});
+  classes_.push_back({tr("Background object"), defaultColorForIndex(1), true});
 }
 
 void MainWindow::refreshClassList() {
@@ -242,7 +250,10 @@ void MainWindow::refreshClassList() {
   probabilityCombo_->clear();
   for (int i = 0; i < static_cast<int>(classes_.size()); ++i) {
     const auto& cls = classes_[i];
-    QListWidgetItem* item = new QListWidgetItem(QString("%1  (%2)").arg(cls.name).arg(i + 1), classList_);
+    QString roleText;
+    if (i == 0) roleText = tr(" - foreground target");
+    else if (i == 1) roleText = tr(" - background object");
+    QListWidgetItem* item = new QListWidgetItem(QString("%1  (Class %2)%3").arg(cls.name).arg(i + 1).arg(roleText), classList_);
     item->setForeground(cls.color);
     item->setData(Qt::UserRole, i);
     probabilityCombo_->addItem(cls.name, i);
@@ -255,12 +266,15 @@ void MainWindow::refreshClassList() {
 void MainWindow::updateUiState() {
   const bool hasImage = !originalImage_.empty();
   const bool hasModel = model_.isValid();
+  const bool hasTwoClasses = classes_.size() >= 2;
   trainButton_->setEnabled(hasImage);
   applyButton_->setEnabled(hasImage && hasModel);
   createResultButton_->setEnabled(hasImage && hasModel);
   probabilityButton_->setEnabled(hasImage && hasModel);
   brushSizeSpin_->setEnabled(hasImage);
   probabilityCombo_->setEnabled(hasModel);
+  addToClass1Button_->setEnabled(hasTwoClasses);
+  addToClass2Button_->setEnabled(hasTwoClasses);
   overlayCheck_->setEnabled(hasModel || !labelResult_.empty());
   contourCheck_->setEnabled(hasModel || !labelResult_.empty());
   view_->setPaintEnabled(hasImage);
@@ -376,6 +390,18 @@ bool MainWindow::ensureModelReady(const QString& actionName) {
 
 void MainWindow::logMessage(const QString& message) {
   logEdit_->append(QString("[%1] %2").arg(nowString(), message));
+}
+
+void MainWindow::activateLabelShortcut(int classIndex, const QString& semanticDescription) {
+  if (classIndex < 0 || classIndex >= classList_->count()) {
+    QMessageBox::information(this, tr("Class unavailable"), tr("The requested class shortcut is not available."));
+    return;
+  }
+  classList_->setCurrentRow(classIndex);
+  view_->setToolMode(SegmentationView::PaintTool);
+  const QString className = classes_[classIndex].name;
+  infoLabel_->setText(tr("Now painting %1 samples into %2.").arg(semanticDescription, className));
+  logMessage(tr("Activated %1 shortcut for %2.").arg(semanticDescription, className));
 }
 
 bool MainWindow::loadImageFile(const QString& path) {
@@ -826,4 +852,12 @@ void MainWindow::onPanTool() {
 
 void MainWindow::onResetZoom() {
   view_->resetView();
+}
+
+void MainWindow::onAddToClass1() {
+  activateLabelShortcut(0, tr("foreground target"));
+}
+
+void MainWindow::onAddToClass2() {
+  activateLabelShortcut(1, tr("background object"));
 }

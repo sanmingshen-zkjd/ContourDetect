@@ -50,6 +50,8 @@ private slots:
   void onEraseTool();
   void onPanTool();
   void onResetZoom();
+  void onAddToClass1();
+  void onAddToClass2();
 
 private:
   void buildUi();
@@ -65,6 +67,7 @@ private:
   bool ensureImageLoaded(const QString& actionName);
   bool ensureModelReady(const QString& actionName);
   void logMessage(const QString& message);
+  void activateLabelShortcut(int classIndex, const QString& semanticDescription);
 
   bool loadImageFile(const QString& path);
   bool saveTrainingData(const QString& path);
@@ -90,6 +93,8 @@ private:
   QPushButton* applyButton_ = nullptr;
   QPushButton* createResultButton_ = nullptr;
   QPushButton* probabilityButton_ = nullptr;
+  QPushButton* addToClass1Button_ = nullptr;
+  QPushButton* addToClass2Button_ = nullptr;
 
   cv::Mat originalImage_;
   cv::Mat featureStack_;
