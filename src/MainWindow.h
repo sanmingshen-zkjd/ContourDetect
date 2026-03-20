@@ -55,6 +55,7 @@ private slots:
   void onGetProbability();
   void onPlotResult();
   void onEvaluateModel();
+  void onSuggestLabels();
   void onSaveClassifier();
   void onLoadClassifier();
   void onSaveData();
@@ -158,6 +159,7 @@ private:
   QPushButton* undoButton_ = nullptr;
   QPushButton* redoButton_ = nullptr;
   QPushButton* evaluateButton_ = nullptr;
+  QPushButton* suggestButton_ = nullptr;
   QListWidget* traceList_ = nullptr;
   QListWidget* projectList_ = nullptr;
   QGroupBox* traceGroup_ = nullptr;

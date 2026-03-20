@@ -96,6 +96,8 @@ QString classifierKindToString(SegmentationClassifierSettings::Kind kind) {
     case SegmentationClassifierSettings::GaussianNaiveBayes: return QStringLiteral("gaussian_naive_bayes");
     case SegmentationClassifierSettings::RandomForest: return QStringLiteral("random_forest");
     case SegmentationClassifierSettings::SupportVectorMachine: return QStringLiteral("svm");
+    case SegmentationClassifierSettings::KNearestNeighbors: return QStringLiteral("knn");
+    case SegmentationClassifierSettings::LogisticRegression: return QStringLiteral("logistic_regression");
   }
   return QStringLiteral("gaussian_naive_bayes");
 }
@@ -103,6 +105,8 @@ QString classifierKindToString(SegmentationClassifierSettings::Kind kind) {
 SegmentationClassifierSettings::Kind classifierKindFromString(const QString& name) {
   if (name == QStringLiteral("random_forest")) return SegmentationClassifierSettings::RandomForest;
   if (name == QStringLiteral("svm")) return SegmentationClassifierSettings::SupportVectorMachine;
+  if (name == QStringLiteral("knn")) return SegmentationClassifierSettings::KNearestNeighbors;
+  if (name == QStringLiteral("logistic_regression")) return SegmentationClassifierSettings::LogisticRegression;
   return SegmentationClassifierSettings::GaussianNaiveBayes;
 }
 }
@@ -286,6 +290,10 @@ bool SegmentationClassifier::isValid() const {
       return randomForest_ && !randomForest_->empty();
     case SegmentationClassifierSettings::SupportVectorMachine:
       return svm_ && !svm_->empty();
+    case SegmentationClassifierSettings::KNearestNeighbors:
+      return knn_ && !knn_->empty();
+    case SegmentationClassifierSettings::LogisticRegression:
+      return logisticRegression_ && !logisticRegression_->empty();
   }
   return false;
 }
@@ -295,6 +303,8 @@ void SegmentationClassifier::clear() {
   gnbModel_.clear();
   randomForest_.release();
   svm_.release();
+  knn_.release();
+  logisticRegression_.release();
 }
 
 bool SegmentationClassifier::computeAccuracy(const cv::Mat& labels,
@@ -371,6 +381,32 @@ bool SegmentationClassifier::train(const cv::Mat& features,
     return computeAccuracy(labels, predicted, stats, classCount);
   }
 
+  if (kind_ == SegmentationClassifierSettings::KNearestNeighbors) {
+    knn_ = cv::ml::KNearest::create();
+    knn_->setDefaultK(std::max(1, settings.knnNeighbors));
+    if (!knn_->train(trainData)) {
+      knn_.release();
+      return false;
+    }
+    const cv::Mat predicted = predictLabels(features);
+    return computeAccuracy(labels, predicted, stats, classCount);
+  }
+
+  if (kind_ == SegmentationClassifierSettings::LogisticRegression) {
+    logisticRegression_ = cv::ml::LogisticRegression::create();
+    logisticRegression_->setLearningRate(settings.logisticLearningRate);
+    logisticRegression_->setIterations(std::max(10, settings.logisticIterations));
+    logisticRegression_->setRegularization(cv::ml::LogisticRegression::REG_L2);
+    logisticRegression_->setTrainMethod(cv::ml::LogisticRegression::BATCH);
+    logisticRegression_->setMiniBatchSize(1);
+    if (!logisticRegression_->train(trainData)) {
+      logisticRegression_.release();
+      return false;
+    }
+    const cv::Mat predicted = predictLabels(features);
+    return computeAccuracy(labels, predicted, stats, classCount);
+  }
+
   return false;
 }
 
@@ -391,6 +427,10 @@ cv::Mat SegmentationClassifier::predictLabels(const cv::Mat& features) const {
       predicted = randomForest_->predict(features.row(row));
     } else if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
       predicted = svm_->predict(features.row(row));
+    } else if (kind_ == SegmentationClassifierSettings::KNearestNeighbors) {
+      predicted = knn_->predict(features.row(row));
+    } else if (kind_ == SegmentationClassifierSettings::LogisticRegression) {
+      predicted = logisticRegression_->predict(features.row(row));
     }
     labels.at<int>(row, 0) = static_cast<int>(std::lround(predicted));
   }
@@ -403,6 +443,21 @@ cv::Mat SegmentationClassifier::predictProbabilities(const cv::Mat& features) co
   }
   if (kind_ == SegmentationClassifierSettings::GaussianNaiveBayes) {
     return gnbModel_.predictProbabilities(features);
+  }
+  if (kind_ == SegmentationClassifierSettings::LogisticRegression && logisticRegression_) {
+    cv::Mat raw;
+    logisticRegression_->predict(features, raw, cv::ml::StatModel::RAW_OUTPUT);
+    if (raw.empty()) {
+      return cv::Mat();
+    }
+    cv::Mat probs(features.rows, 2, CV_32F, cv::Scalar(0));
+    for (int row = 0; row < raw.rows; ++row) {
+      const float z = raw.at<float>(row, 0);
+      const float p1 = 1.0f / (1.0f + std::exp(-z));
+      probs.at<float>(row, 1) = p1;
+      probs.at<float>(row, 0) = 1.0f - p1;
+    }
+    return probs;
   }
   if (kind_ != SegmentationClassifierSettings::RandomForest || !randomForest_) {
     return cv::Mat();
@@ -445,7 +500,8 @@ cv::Mat SegmentationClassifier::predictProbabilities(const cv::Mat& features) co
 
 bool SegmentationClassifier::supportsProbability() const {
   return (kind_ == SegmentationClassifierSettings::GaussianNaiveBayes && gnbModel_.isValid())
-      || (kind_ == SegmentationClassifierSettings::RandomForest && randomForest_ && !randomForest_->empty());
+      || (kind_ == SegmentationClassifierSettings::RandomForest && randomForest_ && !randomForest_->empty())
+      || (kind_ == SegmentationClassifierSettings::LogisticRegression && logisticRegression_ && !logisticRegression_->empty());
 }
 
 QString SegmentationClassifier::sidecarModelPath(const QString& metadataPath) {
@@ -475,16 +531,24 @@ bool SegmentationClassifier::save(const QString& path,
   fs << "intensity" << static_cast<int>(featureSettings.intensity);
   fs << "gaussian3" << static_cast<int>(featureSettings.gaussian3);
   fs << "gaussian7" << static_cast<int>(featureSettings.gaussian7);
+  fs << "gaussian15" << static_cast<int>(featureSettings.gaussian15);
   fs << "differenceOfGaussians" << static_cast<int>(featureSettings.differenceOfGaussians);
+  fs << "median" << static_cast<int>(featureSettings.median);
+  fs << "bilateral" << static_cast<int>(featureSettings.bilateral);
   fs << "gradient" << static_cast<int>(featureSettings.gradient);
   fs << "laplacian" << static_cast<int>(featureSettings.laplacian);
+  fs << "laplacianOfGaussian" << static_cast<int>(featureSettings.laplacianOfGaussian);
   fs << "hessian" << static_cast<int>(featureSettings.hessian);
   fs << "localMean" << static_cast<int>(featureSettings.localMean);
   fs << "localStd" << static_cast<int>(featureSettings.localStd);
   fs << "entropy" << static_cast<int>(featureSettings.entropy);
   fs << "texture" << static_cast<int>(featureSettings.texture);
+  fs << "clahe" << static_cast<int>(featureSettings.clahe);
+  fs << "canny" << static_cast<int>(featureSettings.canny);
+  fs << "structureTensor" << static_cast<int>(featureSettings.structureTensor);
   fs << "gabor" << static_cast<int>(featureSettings.gabor);
   fs << "membrane" << static_cast<int>(featureSettings.membrane);
+  fs << "channelRatios" << static_cast<int>(featureSettings.channelRatios);
   fs << "xPosition" << static_cast<int>(featureSettings.xPosition);
   fs << "yPosition" << static_cast<int>(featureSettings.yPosition);
   fs << "}";
@@ -495,6 +559,9 @@ bool SegmentationClassifier::save(const QString& path,
   fs << "randomForestMaxDepth" << classifierSettings.randomForestMaxDepth;
   fs << "svmC" << classifierSettings.svmC;
   fs << "svmGamma" << classifierSettings.svmGamma;
+  fs << "knnNeighbors" << classifierSettings.knnNeighbors;
+  fs << "logisticLearningRate" << classifierSettings.logisticLearningRate;
+  fs << "logisticIterations" << classifierSettings.logisticIterations;
   fs << "balanceClasses" << static_cast<int>(classifierSettings.balanceClasses);
   fs << "}";
 
@@ -521,6 +588,10 @@ bool SegmentationClassifier::save(const QString& path,
       randomForest_->save(sidecar.toStdString());
     } else if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
       svm_->save(sidecar.toStdString());
+    } else if (kind_ == SegmentationClassifierSettings::KNearestNeighbors) {
+      knn_->save(sidecar.toStdString());
+    } else if (kind_ == SegmentationClassifierSettings::LogisticRegression) {
+      logisticRegression_->save(sidecar.toStdString());
     }
   }
   return true;
@@ -561,16 +632,24 @@ bool SegmentationClassifier::load(const QString& path,
       featureSettings->intensity = static_cast<int>(node["intensity"]) != 0;
       featureSettings->gaussian3 = static_cast<int>(node["gaussian3"]) != 0;
       featureSettings->gaussian7 = static_cast<int>(node["gaussian7"]) != 0;
+      featureSettings->gaussian15 = static_cast<int>(node["gaussian15"]) != 0;
       featureSettings->differenceOfGaussians = static_cast<int>(node["differenceOfGaussians"]) != 0;
+      featureSettings->median = static_cast<int>(node["median"]) != 0;
+      featureSettings->bilateral = static_cast<int>(node["bilateral"]) != 0;
       featureSettings->gradient = static_cast<int>(node["gradient"]) != 0;
       featureSettings->laplacian = static_cast<int>(node["laplacian"]) != 0;
+      featureSettings->laplacianOfGaussian = static_cast<int>(node["laplacianOfGaussian"]) != 0;
       featureSettings->hessian = static_cast<int>(node["hessian"]) != 0;
       featureSettings->localMean = static_cast<int>(node["localMean"]) != 0;
       featureSettings->localStd = static_cast<int>(node["localStd"]) != 0;
       featureSettings->entropy = static_cast<int>(node["entropy"]) != 0;
       featureSettings->texture = static_cast<int>(node["texture"]) != 0;
+      featureSettings->clahe = static_cast<int>(node["clahe"]) != 0;
+      featureSettings->canny = static_cast<int>(node["canny"]) != 0;
+      featureSettings->structureTensor = static_cast<int>(node["structureTensor"]) != 0;
       featureSettings->gabor = static_cast<int>(node["gabor"]) != 0;
       featureSettings->membrane = static_cast<int>(node["membrane"]) != 0;
+      featureSettings->channelRatios = static_cast<int>(node["channelRatios"]) != 0;
       featureSettings->xPosition = static_cast<int>(node["xPosition"]) != 0;
       featureSettings->yPosition = static_cast<int>(node["yPosition"]) != 0;
     }
@@ -585,6 +664,9 @@ bool SegmentationClassifier::load(const QString& path,
       classifierSettings->randomForestMaxDepth = static_cast<int>(node["randomForestMaxDepth"]);
       classifierSettings->svmC = static_cast<double>(node["svmC"]);
       classifierSettings->svmGamma = static_cast<double>(node["svmGamma"]);
+      classifierSettings->knnNeighbors = static_cast<int>(node["knnNeighbors"]);
+      classifierSettings->logisticLearningRate = static_cast<double>(node["logisticLearningRate"]);
+      classifierSettings->logisticIterations = static_cast<int>(node["logisticIterations"]);
       classifierSettings->balanceClasses = static_cast<int>(node["balanceClasses"]) != 0;
     } else {
       classifierSettings->kind = kind_;
@@ -619,6 +701,14 @@ bool SegmentationClassifier::load(const QString& path,
     svm_ = cv::Algorithm::load<cv::ml::SVM>(sidecar.toStdString());
     return svm_ && !svm_->empty();
   }
+  if (kind_ == SegmentationClassifierSettings::KNearestNeighbors) {
+    knn_ = cv::Algorithm::load<cv::ml::KNearest>(sidecar.toStdString());
+    return knn_ && !knn_->empty();
+  }
+  if (kind_ == SegmentationClassifierSettings::LogisticRegression) {
+    logisticRegression_ = cv::Algorithm::load<cv::ml::LogisticRegression>(sidecar.toStdString());
+    return logisticRegression_ && !logisticRegression_->empty();
+  }
   return false;
 }
 
@@ -627,8 +717,20 @@ QString SegmentationClassifier::classifierName() const {
     case SegmentationClassifierSettings::GaussianNaiveBayes: return QStringLiteral("Gaussian Naive Bayes");
     case SegmentationClassifierSettings::RandomForest: return QStringLiteral("Random Forest");
     case SegmentationClassifierSettings::SupportVectorMachine: return QStringLiteral("SVM (RBF)");
+    case SegmentationClassifierSettings::KNearestNeighbors: return QStringLiteral("K-Nearest Neighbors");
+    case SegmentationClassifierSettings::LogisticRegression: return QStringLiteral("Logistic Regression");
   }
   return QStringLiteral("Unknown");
+}
+
+QVector<SegmentationClassifierDescriptor> SegmentationClassifier::availableClassifiers() {
+  return {
+      {SegmentationClassifierSettings::GaussianNaiveBayes, QStringLiteral("gaussian_naive_bayes"), QStringLiteral("Gaussian Naive Bayes"), true, true},
+      {SegmentationClassifierSettings::RandomForest, QStringLiteral("random_forest"), QStringLiteral("Random Forest"), true, true},
+      {SegmentationClassifierSettings::SupportVectorMachine, QStringLiteral("svm"), QStringLiteral("SVM (RBF)"), false, true},
+      {SegmentationClassifierSettings::KNearestNeighbors, QStringLiteral("knn"), QStringLiteral("K-Nearest Neighbors"), false, true},
+      {SegmentationClassifierSettings::LogisticRegression, QStringLiteral("logistic_regression"), QStringLiteral("Logistic Regression"), true, true},
+  };
 }
 
 cv::Mat SegmentationEngine::ensureGrayFloat(const cv::Mat& image) {
@@ -677,12 +779,31 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
       cv::GaussianBlur(source, blur, cv::Size(7, 7), 1.8);
       appendFeature(blur, channels);
     }
+    if (settings.gaussian15) {
+      cv::Mat blur;
+      cv::GaussianBlur(source, blur, cv::Size(15, 15), 3.0);
+      appendFeature(blur, channels);
+    }
     if (settings.differenceOfGaussians) {
       cv::Mat blurSmall, blurLarge, dog;
       cv::GaussianBlur(source, blurSmall, cv::Size(5, 5), 1.0);
       cv::GaussianBlur(source, blurLarge, cv::Size(11, 11), 2.5);
       cv::absdiff(blurSmall, blurLarge, dog);
       appendFeature(dog, channels);
+    }
+    if (settings.median) {
+      cv::Mat source8u;
+      source.convertTo(source8u, CV_8U, 255.0);
+      cv::Mat median;
+      cv::medianBlur(source8u, median, 5);
+      appendFeature(median, channels);
+    }
+    if (settings.bilateral) {
+      cv::Mat source8u;
+      source.convertTo(source8u, CV_8U, 255.0);
+      cv::Mat bilateral;
+      cv::bilateralFilter(source8u, bilateral, 7, 50.0, 50.0);
+      appendFeature(bilateral, channels);
     }
     if (settings.gradient) {
       cv::Mat gx, gy, mag;
@@ -695,6 +816,12 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
       cv::Mat lap;
       cv::Laplacian(source, lap, CV_32F, 3);
       appendFeature(cv::abs(lap), channels);
+    }
+    if (settings.laplacianOfGaussian) {
+      cv::Mat logSource, logFeature;
+      cv::GaussianBlur(source, logSource, cv::Size(0, 0), 1.5);
+      cv::Laplacian(logSource, logFeature, CV_32F, 3);
+      appendFeature(cv::abs(logFeature), channels);
     }
     if (settings.hessian) {
       cv::Mat dxx, dxy, dyy, hessianNorm;
@@ -726,6 +853,31 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
       cv::blur(mag.mul(mag), textureEnergy, cv::Size(9, 9));
       appendFeature(textureEnergy, channels);
     }
+    if (settings.clahe) {
+      cv::Mat source8u;
+      source.convertTo(source8u, CV_8U, 255.0);
+      cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+      cv::Mat claheOut;
+      clahe->apply(source8u, claheOut);
+      appendFeature(claheOut, channels);
+    }
+    if (settings.canny) {
+      cv::Mat source8u, edges;
+      source.convertTo(source8u, CV_8U, 255.0);
+      cv::Canny(source8u, edges, 60.0, 120.0);
+      appendFeature(edges, channels);
+    }
+    if (settings.structureTensor) {
+      cv::Mat gx, gy, jxx, jyy, jxy;
+      cv::Sobel(source, gx, CV_32F, 1, 0, 3);
+      cv::Sobel(source, gy, CV_32F, 0, 1, 3);
+      cv::GaussianBlur(gx.mul(gx), jxx, cv::Size(7, 7), 1.2);
+      cv::GaussianBlur(gy.mul(gy), jyy, cv::Size(7, 7), 1.2);
+      cv::GaussianBlur(gx.mul(gy), jxy, cv::Size(7, 7), 1.2);
+      appendFeature(jxx, channels);
+      appendFeature(jyy, channels);
+      appendFeature(jxy, channels);
+    }
     if (settings.gabor) {
       appendFeature(computeGaborResponse(source), channels);
     }
@@ -750,6 +902,20 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
 
   for (int channelIndex = 0; channelIndex < static_cast<int>(sourceChannels.size()); ++channelIndex) {
     appendDerivedFeatures(sourceChannels[channelIndex], channelIndex == 0);
+  }
+
+  if (settings.channelRatios && image.channels() >= 3) {
+    cv::Mat floatImage;
+    image.convertTo(floatImage, CV_32F, 1.0 / 255.0);
+    std::vector<cv::Mat> bgr;
+    cv::split(floatImage, bgr);
+    const float eps = 1e-4f;
+    cv::Mat rb = bgr[2] / (bgr[0] + eps);
+    cv::Mat rg = bgr[2] / (bgr[1] + eps);
+    cv::Mat gb = bgr[1] / (bgr[0] + eps);
+    appendFeature(rb, channels);
+    appendFeature(rg, channels);
+    appendFeature(gb, channels);
   }
 
   if (channels.empty()) {

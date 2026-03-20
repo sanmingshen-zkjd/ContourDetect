@@ -1,109 +1,73 @@
 #include <QApplication>
-#include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QDir>
-#include <QDirIterator>
-#include <QFileInfo>
-#include <QTextStream>
 #include <QFont>
 #include <QGuiApplication>
+#include <QTextStream>
 
-#include <opencv2/imgcodecs.hpp>
-
-#include "ImageIOUtils.h"
+#include "InferencePipeline.h"
 #include "MainWindow.h"
-#include "SegmentationEngine.h"
+#include "ServiceServer.h"
 
 namespace {
-int runCli(int argc, char** argv) {
+int runHeadless(int argc, char** argv) {
   QCoreApplication app(argc, argv);
   app.setApplicationName("QtTrainableSegmentation");
   QCommandLineParser parser;
-  parser.setApplicationDescription("Qt Trainable Segmentation CLI inference mode");
+  parser.setApplicationDescription("Qt Trainable Segmentation headless/service mode");
   parser.addHelpOption();
-  parser.addOption({"cli", "Run CLI inference mode."});
-  parser.addOption({"model", "Classifier YAML path.", "path"});
+  parser.addOption({"headless", "Run headless inference mode."});
+  parser.addOption({"server", "Run HTTP inference service."});
+  parser.addOption({"model", "Classical model YAML path.", "path"});
+  parser.addOption({"onnx-model", "ONNX segmentation model path.", "path"});
   parser.addOption({"input", "Input image file or directory.", "path"});
   parser.addOption({"output", "Output file or directory.", "path"});
   parser.addOption({"probability-class", "Optional probability class index.", "index", "0"});
+  parser.addOption({"backend", "Inference backend: classical or onnx.", "name", "classical"});
+  parser.addOption({"port", "HTTP service port.", "port", "8080"});
   parser.process(app);
 
-  if (!parser.isSet("cli")) {
-    return -1;
-  }
-  if (!parser.isSet("model") || !parser.isSet("input") || !parser.isSet("output")) {
-    QTextStream(stderr) << "--cli requires --model, --input, and --output\n";
-    return 2;
+  if (parser.isSet("server")) {
+    ServiceServer server;
+    server.setClassicalModelPath(parser.value("model"));
+    server.setOnnxModelPath(parser.value("onnx-model"));
+    QString error;
+    if (!server.start(static_cast<quint16>(parser.value("port").toUShort()), &error)) {
+      QTextStream(stderr) << "Failed to start service: " << error << "\n";
+      return 2;
+    }
+    QTextStream(stdout) << "Service listening on port " << parser.value("port") << "\n";
+    return app.exec();
   }
 
-  SegmentationClassifier model;
-  std::vector<SegmentationClassInfo> classes;
-  SegmentationFeatureSettings featureSettings;
-  SegmentationClassifierSettings classifierSettings;
-  SegmentationTrainingStats stats;
-  if (!model.load(parser.value("model"), &classes, &featureSettings, &classifierSettings, &stats)) {
-    QTextStream(stderr) << "Failed to load model: " << parser.value("model") << "\n";
+  if (!parser.isSet("headless")) {
+    return -1;
+  }
+  if (!parser.isSet("input") || !parser.isSet("output")) {
+    QTextStream(stderr) << "--headless requires --input and --output\n";
     return 3;
   }
 
-  const QString inputPath = parser.value("input");
-  const QString outputPath = parser.value("output");
-  const int probabilityClass = parser.value("probability-class").toInt();
-
-  QStringList inputs;
-  QFileInfo inputInfo(inputPath);
-  if (inputInfo.isDir()) {
-    QDirIterator it(inputPath, QStringList() << "*.png" << "*.jpg" << "*.jpeg" << "*.bmp" << "*.tif" << "*.tiff", QDir::Files);
-    while (it.hasNext()) inputs << it.next();
+  QString error;
+  const QString backend = parser.value("backend");
+  bool ok = false;
+  if (backend == QStringLiteral("onnx")) {
+    if (!parser.isSet("onnx-model")) {
+      QTextStream(stderr) << "--backend onnx requires --onnx-model\n";
+      return 4;
+    }
+    ok = InferencePipeline::runOnnxInference({parser.value("onnx-model"), parser.value("input"), parser.value("output")}, &error);
   } else {
-    inputs << inputPath;
-  }
-  if (inputs.isEmpty()) {
-    QTextStream(stderr) << "No input images found.\n";
-    return 4;
-  }
-  if (inputs.size() > 1) {
-    QDir().mkpath(outputPath);
-  }
-
-  for (const QString& imagePath : inputs) {
-    std::vector<cv::Mat> slices;
-    QString error;
-    if (!ImageIOUtils::loadImageVolume(imagePath, &slices, &error) || slices.empty()) {
-      QTextStream(stderr) << error << "\n";
+    if (!parser.isSet("model")) {
+      QTextStream(stderr) << "Classical backend requires --model\n";
       return 5;
     }
-    const QString baseName = QFileInfo(imagePath).completeBaseName();
-    for (int sliceIndex = 0; sliceIndex < static_cast<int>(slices.size()); ++sliceIndex) {
-      const cv::Mat featureStack = SegmentationEngine::computeFeatureStack(slices[sliceIndex], featureSettings);
-      const cv::Mat labels = SegmentationEngine::applyModelLabels(model, featureStack, slices[sliceIndex].rows, slices[sliceIndex].cols);
-      if (labels.empty()) {
-        QTextStream(stderr) << "Failed to infer: " << imagePath << "\n";
-        return 6;
-      }
-      cv::Mat exportMask;
-      labels.convertTo(exportMask, CV_8U);
-      QString targetPath;
-      if (inputs.size() == 1 && slices.size() == 1) {
-        targetPath = outputPath;
-      } else {
-        targetPath = QDir(outputPath).filePath(QString("%1_slice_%2.png").arg(baseName).arg(sliceIndex, 3, 10, QLatin1Char('0')));
-      }
-      if (!cv::imwrite(targetPath.toStdString(), exportMask)) {
-        QTextStream(stderr) << "Failed to write: " << targetPath << "\n";
-        return 7;
-      }
-      if (model.supportsProbability() && probabilityClass >= 0 && probabilityClass < static_cast<int>(classes.size())) {
-        const cv::Mat probs = SegmentationEngine::applyModelProbabilities(model, featureStack, slices[sliceIndex].rows, slices[sliceIndex].cols, probabilityClass);
-        if (!probs.empty()) {
-          cv::Mat prob8;
-          probs.convertTo(prob8, CV_8U, 255.0);
-          const QString probPath = targetPath.left(targetPath.lastIndexOf('.')) + QString("_prob_class_%1.png").arg(probabilityClass);
-          cv::imwrite(probPath.toStdString(), prob8);
-        }
-      }
-    }
+    ok = InferencePipeline::runClassicalInference({parser.value("model"), parser.value("input"), parser.value("output"), parser.value("probability-class").toInt()}, &error);
+  }
+  if (!ok) {
+    QTextStream(stderr) << error << "\n";
+    return 6;
   }
   return 0;
 }
@@ -111,8 +75,9 @@ int runCli(int argc, char** argv) {
 
 int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
-    if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--cli")) {
-      return runCli(argc, argv);
+    const QString arg = QString::fromLocal8Bit(argv[i]);
+    if (arg == QStringLiteral("--headless") || arg == QStringLiteral("--server")) {
+      return runHeadless(argc, argv);
     }
   }
 

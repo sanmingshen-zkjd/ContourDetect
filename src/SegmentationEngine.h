@@ -12,16 +12,24 @@ struct SegmentationFeatureSettings {
   bool intensity = true;
   bool gaussian3 = true;
   bool gaussian7 = true;
+  bool gaussian15 = false;
   bool differenceOfGaussians = false;
+  bool median = false;
+  bool bilateral = false;
   bool gradient = true;
   bool laplacian = true;
+  bool laplacianOfGaussian = false;
   bool hessian = false;
   bool localMean = true;
   bool localStd = true;
   bool entropy = false;
   bool texture = false;
+  bool clahe = false;
+  bool canny = false;
+  bool structureTensor = false;
   bool gabor = false;
   bool membrane = false;
+  bool channelRatios = false;
   bool xPosition = true;
   bool yPosition = true;
 };
@@ -43,6 +51,8 @@ struct SegmentationClassifierSettings {
     GaussianNaiveBayes = 0,
     RandomForest = 1,
     SupportVectorMachine = 2,
+    KNearestNeighbors = 3,
+    LogisticRegression = 4,
   };
 
   Kind kind = GaussianNaiveBayes;
@@ -50,7 +60,18 @@ struct SegmentationClassifierSettings {
   int randomForestMaxDepth = 20;
   double svmC = 2.0;
   double svmGamma = 0.5;
+  int knnNeighbors = 7;
+  double logisticLearningRate = 0.01;
+  int logisticIterations = 200;
   bool balanceClasses = false;
+};
+
+struct SegmentationClassifierDescriptor {
+  SegmentationClassifierSettings::Kind kind;
+  QString key;
+  QString displayName;
+  bool supportsProbability = false;
+  bool trainable = true;
 };
 
 class GaussianNaiveBayesModel {
@@ -105,6 +126,7 @@ public:
             SegmentationTrainingStats* stats);
 
   QString classifierName() const;
+  static QVector<SegmentationClassifierDescriptor> availableClassifiers();
   SegmentationClassifierSettings::Kind kind() const { return kind_; }
 
 private:
@@ -115,6 +137,8 @@ private:
   GaussianNaiveBayesModel gnbModel_;
   cv::Ptr<cv::ml::RTrees> randomForest_;
   cv::Ptr<cv::ml::SVM> svm_;
+  cv::Ptr<cv::ml::KNearest> knn_;
+  cv::Ptr<cv::ml::LogisticRegression> logisticRegression_;
 };
 
 class SegmentationEngine {
