@@ -4,6 +4,7 @@
 #include <QColor>
 #include <QVector>
 #include <opencv2/core.hpp>
+#include <opencv2/ml.hpp>
 
 #include <vector>
 
@@ -31,6 +32,20 @@ struct SegmentationTrainingStats {
   double trainingAccuracy = 0.0;
 };
 
+struct SegmentationClassifierSettings {
+  enum Kind {
+    GaussianNaiveBayes = 0,
+    RandomForest = 1,
+    SupportVectorMachine = 2,
+  };
+
+  Kind kind = GaussianNaiveBayes;
+  int randomForestTrees = 200;
+  int randomForestMaxDepth = 20;
+  double svmC = 2.0;
+  double svmGamma = 0.5;
+};
+
 class GaussianNaiveBayesModel {
 public:
   bool isValid() const;
@@ -44,17 +59,8 @@ public:
   cv::Mat predictLabels(const cv::Mat& features) const;
   cv::Mat predictProbabilities(const cv::Mat& features) const;
 
-  bool save(const QString& path,
-            const std::vector<SegmentationClassInfo>& classes,
-            const SegmentationFeatureSettings& settings,
-            const SegmentationTrainingStats& stats) const;
-
-  bool load(const QString& path,
-            std::vector<SegmentationClassInfo>* classes,
-            SegmentationFeatureSettings* settings,
-            SegmentationTrainingStats* stats);
-
-  int classCount() const { return classCount_; }
+  bool write(cv::FileStorage& fs) const;
+  bool read(const cv::FileNode& node);
 
 private:
   int classCount_ = 0;
@@ -62,6 +68,46 @@ private:
   cv::Mat means_;
   cv::Mat variances_;
   cv::Mat logPriors_;
+};
+
+class SegmentationClassifier {
+public:
+  bool isValid() const;
+  void clear();
+
+  bool train(const cv::Mat& features,
+             const cv::Mat& labels,
+             int classCount,
+             const SegmentationClassifierSettings& settings,
+             SegmentationTrainingStats* stats = nullptr);
+
+  cv::Mat predictLabels(const cv::Mat& features) const;
+  cv::Mat predictProbabilities(const cv::Mat& features) const;
+  bool supportsProbability() const;
+
+  bool save(const QString& path,
+            const std::vector<SegmentationClassInfo>& classes,
+            const SegmentationFeatureSettings& featureSettings,
+            const SegmentationClassifierSettings& classifierSettings,
+            const SegmentationTrainingStats& stats) const;
+
+  bool load(const QString& path,
+            std::vector<SegmentationClassInfo>* classes,
+            SegmentationFeatureSettings* featureSettings,
+            SegmentationClassifierSettings* classifierSettings,
+            SegmentationTrainingStats* stats);
+
+  QString classifierName() const;
+  SegmentationClassifierSettings::Kind kind() const { return kind_; }
+
+private:
+  static QString sidecarModelPath(const QString& metadataPath);
+  static bool computeAccuracy(const cv::Mat& labels, const cv::Mat& predicted, SegmentationTrainingStats* stats, int classCount);
+
+  SegmentationClassifierSettings::Kind kind_ = SegmentationClassifierSettings::GaussianNaiveBayes;
+  GaussianNaiveBayesModel gnbModel_;
+  cv::Ptr<cv::ml::RTrees> randomForest_;
+  cv::Ptr<cv::ml::SVM> svm_;
 };
 
 class SegmentationEngine {
@@ -76,12 +122,12 @@ public:
                                cv::Mat* labels,
                                int maxSamplesPerClass = 12000);
 
-  static cv::Mat applyModelLabels(const GaussianNaiveBayesModel& model,
+  static cv::Mat applyModelLabels(const SegmentationClassifier& model,
                                   const cv::Mat& featureStack,
                                   int rows,
                                   int cols);
 
-  static cv::Mat applyModelProbabilities(const GaussianNaiveBayesModel& model,
+  static cv::Mat applyModelProbabilities(const SegmentationClassifier& model,
                                          const cv::Mat& featureStack,
                                          int rows,
                                          int cols,

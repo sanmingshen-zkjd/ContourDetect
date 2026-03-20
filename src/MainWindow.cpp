@@ -127,6 +127,10 @@ void MainWindow::buildUi() {
   opacitySlider_->setRange(0, 100);
   opacitySlider_->setValue(static_cast<int>(overlayOpacity_ * 100.0));
   probabilityCombo_ = new QComboBox(brushGroup);
+  classifierCombo_ = new QComboBox(brushGroup);
+  classifierCombo_->addItem(tr("Gaussian Naive Bayes"), SegmentationClassifierSettings::GaussianNaiveBayes);
+  classifierCombo_->addItem(tr("Random Forest"), SegmentationClassifierSettings::RandomForest);
+  classifierCombo_->addItem(tr("SVM (RBF)"), SegmentationClassifierSettings::SupportVectorMachine);
   overlayCheck_ = new QCheckBox(tr("Show classifier overlay"), brushGroup);
   overlayCheck_->setChecked(true);
   contourCheck_ = new QCheckBox(tr("Draw contours"), brushGroup);
@@ -134,6 +138,7 @@ void MainWindow::buildUi() {
   brushLayout->addRow(tr("Brush radius"), brushSizeSpin_);
   brushLayout->addRow(tr("Overlay alpha"), opacitySlider_);
   brushLayout->addRow(tr("Probability class"), probabilityCombo_);
+  brushLayout->addRow(tr("Classifier"), classifierCombo_);
   brushLayout->addRow(overlayCheck_);
   brushLayout->addRow(contourCheck_);
   leftLayout->addWidget(brushGroup);
@@ -224,6 +229,10 @@ void MainWindow::connectSignals() {
   connect(brushSizeSpin_, qOverload<int>(&QSpinBox::valueChanged), this, &MainWindow::onBrushRadiusChanged);
   connect(classList_, &QListWidget::itemSelectionChanged, this, &MainWindow::onClassSelectionChanged);
   connect(probabilityCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, &MainWindow::onProbabilityClassChanged);
+  connect(classifierCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
+    classifierSettings_.kind = static_cast<SegmentationClassifierSettings::Kind>(classifierCombo_->itemData(index).toInt());
+    updateUiState();
+  });
   connect(opacitySlider_, &QSlider::valueChanged, this, &MainWindow::onOpacityChanged);
   connect(overlayCheck_, &QCheckBox::toggled, this, [this](bool checked) {
     showOverlay_ = checked;
@@ -290,15 +299,17 @@ void MainWindow::refreshClassList() {
 void MainWindow::updateUiState() {
   const bool hasImage = !originalImage_.empty();
   const bool hasModel = model_.isValid();
+  const bool hasProbability = hasModel && model_.supportsProbability();
   const bool hasTwoClasses = classes_.size() >= 2;
   trainButton_->setEnabled(hasImage);
   removeClass1TraceButton_->setEnabled(class1TraceList_ && class1TraceList_->currentRow() >= 0);
   removeClass2TraceButton_->setEnabled(class2TraceList_ && class2TraceList_->currentRow() >= 0);
   applyButton_->setEnabled(hasImage && hasModel);
   createResultButton_->setEnabled(hasImage && hasModel);
-  probabilityButton_->setEnabled(hasImage && hasModel);
+  probabilityButton_->setEnabled(hasImage && hasProbability);
   brushSizeSpin_->setEnabled(hasImage);
-  probabilityCombo_->setEnabled(hasModel);
+  probabilityCombo_->setEnabled(hasProbability);
+  classifierCombo_->setEnabled(true);
   addToClass1Button_->setEnabled(hasTwoClasses);
   addToClass2Button_->setEnabled(hasTwoClasses);
   class1TraceList_->setEnabled(hasTwoClasses);
@@ -307,7 +318,8 @@ void MainWindow::updateUiState() {
   contourCheck_->setEnabled(hasModel || !labelResult_.empty());
   view_->setPaintEnabled(hasImage);
   modelLabel_->setText(hasModel
-                           ? tr("Model: %1 classes, %2 samples, acc=%3%")
+                           ? tr("Model: %1 | %2 classes, %3 samples, acc=%4%")
+                                 .arg(model_.classifierName())
                                  .arg(trainingStats_.classCount)
                                  .arg(trainingStats_.sampleCount)
                                  .arg(QString::number(trainingStats_.trainingAccuracy * 100.0, 'f', 2))
@@ -348,7 +360,9 @@ void MainWindow::updateProbabilityView() {
     return;
   }
   const int cls = probabilityCombo_->currentData().toInt();
-  probabilityImage_ = SegmentationEngine::applyModelProbabilities(model_, featureStack_, originalImage_.rows, originalImage_.cols, cls);
+  probabilityImage_ = model_.supportsProbability()
+                          ? SegmentationEngine::applyModelProbabilities(model_, featureStack_, originalImage_.rows, originalImage_.cols, cls)
+                          : cv::Mat();
 }
 
 void MainWindow::repaintAnnotationPreview() {
@@ -758,7 +772,7 @@ void MainWindow::onTrainClassifier() {
     QMessageBox::information(this, tr("No annotations"), tr("Please paint at least one pixel for each class before training."));
     return;
   }
-  if (!model_.train(samples, labels, static_cast<int>(classes_.size()), &trainingStats_)) {
+  if (!model_.train(samples, labels, static_cast<int>(classes_.size()), classifierSettings_, &trainingStats_)) {
     QMessageBox::warning(this, tr("Training failed"), tr("Training failed. Ensure every class has annotations."));
     return;
   }
@@ -872,7 +886,7 @@ void MainWindow::onSaveClassifier() {
   }
   const QString path = QFileDialog::getSaveFileName(this, tr("Save classifier"), QString(), tr("Classifier (*.yml *.yaml)"));
   if (path.isEmpty()) return;
-  if (!model_.save(path, classes_, featureSettings_, trainingStats_)) {
+  if (!model_.save(path, classes_, featureSettings_, classifierSettings_, trainingStats_)) {
     QMessageBox::warning(this, tr("Save failed"), tr("Failed to save classifier."));
     return;
   }
@@ -884,26 +898,36 @@ void MainWindow::onLoadClassifier() {
   if (path.isEmpty()) return;
   std::vector<SegmentationClassInfo> loadedClasses;
   SegmentationFeatureSettings settings;
+  SegmentationClassifierSettings classifierSettings;
   SegmentationTrainingStats stats;
-  GaussianNaiveBayesModel loadedModel;
-  if (!loadedModel.load(path, &loadedClasses, &settings, &stats)) {
+  SegmentationClassifier loadedModel;
+  if (!loadedModel.load(path, &loadedClasses, &settings, &classifierSettings, &stats)) {
     QMessageBox::warning(this, tr("Load failed"), tr("Failed to load classifier."));
     return;
   }
   model_ = loadedModel;
   classes_ = loadedClasses;
   featureSettings_ = settings;
+  classifierSettings_ = classifierSettings;
   trainingStats_ = stats;
   if (!originalImage_.empty()) {
     ensureAnnotationStorage();
-  for (auto& mask : classBrushMasks_) { mask = cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)); }
-  for (auto& traces : classTracePolygons_) { traces.clear(); }
-  pendingTrace_.clear();
-  rebuildMasksFromAnnotations();
+    for (auto& mask : classBrushMasks_) {
+      mask = cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0));
+    }
+    for (auto& traces : classTracePolygons_) {
+      traces.clear();
+    }
+    pendingTrace_.clear();
+    rebuildMasksFromAnnotations();
     rebuildFeatureStack();
     labelResult_.release();
+    overlayImage_.release();
+    probabilityImage_.release();
   }
   refreshClassList();
+  const int comboIndex = classifierCombo_->findData(classifierSettings_.kind);
+  if (comboIndex >= 0) classifierCombo_->setCurrentIndex(comboIndex);
   updateUiState();
   updateViewer();
   logMessage(tr("Loaded classifier from %1.").arg(path));

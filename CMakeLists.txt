@@ -9,7 +9,7 @@ set(CMAKE_AUTOUIC ON)
 
 find_package(QT NAMES Qt6 Qt5 COMPONENTS Widgets PrintSupport REQUIRED)
 find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Widgets PrintSupport REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs ml)
 
 add_executable(QtTrainableSegmentation
   src/main.cpp
@@ -113,7 +113,7 @@ if(MSVC)
     set(_opencv_version_suffix "${_opencv_ver_major}${_opencv_ver_minor}${_opencv_ver_patch}")
   endif()
 
-  foreach(module IN ITEMS core imgproc imgcodecs)
+  foreach(module IN ITEMS core imgproc imgcodecs ml)
     _append_opencv_ms_target(${module} "${_opencv_version_suffix}")
   endforeach()
 endif()
@@ -125,7 +125,7 @@ if(NOT OPENCV_LINK_LIBS)
   if(TARGET opencv_world)
     list(APPEND OPENCV_LINK_LIBS opencv_world)
   elseif(TARGET opencv_core)
-    foreach(module IN ITEMS opencv_core opencv_imgproc opencv_imgcodecs)
+    foreach(module IN ITEMS opencv_core opencv_imgproc opencv_imgcodecs opencv_ml)
       if(TARGET ${module})
         list(APPEND OPENCV_LINK_LIBS ${module})
       endif()
@@ -146,7 +146,7 @@ endif()
 # Final MSVC fallback: try plain module names in case a toolchain file already
 # added the corresponding library directories globally.
 if(MSVC AND NOT OPENCV_LINK_LIBS)
-  list(APPEND OPENCV_LINK_LIBS opencv_core opencv_imgproc opencv_imgcodecs)
+  list(APPEND OPENCV_LINK_LIBS opencv_core opencv_imgproc opencv_imgcodecs opencv_ml)
 endif()
 
 list(REMOVE_DUPLICATES OPENCV_LINK_LIBS)

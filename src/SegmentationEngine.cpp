@@ -26,6 +26,21 @@ void appendFeature(const cv::Mat& feature, std::vector<cv::Mat>& channels) {
   }
   channels.push_back(normalized);
 }
+
+QString classifierKindToString(SegmentationClassifierSettings::Kind kind) {
+  switch (kind) {
+    case SegmentationClassifierSettings::GaussianNaiveBayes: return QStringLiteral("gaussian_naive_bayes");
+    case SegmentationClassifierSettings::RandomForest: return QStringLiteral("random_forest");
+    case SegmentationClassifierSettings::SupportVectorMachine: return QStringLiteral("svm");
+  }
+  return QStringLiteral("gaussian_naive_bayes");
+}
+
+SegmentationClassifierSettings::Kind classifierKindFromString(const QString& name) {
+  if (name == QStringLiteral("random_forest")) return SegmentationClassifierSettings::RandomForest;
+  if (name == QStringLiteral("svm")) return SegmentationClassifierSettings::SupportVectorMachine;
+  return SegmentationClassifierSettings::GaussianNaiveBayes;
+}
 }
 
 bool GaussianNaiveBayesModel::isValid() const {
@@ -170,36 +185,206 @@ cv::Mat GaussianNaiveBayesModel::predictLabels(const cv::Mat& features) const {
   return labels;
 }
 
-bool GaussianNaiveBayesModel::save(const QString& path,
-                                   const std::vector<SegmentationClassInfo>& classes,
-                                   const SegmentationFeatureSettings& settings,
-                                   const SegmentationTrainingStats& stats) const {
+bool GaussianNaiveBayesModel::write(cv::FileStorage& fs) const {
   if (!isValid()) {
     return false;
   }
-  cv::FileStorage fs(path.toStdString(), cv::FileStorage::WRITE | cv::FileStorage::FORMAT_YAML);
-  if (!fs.isOpened()) {
-    return false;
-  }
-
   fs << "class_count" << classCount_;
   fs << "feature_count" << featureCount_;
   fs << "means" << means_;
   fs << "variances" << variances_;
   fs << "log_priors" << logPriors_;
+  return true;
+}
+
+bool GaussianNaiveBayesModel::read(const cv::FileNode& node) {
+  clear();
+  if (node.empty()) {
+    return false;
+  }
+  node["class_count"] >> classCount_;
+  node["feature_count"] >> featureCount_;
+  node["means"] >> means_;
+  node["variances"] >> variances_;
+  node["log_priors"] >> logPriors_;
+  if (!isValid()) {
+    clear();
+    return false;
+  }
+  return true;
+}
+
+bool SegmentationClassifier::isValid() const {
+  switch (kind_) {
+    case SegmentationClassifierSettings::GaussianNaiveBayes:
+      return gnbModel_.isValid();
+    case SegmentationClassifierSettings::RandomForest:
+      return randomForest_ && !randomForest_->empty();
+    case SegmentationClassifierSettings::SupportVectorMachine:
+      return svm_ && !svm_->empty();
+  }
+  return false;
+}
+
+void SegmentationClassifier::clear() {
+  kind_ = SegmentationClassifierSettings::GaussianNaiveBayes;
+  gnbModel_.clear();
+  randomForest_.release();
+  svm_.release();
+}
+
+bool SegmentationClassifier::computeAccuracy(const cv::Mat& labels,
+                                             const cv::Mat& predicted,
+                                             SegmentationTrainingStats* stats,
+                                             int classCount) {
+  if (!stats || labels.empty() || predicted.empty() || labels.rows != predicted.rows) {
+    return true;
+  }
+  int correct = 0;
+  for (int row = 0; row < labels.rows; ++row) {
+    if (labels.at<int>(row, 0) == predicted.at<int>(row, 0)) {
+      ++correct;
+    }
+  }
+  stats->classCount = classCount;
+  stats->sampleCount = labels.rows;
+  stats->trainingAccuracy = labels.rows > 0 ? static_cast<double>(correct) / labels.rows : 0.0;
+  return true;
+}
+
+bool SegmentationClassifier::train(const cv::Mat& features,
+                                   const cv::Mat& labels,
+                                   int classCount,
+                                   const SegmentationClassifierSettings& settings,
+                                   SegmentationTrainingStats* stats) {
+  clear();
+  kind_ = settings.kind;
+  if (stats) {
+    *stats = {};
+  }
+
+  if (kind_ == SegmentationClassifierSettings::GaussianNaiveBayes) {
+    return gnbModel_.train(features, labels, classCount, stats);
+  }
+
+  if (features.empty() || labels.empty()) {
+    return false;
+  }
+
+  cv::Ptr<cv::ml::TrainData> trainData = cv::ml::TrainData::create(features, cv::ml::ROW_SAMPLE, labels);
+  if (!trainData) {
+    return false;
+  }
+
+  if (kind_ == SegmentationClassifierSettings::RandomForest) {
+    randomForest_ = cv::ml::RTrees::create();
+    randomForest_->setMaxDepth(settings.randomForestMaxDepth);
+    randomForest_->setMinSampleCount(2);
+    randomForest_->setRegressionAccuracy(0.0f);
+    randomForest_->setUseSurrogates(false);
+    randomForest_->setMaxCategories(std::max(2, classCount));
+    randomForest_->setTermCriteria(cv::TermCriteria(cv::TermCriteria::MAX_ITER, settings.randomForestTrees, 0));
+    if (!randomForest_->train(trainData)) {
+      randomForest_.release();
+      return false;
+    }
+    const cv::Mat predicted = predictLabels(features);
+    return computeAccuracy(labels, predicted, stats, classCount);
+  }
+
+  if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
+    svm_ = cv::ml::SVM::create();
+    svm_->setType(cv::ml::SVM::C_SVC);
+    svm_->setKernel(cv::ml::SVM::RBF);
+    svm_->setC(settings.svmC);
+    svm_->setGamma(settings.svmGamma);
+    svm_->setTermCriteria(cv::TermCriteria(cv::TermCriteria::MAX_ITER + cv::TermCriteria::EPS, 500, 1e-4));
+    if (!svm_->train(trainData)) {
+      svm_.release();
+      return false;
+    }
+    const cv::Mat predicted = predictLabels(features);
+    return computeAccuracy(labels, predicted, stats, classCount);
+  }
+
+  return false;
+}
+
+cv::Mat SegmentationClassifier::predictLabels(const cv::Mat& features) const {
+  cv::Mat labels;
+  if (!isValid() || features.empty()) {
+    return labels;
+  }
+
+  if (kind_ == SegmentationClassifierSettings::GaussianNaiveBayes) {
+    return gnbModel_.predictLabels(features);
+  }
+
+  labels = cv::Mat::zeros(features.rows, 1, CV_32S);
+  for (int row = 0; row < features.rows; ++row) {
+    float predicted = 0.0f;
+    if (kind_ == SegmentationClassifierSettings::RandomForest) {
+      predicted = randomForest_->predict(features.row(row));
+    } else if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
+      predicted = svm_->predict(features.row(row));
+    }
+    labels.at<int>(row, 0) = static_cast<int>(std::lround(predicted));
+  }
+  return labels;
+}
+
+cv::Mat SegmentationClassifier::predictProbabilities(const cv::Mat& features) const {
+  if (!supportsProbability()) {
+    return cv::Mat();
+  }
+  return gnbModel_.predictProbabilities(features);
+}
+
+bool SegmentationClassifier::supportsProbability() const {
+  return kind_ == SegmentationClassifierSettings::GaussianNaiveBayes && gnbModel_.isValid();
+}
+
+QString SegmentationClassifier::sidecarModelPath(const QString& metadataPath) {
+  return metadataPath + QStringLiteral(".model.yml");
+}
+
+bool SegmentationClassifier::save(const QString& path,
+                                  const std::vector<SegmentationClassInfo>& classes,
+                                  const SegmentationFeatureSettings& featureSettings,
+                                  const SegmentationClassifierSettings& classifierSettings,
+                                  const SegmentationTrainingStats& stats) const {
+  if (!isValid()) {
+    return false;
+  }
+
+  cv::FileStorage fs(path.toStdString(), cv::FileStorage::WRITE | cv::FileStorage::FORMAT_YAML);
+  if (!fs.isOpened()) {
+    return false;
+  }
+
+  fs << "classifier_kind" << classifierKindToString(kind_).toStdString();
   fs << "training_accuracy" << stats.trainingAccuracy;
   fs << "sample_count" << stats.sampleCount;
+  fs << "class_count" << stats.classCount;
 
-  fs << "settings" << "{";
-  fs << "intensity" << static_cast<int>(settings.intensity);
-  fs << "gaussian3" << static_cast<int>(settings.gaussian3);
-  fs << "gaussian7" << static_cast<int>(settings.gaussian7);
-  fs << "gradient" << static_cast<int>(settings.gradient);
-  fs << "laplacian" << static_cast<int>(settings.laplacian);
-  fs << "localMean" << static_cast<int>(settings.localMean);
-  fs << "localStd" << static_cast<int>(settings.localStd);
-  fs << "xPosition" << static_cast<int>(settings.xPosition);
-  fs << "yPosition" << static_cast<int>(settings.yPosition);
+  fs << "feature_settings" << "{";
+  fs << "intensity" << static_cast<int>(featureSettings.intensity);
+  fs << "gaussian3" << static_cast<int>(featureSettings.gaussian3);
+  fs << "gaussian7" << static_cast<int>(featureSettings.gaussian7);
+  fs << "gradient" << static_cast<int>(featureSettings.gradient);
+  fs << "laplacian" << static_cast<int>(featureSettings.laplacian);
+  fs << "localMean" << static_cast<int>(featureSettings.localMean);
+  fs << "localStd" << static_cast<int>(featureSettings.localStd);
+  fs << "xPosition" << static_cast<int>(featureSettings.xPosition);
+  fs << "yPosition" << static_cast<int>(featureSettings.yPosition);
+  fs << "}";
+
+  fs << "classifier_settings" << "{";
+  fs << "kind" << classifierKindToString(classifierSettings.kind).toStdString();
+  fs << "randomForestTrees" << classifierSettings.randomForestTrees;
+  fs << "randomForestMaxDepth" << classifierSettings.randomForestMaxDepth;
+  fs << "svmC" << classifierSettings.svmC;
+  fs << "svmGamma" << classifierSettings.svmGamma;
   fs << "}";
 
   fs << "classes" << "[";
@@ -213,47 +398,78 @@ bool GaussianNaiveBayesModel::save(const QString& path,
     fs << "}";
   }
   fs << "]";
+
+  if (kind_ == SegmentationClassifierSettings::GaussianNaiveBayes) {
+    fs << "gaussian_nb" << "{";
+    gnbModel_.write(fs);
+    fs << "}";
+  } else {
+    const QString sidecar = sidecarModelPath(path);
+    fs << "opencv_sidecar_model" << sidecar.toStdString();
+    if (kind_ == SegmentationClassifierSettings::RandomForest) {
+      randomForest_->save(sidecar.toStdString());
+    } else if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
+      svm_->save(sidecar.toStdString());
+    }
+  }
   return true;
 }
 
-bool GaussianNaiveBayesModel::load(const QString& path,
-                                   std::vector<SegmentationClassInfo>* classes,
-                                   SegmentationFeatureSettings* settings,
-                                   SegmentationTrainingStats* stats) {
+bool SegmentationClassifier::load(const QString& path,
+                                  std::vector<SegmentationClassInfo>* classes,
+                                  SegmentationFeatureSettings* featureSettings,
+                                  SegmentationClassifierSettings* classifierSettings,
+                                  SegmentationTrainingStats* stats) {
   clear();
   cv::FileStorage fs(path.toStdString(), cv::FileStorage::READ);
   if (!fs.isOpened()) {
     return false;
   }
 
-  fs["class_count"] >> classCount_;
-  fs["feature_count"] >> featureCount_;
-  fs["means"] >> means_;
-  fs["variances"] >> variances_;
-  fs["log_priors"] >> logPriors_;
-  if (!isValid()) {
-    clear();
-    return false;
-  }
+  const cv::FileNode kindNode = fs["classifier_kind"];
+  const bool hasExplicitKind = !kindNode.empty();
+  const QString kindName = hasExplicitKind
+                               ? QString::fromStdString(static_cast<std::string>(kindNode))
+                               : QString();
+  kind_ = hasExplicitKind ? classifierKindFromString(kindName)
+                          : SegmentationClassifierSettings::GaussianNaiveBayes;
 
   if (stats) {
-    stats->classCount = classCount_;
     fs["training_accuracy"] >> stats->trainingAccuracy;
     fs["sample_count"] >> stats->sampleCount;
+    fs["class_count"] >> stats->classCount;
   }
 
-  if (settings) {
-    const cv::FileNode node = fs["settings"];
+  if (featureSettings) {
+    *featureSettings = {};
+    cv::FileNode node = fs["feature_settings"];
+    if (node.empty()) {
+      node = fs["settings"];
+    }
     if (!node.empty()) {
-      settings->intensity = static_cast<int>(node["intensity"]) != 0;
-      settings->gaussian3 = static_cast<int>(node["gaussian3"]) != 0;
-      settings->gaussian7 = static_cast<int>(node["gaussian7"]) != 0;
-      settings->gradient = static_cast<int>(node["gradient"]) != 0;
-      settings->laplacian = static_cast<int>(node["laplacian"]) != 0;
-      settings->localMean = static_cast<int>(node["localMean"]) != 0;
-      settings->localStd = static_cast<int>(node["localStd"]) != 0;
-      settings->xPosition = static_cast<int>(node["xPosition"]) != 0;
-      settings->yPosition = static_cast<int>(node["yPosition"]) != 0;
+      featureSettings->intensity = static_cast<int>(node["intensity"]) != 0;
+      featureSettings->gaussian3 = static_cast<int>(node["gaussian3"]) != 0;
+      featureSettings->gaussian7 = static_cast<int>(node["gaussian7"]) != 0;
+      featureSettings->gradient = static_cast<int>(node["gradient"]) != 0;
+      featureSettings->laplacian = static_cast<int>(node["laplacian"]) != 0;
+      featureSettings->localMean = static_cast<int>(node["localMean"]) != 0;
+      featureSettings->localStd = static_cast<int>(node["localStd"]) != 0;
+      featureSettings->xPosition = static_cast<int>(node["xPosition"]) != 0;
+      featureSettings->yPosition = static_cast<int>(node["yPosition"]) != 0;
+    }
+  }
+
+  if (classifierSettings) {
+    *classifierSettings = {};
+    const cv::FileNode node = fs["classifier_settings"];
+    if (!node.empty()) {
+      classifierSettings->kind = classifierKindFromString(QString::fromStdString(static_cast<std::string>(node["kind"])));
+      classifierSettings->randomForestTrees = static_cast<int>(node["randomForestTrees"]);
+      classifierSettings->randomForestMaxDepth = static_cast<int>(node["randomForestMaxDepth"]);
+      classifierSettings->svmC = static_cast<double>(node["svmC"]);
+      classifierSettings->svmGamma = static_cast<double>(node["svmGamma"]);
+    } else {
+      classifierSettings->kind = kind_;
     }
   }
 
@@ -262,16 +478,39 @@ bool GaussianNaiveBayesModel::load(const QString& path,
     for (const auto& item : fs["classes"]) {
       SegmentationClassInfo info;
       info.name = QString::fromStdString(static_cast<std::string>(item["name"]));
-      const int r = static_cast<int>(item["color_r"]);
-      const int g = static_cast<int>(item["color_g"]);
-      const int b = static_cast<int>(item["color_b"]);
-      info.color = QColor(r, g, b);
+      info.color = QColor(static_cast<int>(item["color_r"]), static_cast<int>(item["color_g"]), static_cast<int>(item["color_b"]));
       info.enabled = static_cast<int>(item["enabled"]) != 0;
       classes->push_back(info);
     }
   }
 
-  return true;
+  if (kind_ == SegmentationClassifierSettings::GaussianNaiveBayes) {
+    const cv::FileNode legacyOrNestedNode = hasExplicitKind ? fs["gaussian_nb"] : fs.root();
+    return gnbModel_.read(legacyOrNestedNode);
+  }
+
+  const QString sidecar = QString::fromStdString(static_cast<std::string>(fs["opencv_sidecar_model"]));
+  if (sidecar.isEmpty()) {
+    return false;
+  }
+  if (kind_ == SegmentationClassifierSettings::RandomForest) {
+    randomForest_ = cv::Algorithm::load<cv::ml::RTrees>(sidecar.toStdString());
+    return randomForest_ && !randomForest_->empty();
+  }
+  if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
+    svm_ = cv::Algorithm::load<cv::ml::SVM>(sidecar.toStdString());
+    return svm_ && !svm_->empty();
+  }
+  return false;
+}
+
+QString SegmentationClassifier::classifierName() const {
+  switch (kind_) {
+    case SegmentationClassifierSettings::GaussianNaiveBayes: return QStringLiteral("Gaussian Naive Bayes");
+    case SegmentationClassifierSettings::RandomForest: return QStringLiteral("Random Forest");
+    case SegmentationClassifierSettings::SupportVectorMachine: return QStringLiteral("SVM (RBF)");
+  }
+  return QStringLiteral("Unknown");
 }
 
 cv::Mat SegmentationEngine::ensureGrayFloat(const cv::Mat& image) {
@@ -406,10 +645,11 @@ cv::Mat SegmentationEngine::gatherSamples(const cv::Mat& featureStack,
   return samples;
 }
 
-cv::Mat SegmentationEngine::applyModelLabels(const GaussianNaiveBayesModel& model,
+cv::Mat SegmentationEngine::applyModelLabels(const SegmentationClassifier& model,
                                              const cv::Mat& featureStack,
                                              int rows,
                                              int cols) {
+  (void)cols;
   cv::Mat labels = model.predictLabels(featureStack);
   if (labels.empty()) {
     return cv::Mat();
@@ -417,7 +657,7 @@ cv::Mat SegmentationEngine::applyModelLabels(const GaussianNaiveBayesModel& mode
   return labels.reshape(1, rows).clone();
 }
 
-cv::Mat SegmentationEngine::applyModelProbabilities(const GaussianNaiveBayesModel& model,
+cv::Mat SegmentationEngine::applyModelProbabilities(const SegmentationClassifier& model,
                                                     const cv::Mat& featureStack,
                                                     int rows,
                                                     int cols,

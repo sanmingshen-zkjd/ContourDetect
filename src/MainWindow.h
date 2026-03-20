@@ -96,6 +96,7 @@ private:
   QSpinBox* brushSizeSpin_ = nullptr;
   QSlider* opacitySlider_ = nullptr;
   QComboBox* probabilityCombo_ = nullptr;
+  QComboBox* classifierCombo_ = nullptr;
   QCheckBox* overlayCheck_ = nullptr;
   QCheckBox* contourCheck_ = nullptr;
 
@@ -121,7 +122,8 @@ private:
   QPolygon pendingTrace_;
   std::vector<SegmentationClassInfo> classes_;
   SegmentationFeatureSettings featureSettings_;
-  GaussianNaiveBayesModel model_;
+  SegmentationClassifier model_;
+  SegmentationClassifierSettings classifierSettings_;
   SegmentationTrainingStats trainingStats_;
   QString imagePath_;
   bool showOverlay_ = true;

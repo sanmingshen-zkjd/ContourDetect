@@ -14,7 +14,7 @@
   - Laplacian
   - 局部均值 / 局部标准差
   - 归一化 X/Y 空间位置
-- 使用 **Gaussian Naive Bayes** 进行多类别像素分类。
+- 支持多种可切换分类器：**Gaussian Naive Bayes / Random Forest / SVM (RBF)**。
 - 生成整图分割结果与按类别概率图。
 - 支持结果统计绘图。
 - 支持保存 / 加载：
@@ -36,6 +36,7 @@
 - **Load / Save data**：加载/保存标注数据
 - **Create new class**：新增类别
 - **Settings**：配置特征提取项
+- **Classifier**：选择当前训练器（GaussianNB / Random Forest / SVM）
 - **Trace ROI**：先画出一个自由曲线 ROI
 - **Add to Class 1**：把当前 ROI 提交为前景目标 trace
 - **Add to Class 2**：把当前 ROI 提交为背景对象 trace
@@ -89,10 +90,11 @@ cmake -S . -B build -G "Visual Studio 16 2019" -A x64 ^
 3. 右侧使用 **Add to Class 1** 把该 ROI 提交为前景目标 trace，使用 **Add to Class 2** 把该 ROI 提交为背景对象 trace。
 4. 也可以继续使用 `Paint` 工具在图像上补充像素级样本。
 5. 如果你创建了更多类别，也可以从类别列表切换并继续标注。
-6. 点击 **Train classifier**。
-7. 查看叠加结果、概率图与结果统计。
-8. 根据需要继续补充标注并重新训练。
-9. 保存训练数据或导出分类器。
+6. 选择需要的 **Classifier**。
+7. 点击 **Train classifier**。
+8. 查看叠加结果、概率图与结果统计。
+9. 根据需要继续补充标注并重新训练。
+10. 保存训练数据或导出分类器。
 
 ## 训练数据格式
 
@@ -113,3 +115,6 @@ cmake -S . -B build -G "Visual Studio 16 2019" -A x64 ^
   - 3D stack / 多通道图像
   - 批处理推理
   - 模型对比与交叉验证
+
+
+> 注：当前“概率图”直接支持 Gaussian Naive Bayes；Random Forest 与 SVM 已支持训练/预测/保存加载，但暂未提供严格概率输出。
