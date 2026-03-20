@@ -653,87 +653,103 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
     return cv::Mat();
   }
 
-  std::vector<cv::Mat> channels;
-  if (settings.intensity) appendFeature(gray, channels);
+  std::vector<cv::Mat> sourceChannels;
+  if (image.channels() > 1) {
+    cv::Mat floatImage;
+    image.convertTo(floatImage, CV_32F, 1.0 / 255.0);
+    cv::split(floatImage, sourceChannels);
+    sourceChannels.insert(sourceChannels.begin(), gray);
+  } else {
+    sourceChannels.push_back(gray);
+  }
 
-  if (settings.gaussian3) {
-    cv::Mat blur;
-    cv::GaussianBlur(gray, blur, cv::Size(3, 3), 0.8);
-    appendFeature(blur, channels);
-  }
-  if (settings.gaussian7) {
-    cv::Mat blur;
-    cv::GaussianBlur(gray, blur, cv::Size(7, 7), 1.8);
-    appendFeature(blur, channels);
-  }
-  if (settings.differenceOfGaussians) {
-    cv::Mat blurSmall, blurLarge, dog;
-    cv::GaussianBlur(gray, blurSmall, cv::Size(5, 5), 1.0);
-    cv::GaussianBlur(gray, blurLarge, cv::Size(11, 11), 2.5);
-    cv::absdiff(blurSmall, blurLarge, dog);
-    appendFeature(dog, channels);
-  }
-  if (settings.gradient) {
-    cv::Mat gx, gy, mag;
-    cv::Sobel(gray, gx, CV_32F, 1, 0, 3);
-    cv::Sobel(gray, gy, CV_32F, 0, 1, 3);
-    cv::magnitude(gx, gy, mag);
-    appendFeature(mag, channels);
-  }
-  if (settings.laplacian) {
-    cv::Mat lap;
-    cv::Laplacian(gray, lap, CV_32F, 3);
-    appendFeature(cv::abs(lap), channels);
-  }
-  if (settings.hessian) {
-    cv::Mat dxx, dxy, dyy, hessianNorm;
-    cv::Sobel(gray, dxx, CV_32F, 2, 0, 3);
-    cv::Sobel(gray, dxy, CV_32F, 1, 1, 3);
-    cv::Sobel(gray, dyy, CV_32F, 0, 2, 3);
-    hessianNorm = dxx.mul(dxx) + dyy.mul(dyy) + dxy.mul(dxy) * 2.0f;
-    cv::sqrt(hessianNorm, hessianNorm);
-    appendFeature(hessianNorm, channels);
-  }
-  if (settings.localMean || settings.localStd) {
-    cv::Mat mean, sqMean, variance;
-    cv::blur(gray, mean, cv::Size(9, 9));
-    cv::blur(gray.mul(gray), sqMean, cv::Size(9, 9));
-    variance = sqMean - mean.mul(mean);
-    cv::max(variance, 0.0, variance);
-    cv::sqrt(variance, variance);
-    if (settings.localMean) appendFeature(mean, channels);
-    if (settings.localStd) appendFeature(variance, channels);
-  }
-  if (settings.entropy) {
-    appendFeature(computeLocalEntropy(gray), channels);
-  }
-  if (settings.texture) {
-    cv::Mat gx, gy, mag, textureEnergy;
-    cv::Sobel(gray, gx, CV_32F, 1, 0, 3);
-    cv::Sobel(gray, gy, CV_32F, 0, 1, 3);
-    cv::magnitude(gx, gy, mag);
-    cv::blur(mag.mul(mag), textureEnergy, cv::Size(9, 9));
-    appendFeature(textureEnergy, channels);
-  }
-  if (settings.gabor) {
-    appendFeature(computeGaborResponse(gray), channels);
-  }
-  if (settings.membrane) {
-    appendFeature(computeMembraneResponse(gray), channels);
-  }
-  if (settings.xPosition || settings.yPosition) {
-    cv::Mat x(gray.size(), CV_32F), y(gray.size(), CV_32F);
-    for (int row = 0; row < gray.rows; ++row) {
-      float* xp = x.ptr<float>(row);
-      float* yp = y.ptr<float>(row);
-      const float yn = gray.rows > 1 ? static_cast<float>(row) / static_cast<float>(gray.rows - 1) : 0.0f;
-      for (int col = 0; col < gray.cols; ++col) {
-        xp[col] = gray.cols > 1 ? static_cast<float>(col) / static_cast<float>(gray.cols - 1) : 0.0f;
-        yp[col] = yn;
-      }
+  std::vector<cv::Mat> channels;
+  auto appendDerivedFeatures = [&](const cv::Mat& source, bool includeSpatial) {
+    if (settings.intensity) appendFeature(source, channels);
+
+    if (settings.gaussian3) {
+      cv::Mat blur;
+      cv::GaussianBlur(source, blur, cv::Size(3, 3), 0.8);
+      appendFeature(blur, channels);
     }
-    if (settings.xPosition) appendFeature(x, channels);
-    if (settings.yPosition) appendFeature(y, channels);
+    if (settings.gaussian7) {
+      cv::Mat blur;
+      cv::GaussianBlur(source, blur, cv::Size(7, 7), 1.8);
+      appendFeature(blur, channels);
+    }
+    if (settings.differenceOfGaussians) {
+      cv::Mat blurSmall, blurLarge, dog;
+      cv::GaussianBlur(source, blurSmall, cv::Size(5, 5), 1.0);
+      cv::GaussianBlur(source, blurLarge, cv::Size(11, 11), 2.5);
+      cv::absdiff(blurSmall, blurLarge, dog);
+      appendFeature(dog, channels);
+    }
+    if (settings.gradient) {
+      cv::Mat gx, gy, mag;
+      cv::Sobel(source, gx, CV_32F, 1, 0, 3);
+      cv::Sobel(source, gy, CV_32F, 0, 1, 3);
+      cv::magnitude(gx, gy, mag);
+      appendFeature(mag, channels);
+    }
+    if (settings.laplacian) {
+      cv::Mat lap;
+      cv::Laplacian(source, lap, CV_32F, 3);
+      appendFeature(cv::abs(lap), channels);
+    }
+    if (settings.hessian) {
+      cv::Mat dxx, dxy, dyy, hessianNorm;
+      cv::Sobel(source, dxx, CV_32F, 2, 0, 3);
+      cv::Sobel(source, dxy, CV_32F, 1, 1, 3);
+      cv::Sobel(source, dyy, CV_32F, 0, 2, 3);
+      hessianNorm = dxx.mul(dxx) + dyy.mul(dyy) + dxy.mul(dxy) * 2.0f;
+      cv::sqrt(hessianNorm, hessianNorm);
+      appendFeature(hessianNorm, channels);
+    }
+    if (settings.localMean || settings.localStd) {
+      cv::Mat mean, sqMean, variance;
+      cv::blur(source, mean, cv::Size(9, 9));
+      cv::blur(source.mul(source), sqMean, cv::Size(9, 9));
+      variance = sqMean - mean.mul(mean);
+      cv::max(variance, 0.0, variance);
+      cv::sqrt(variance, variance);
+      if (settings.localMean) appendFeature(mean, channels);
+      if (settings.localStd) appendFeature(variance, channels);
+    }
+    if (settings.entropy) {
+      appendFeature(computeLocalEntropy(source), channels);
+    }
+    if (settings.texture) {
+      cv::Mat gx, gy, mag, textureEnergy;
+      cv::Sobel(source, gx, CV_32F, 1, 0, 3);
+      cv::Sobel(source, gy, CV_32F, 0, 1, 3);
+      cv::magnitude(gx, gy, mag);
+      cv::blur(mag.mul(mag), textureEnergy, cv::Size(9, 9));
+      appendFeature(textureEnergy, channels);
+    }
+    if (settings.gabor) {
+      appendFeature(computeGaborResponse(source), channels);
+    }
+    if (settings.membrane) {
+      appendFeature(computeMembraneResponse(source), channels);
+    }
+    if (includeSpatial && (settings.xPosition || settings.yPosition)) {
+      cv::Mat x(source.size(), CV_32F), y(source.size(), CV_32F);
+      for (int row = 0; row < source.rows; ++row) {
+        float* xp = x.ptr<float>(row);
+        float* yp = y.ptr<float>(row);
+        const float yn = source.rows > 1 ? static_cast<float>(row) / static_cast<float>(source.rows - 1) : 0.0f;
+        for (int col = 0; col < source.cols; ++col) {
+          xp[col] = source.cols > 1 ? static_cast<float>(col) / static_cast<float>(source.cols - 1) : 0.0f;
+          yp[col] = yn;
+        }
+      }
+      if (settings.xPosition) appendFeature(x, channels);
+      if (settings.yPosition) appendFeature(y, channels);
+    }
+  };
+
+  for (int channelIndex = 0; channelIndex < static_cast<int>(sourceChannels.size()); ++channelIndex) {
+    appendDerivedFeatures(sourceChannels[channelIndex], channelIndex == 0);
   }
 
   if (channels.empty()) {
