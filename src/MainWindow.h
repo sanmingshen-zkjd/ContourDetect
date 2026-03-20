@@ -12,6 +12,7 @@
 #include <QTextEdit>
 #include <QComboBox>
 #include <QPolygon>
+#include <QGroupBox>
 
 #include <opencv2/core.hpp>
 
@@ -52,10 +53,8 @@ private slots:
   void onPanTool();
   void onTraceTool();
   void onResetZoom();
-  void onAddToClass1();
-  void onAddToClass2();
-  void onRemoveSelectedClass1Trace();
-  void onRemoveSelectedClass2Trace();
+  void onAddTraceToSelectedClass();
+  void onRemoveSelectedTrace();
 
 private:
   void buildUi();
@@ -74,10 +73,14 @@ private:
   void activateLabelShortcut(int classIndex, const QString& semanticDescription);
   void ensureAnnotationStorage();
   void rebuildMasksFromAnnotations();
+  void clearAnnotationsForCurrentImage();
+  void clearInferenceOutputs();
   void updateTraceLists();
   void setPendingTrace(const QPolygon& trace);
-  void addPendingTraceToClass(int classIndex, const QString& semanticDescription);
-  void removeSelectedTraceFromClass(int classIndex);
+  void addPendingTraceToSelectedClass();
+  void removeSelectedTraceFromClass();
+  int currentSelectedClassIndex() const;
+  bool applyClassifierToImage(const cv::Mat& image, const QString& path, bool resetAnnotations);
 
   bool loadImageFile(const QString& path);
   bool saveTrainingData(const QString& path);
@@ -104,12 +107,10 @@ private:
   QPushButton* applyButton_ = nullptr;
   QPushButton* createResultButton_ = nullptr;
   QPushButton* probabilityButton_ = nullptr;
-  QPushButton* addToClass1Button_ = nullptr;
-  QPushButton* addToClass2Button_ = nullptr;
-  QPushButton* removeClass1TraceButton_ = nullptr;
-  QPushButton* removeClass2TraceButton_ = nullptr;
-  QListWidget* class1TraceList_ = nullptr;
-  QListWidget* class2TraceList_ = nullptr;
+  QPushButton* addTraceButton_ = nullptr;
+  QPushButton* removeTraceButton_ = nullptr;
+  QListWidget* traceList_ = nullptr;
+  QGroupBox* traceGroup_ = nullptr;
 
   cv::Mat originalImage_;
   cv::Mat featureStack_;

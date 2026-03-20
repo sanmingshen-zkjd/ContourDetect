@@ -21,6 +21,7 @@
   - 训练数据（JSON + 每类 mask PNG）
   - 分类器（YAML）
 - 支持导出最终标签图。
+- 训练好的分类器可直接应用到当前图像或另选图像文件。
 
 ## 界面对应关系
 
@@ -29,23 +30,22 @@
 - **Train classifier**：根据用户标注训练分类器
 - **Toggle overlay**：开关分割叠加层
 - **Create result**：弹出结果查看器
-- **Get probability**：显示类别概率图
+- **Get probability**：显示类别概率图（当前支持 GaussianNB / Random Forest）
 - **Plot result**：统计各类别像素数量
-- **Apply classifier**：对当前图像重新执行整图分类
+- **Apply classifier**：对当前图像或另选图像重新执行整图分类
 - **Load / Save classifier**：加载/保存训练好的模型
 - **Load / Save data**：加载/保存标注数据
 - **Create new class**：新增类别
 - **Settings**：配置特征提取项
 - **Classifier**：选择当前训练器（GaussianNB / Random Forest / SVM）
 - **Trace ROI**：先画出一个自由曲线 ROI
-- **Add to Class 1**：把当前 ROI 提交为前景目标 trace
-- **Add to Class 2**：把当前 ROI 提交为背景对象 trace
+- **Add ROI to selected class**：把当前 ROI 提交到当前选中的类别
 
 ## 依赖
 
 - CMake >= 3.16
 - Qt 5 或 Qt 6（Widgets + PrintSupport）
-- OpenCV（core / imgproc / imgcodecs）
+- OpenCV（core / imgproc / imgcodecs / ml）
 
 ## 构建
 
@@ -86,15 +86,16 @@ cmake -S . -B build -G "Visual Studio 16 2019" -A x64 ^
 ## 使用流程
 
 1. 打开图像。
-2. 先使用工具栏里的 **Trace ROI** 画出一个自由曲线 ROI。
-3. 右侧使用 **Add to Class 1** 把该 ROI 提交为前景目标 trace，使用 **Add to Class 2** 把该 ROI 提交为背景对象 trace。
+2. 从右侧类别列表选择当前要标注的类别。
+3. 先使用工具栏里的 **Trace ROI** 画出一个自由曲线 ROI，并点击 **Add ROI to selected class** 提交。
 4. 也可以继续使用 `Paint` 工具在图像上补充像素级样本。
-5. 如果你创建了更多类别，也可以从类别列表切换并继续标注。
+5. 如果你创建了更多类别，可以随时切换当前类别并继续标注；trace 列表会跟随当前选中类别刷新。
 6. 选择需要的 **Classifier**。
 7. 点击 **Train classifier**。
-8. 查看叠加结果、概率图与结果统计。
-9. 根据需要继续补充标注并重新训练。
-10. 保存训练数据或导出分类器。
+8. 通过 **Apply classifier** 将模型应用到当前图像，或选择另一个图像文件进行推理。
+9. 查看叠加结果、概率图与结果统计。
+10. 根据需要继续补充标注并重新训练。
+11. 保存训练数据或导出分类器。
 
 ## 训练数据格式
 
@@ -117,4 +118,4 @@ cmake -S . -B build -G "Visual Studio 16 2019" -A x64 ^
   - 模型对比与交叉验证
 
 
-> 注：当前“概率图”直接支持 Gaussian Naive Bayes；Random Forest 与 SVM 已支持训练/预测/保存加载，但暂未提供严格概率输出。
+> 注：当前“概率图”支持 Gaussian Naive Bayes 与 Random Forest；SVM 已支持训练/预测/保存加载，但暂未提供严格概率输出。

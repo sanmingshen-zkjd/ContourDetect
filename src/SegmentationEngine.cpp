@@ -334,14 +334,54 @@ cv::Mat SegmentationClassifier::predictLabels(const cv::Mat& features) const {
 }
 
 cv::Mat SegmentationClassifier::predictProbabilities(const cv::Mat& features) const {
-  if (!supportsProbability()) {
+  if (!isValid() || features.empty()) {
     return cv::Mat();
   }
-  return gnbModel_.predictProbabilities(features);
+  if (kind_ == SegmentationClassifierSettings::GaussianNaiveBayes) {
+    return gnbModel_.predictProbabilities(features);
+  }
+  if (kind_ != SegmentationClassifierSettings::RandomForest || !randomForest_) {
+    return cv::Mat();
+  }
+
+  cv::Mat votes;
+  randomForest_->getVotes(features, votes, cv::ml::DTrees::PREDICT_AUTO);
+  if (votes.empty() || votes.rows != features.rows + 1 || votes.cols <= 0) {
+    return cv::Mat();
+  }
+
+  cv::Mat votesFloat;
+  votes.convertTo(votesFloat, CV_32F);
+  cv::Mat probs = cv::Mat::zeros(features.rows, votes.cols, CV_32F);
+  for (int col = 0; col < votesFloat.cols; ++col) {
+    const int classLabel = static_cast<int>(std::lround(votesFloat.at<float>(0, col)));
+    if (classLabel < 0 || classLabel >= probs.cols) {
+      continue;
+    }
+    for (int row = 1; row < votesFloat.rows; ++row) {
+      probs.at<float>(row - 1, classLabel) = votesFloat.at<float>(row, col);
+    }
+  }
+
+  for (int row = 0; row < probs.rows; ++row) {
+    float sum = 0.0f;
+    for (int col = 0; col < probs.cols; ++col) {
+      sum += probs.at<float>(row, col);
+    }
+    if (sum <= 0.0f) {
+      continue;
+    }
+    const float inv = 1.0f / sum;
+    for (int col = 0; col < probs.cols; ++col) {
+      probs.at<float>(row, col) *= inv;
+    }
+  }
+  return probs;
 }
 
 bool SegmentationClassifier::supportsProbability() const {
-  return kind_ == SegmentationClassifierSettings::GaussianNaiveBayes && gnbModel_.isValid();
+  return (kind_ == SegmentationClassifierSettings::GaussianNaiveBayes && gnbModel_.isValid())
+      || (kind_ == SegmentationClassifierSettings::RandomForest && randomForest_ && !randomForest_->empty());
 }
 
 QString SegmentationClassifier::sidecarModelPath(const QString& metadataPath) {

@@ -179,28 +179,18 @@ void MainWindow::buildUi() {
 
   auto* labelsGroup = new QGroupBox(tr("Labels"), rightPanel);
   auto* labelsLayout = new QVBoxLayout(labelsGroup);
-  addToClass1Button_ = new QPushButton(tr("Add to Class 1"), labelsGroup);
-  addToClass2Button_ = new QPushButton(tr("Add to Class 2"), labelsGroup);
-  addToClass1Button_->setToolTip(tr("Commit the current ROI trace as a foreground target example in Class 1."));
-  addToClass2Button_->setToolTip(tr("Commit the current ROI trace as a background object example in Class 2."));
+  addTraceButton_ = new QPushButton(tr("Add ROI to selected class"), labelsGroup);
+  addTraceButton_->setToolTip(tr("Commit the current ROI trace to the currently selected class."));
   classList_ = new QListWidget(labelsGroup);
-  class1TraceList_ = new QListWidget(labelsGroup);
-  class2TraceList_ = new QListWidget(labelsGroup);
-  removeClass1TraceButton_ = new QPushButton(tr("Remove selected Class 1 trace"), labelsGroup);
-  removeClass2TraceButton_ = new QPushButton(tr("Remove selected Class 2 trace"), labelsGroup);
-  auto* class1Group = new QGroupBox(tr("Class 1 traces"), labelsGroup);
-  auto* class1Layout = new QVBoxLayout(class1Group);
-  class1Layout->addWidget(class1TraceList_);
-  class1Layout->addWidget(removeClass1TraceButton_);
-  auto* class2Group = new QGroupBox(tr("Class 2 traces"), labelsGroup);
-  auto* class2Layout = new QVBoxLayout(class2Group);
-  class2Layout->addWidget(class2TraceList_);
-  class2Layout->addWidget(removeClass2TraceButton_);
-  labelsLayout->addWidget(addToClass1Button_);
-  labelsLayout->addWidget(addToClass2Button_);
+  traceList_ = new QListWidget(labelsGroup);
+  removeTraceButton_ = new QPushButton(tr("Remove selected trace"), labelsGroup);
+  traceGroup_ = new QGroupBox(tr("Traces"), labelsGroup);
+  auto* traceLayout = new QVBoxLayout(traceGroup_);
+  traceLayout->addWidget(traceList_);
+  traceLayout->addWidget(removeTraceButton_);
+  labelsLayout->addWidget(addTraceButton_);
   labelsLayout->addWidget(classList_);
-  labelsLayout->addWidget(class1Group);
-  labelsLayout->addWidget(class2Group);
+  labelsLayout->addWidget(traceGroup_);
   rightLayout->addWidget(labelsGroup, 2);
 
   auto* logGroup = new QGroupBox(tr("Log"), rightPanel);
@@ -241,12 +231,9 @@ void MainWindow::connectSignals() {
   connect(contourCheck_, &QCheckBox::toggled, this, [this](bool) {
     updateViewer();
   });
-  connect(addToClass1Button_, &QPushButton::clicked, this, &MainWindow::onAddToClass1);
-  connect(addToClass2Button_, &QPushButton::clicked, this, &MainWindow::onAddToClass2);
-  connect(removeClass1TraceButton_, &QPushButton::clicked, this, &MainWindow::onRemoveSelectedClass1Trace);
-  connect(removeClass2TraceButton_, &QPushButton::clicked, this, &MainWindow::onRemoveSelectedClass2Trace);
-  connect(class1TraceList_, &QListWidget::itemSelectionChanged, this, [this]() { updateUiState(); });
-  connect(class2TraceList_, &QListWidget::itemSelectionChanged, this, [this]() { updateUiState(); });
+  connect(addTraceButton_, &QPushButton::clicked, this, &MainWindow::onAddTraceToSelectedClass);
+  connect(removeTraceButton_, &QPushButton::clicked, this, &MainWindow::onRemoveSelectedTrace);
+  connect(traceList_, &QListWidget::itemSelectionChanged, this, [this]() { updateUiState(); });
 
   view_->onBrushStroke = [this](const QPoint& imagePos, int radius, bool erase) {
     applyBrushStroke(imagePos, radius, erase);
@@ -300,20 +287,21 @@ void MainWindow::updateUiState() {
   const bool hasImage = !originalImage_.empty();
   const bool hasModel = model_.isValid();
   const bool hasProbability = hasModel && model_.supportsProbability();
-  const bool hasTwoClasses = classes_.size() >= 2;
+  const int currentClass = currentSelectedClassIndex();
+  const bool hasClassSelection = currentClass >= 0 && currentClass < static_cast<int>(classes_.size());
   trainButton_->setEnabled(hasImage);
-  removeClass1TraceButton_->setEnabled(class1TraceList_ && class1TraceList_->currentRow() >= 0);
-  removeClass2TraceButton_->setEnabled(class2TraceList_ && class2TraceList_->currentRow() >= 0);
-  applyButton_->setEnabled(hasImage && hasModel);
+  removeTraceButton_->setEnabled(traceList_ && traceList_->currentRow() >= 0);
+  applyButton_->setEnabled(hasModel);
   createResultButton_->setEnabled(hasImage && hasModel);
   probabilityButton_->setEnabled(hasImage && hasProbability);
   brushSizeSpin_->setEnabled(hasImage);
   probabilityCombo_->setEnabled(hasProbability);
   classifierCombo_->setEnabled(true);
-  addToClass1Button_->setEnabled(hasTwoClasses);
-  addToClass2Button_->setEnabled(hasTwoClasses);
-  class1TraceList_->setEnabled(hasTwoClasses);
-  class2TraceList_->setEnabled(hasTwoClasses);
+  addTraceButton_->setEnabled(hasImage && hasClassSelection);
+  traceList_->setEnabled(hasImage && hasClassSelection);
+  if (traceGroup_) {
+    traceGroup_->setEnabled(hasImage && hasClassSelection);
+  }
   overlayCheck_->setEnabled(hasModel || !labelResult_.empty());
   contourCheck_->setEnabled(hasModel || !labelResult_.empty());
   view_->setPaintEnabled(hasImage);
@@ -363,6 +351,10 @@ void MainWindow::updateProbabilityView() {
   probabilityImage_ = model_.supportsProbability()
                           ? SegmentationEngine::applyModelProbabilities(model_, featureStack_, originalImage_.rows, originalImage_.cols, cls)
                           : cv::Mat();
+}
+
+int MainWindow::currentSelectedClassIndex() const {
+  return classList_ && classList_->currentItem() ? classList_->currentItem()->data(Qt::UserRole).toInt() : -1;
 }
 
 void MainWindow::repaintAnnotationPreview() {
@@ -474,6 +466,33 @@ void MainWindow::ensureAnnotationStorage() {
   }
 }
 
+void MainWindow::clearAnnotationsForCurrentImage() {
+  if (originalImage_.empty()) {
+    classMasks_.clear();
+    classBrushMasks_.clear();
+    classTracePolygons_.clear();
+    pendingTrace_.clear();
+    view_->clearPendingTrace();
+    return;
+  }
+  ensureAnnotationStorage();
+  for (auto& mask : classBrushMasks_) {
+    mask = cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0));
+  }
+  for (auto& traces : classTracePolygons_) {
+    traces.clear();
+  }
+  pendingTrace_.clear();
+  view_->clearPendingTrace();
+  rebuildMasksFromAnnotations();
+}
+
+void MainWindow::clearInferenceOutputs() {
+  labelResult_.release();
+  overlayImage_.release();
+  probabilityImage_.release();
+}
+
 void MainWindow::rebuildMasksFromAnnotations() {
   if (originalImage_.empty()) {
     return;
@@ -508,41 +527,44 @@ void MainWindow::rebuildMasksFromAnnotations() {
 }
 
 void MainWindow::updateTraceLists() {
-  if (!class1TraceList_ || !class2TraceList_) {
+  if (!traceList_ || !traceGroup_) {
     return;
   }
-  class1TraceList_->clear();
-  class2TraceList_->clear();
-  if (!classTracePolygons_.empty()) {
-    for (int i = 0; i < static_cast<int>(classTracePolygons_[0].size()); ++i) {
-      class1TraceList_->addItem(tr("trace %1").arg(i));
-    }
+  traceList_->clear();
+  const int cls = currentSelectedClassIndex();
+  if (cls < 0 || cls >= static_cast<int>(classes_.size())) {
+    traceGroup_->setTitle(tr("Traces"));
+    return;
   }
-  if (classTracePolygons_.size() > 1) {
-    for (int i = 0; i < static_cast<int>(classTracePolygons_[1].size()); ++i) {
-      class2TraceList_->addItem(tr("trace %1").arg(i));
+  traceGroup_->setTitle(tr("Traces for %1").arg(classes_[cls].name));
+  if (cls < static_cast<int>(classTracePolygons_.size())) {
+    for (int i = 0; i < static_cast<int>(classTracePolygons_[cls].size()); ++i) {
+      QListWidgetItem* item = new QListWidgetItem(tr("Trace %1").arg(i + 1), traceList_);
+      item->setData(Qt::UserRole, i);
+      item->setForeground(classes_[cls].color);
     }
   }
 }
 
 void MainWindow::setPendingTrace(const QPolygon& trace) {
   pendingTrace_ = trace;
-  const int cls = classList_->currentItem() ? classList_->currentItem()->data(Qt::UserRole).toInt() : 0;
+  const int cls = currentSelectedClassIndex();
   const QColor color = (cls >= 0 && cls < static_cast<int>(classes_.size())) ? classes_[cls].color : QColor(255, 210, 90);
   view_->setPendingTrace(pendingTrace_, color);
-  infoLabel_->setText(tr("ROI trace captured. Click Add to Class 1 or Add to Class 2 to commit it."));
-  logMessage(tr("Captured a pending ROI trace with %1 points.").arg(pendingTrace_.size()));
+  const QString className = (cls >= 0 && cls < static_cast<int>(classes_.size())) ? classes_[cls].name : tr("the selected class");
+  infoLabel_->setText(tr("ROI trace captured. Click Add ROI to selected class to commit it to %1.").arg(className));
+  logMessage(tr("Captured a pending ROI trace with %1 points for %2.").arg(pendingTrace_.size()).arg(className));
 }
 
-void MainWindow::addPendingTraceToClass(int classIndex, const QString& semanticDescription) {
+void MainWindow::addPendingTraceToSelectedClass() {
+  const int classIndex = currentSelectedClassIndex();
   if (classIndex < 0 || classIndex >= static_cast<int>(classes_.size())) {
-    QMessageBox::information(this, tr("Class unavailable"), tr("The requested class shortcut is not available."));
+    QMessageBox::information(this, tr("Class unavailable"), tr("Please select a class before adding a ROI trace."));
     return;
   }
-  classList_->setCurrentRow(classIndex);
   if (pendingTrace_.size() < 3) {
     view_->setToolMode(SegmentationView::TraceTool);
-    infoLabel_->setText(tr("Draw a freehand ROI for the %1, then click this button again to add it.").arg(semanticDescription));
+    infoLabel_->setText(tr("Draw a freehand ROI for %1, then click Add ROI to selected class.").arg(classes_[classIndex].name));
     logMessage(tr("Waiting for a ROI trace before adding to %1.").arg(classes_[classIndex].name));
     return;
   }
@@ -552,23 +574,26 @@ void MainWindow::addPendingTraceToClass(int classIndex, const QString& semanticD
   view_->clearPendingTrace();
   view_->setToolMode(SegmentationView::TraceTool);
   rebuildMasksFromAnnotations();
-  infoLabel_->setText(tr("Added ROI trace to %1 as %2.").arg(classes_[classIndex].name, semanticDescription));
+  updateTraceLists();
+  if (traceList_) {
+    traceList_->setCurrentRow(traceList_->count() - 1);
+  }
+  infoLabel_->setText(tr("Added ROI trace to %1.").arg(classes_[classIndex].name));
   logMessage(tr("Added ROI trace to %1.").arg(classes_[classIndex].name));
 }
 
-void MainWindow::removeSelectedTraceFromClass(int classIndex) {
-  QListWidget* list = nullptr;
-  if (classIndex == 0) list = class1TraceList_;
-  else if (classIndex == 1) list = class2TraceList_;
-  if (!list || classIndex < 0 || classIndex >= static_cast<int>(classTracePolygons_.size())) {
+void MainWindow::removeSelectedTraceFromClass() {
+  const int classIndex = currentSelectedClassIndex();
+  if (!traceList_ || classIndex < 0 || classIndex >= static_cast<int>(classTracePolygons_.size())) {
     return;
   }
-  const int row = list->currentRow();
+  const int row = traceList_->currentRow();
   if (row < 0 || row >= static_cast<int>(classTracePolygons_[classIndex].size())) {
     return;
   }
   classTracePolygons_[classIndex].erase(classTracePolygons_[classIndex].begin() + row);
   rebuildMasksFromAnnotations();
+  updateTraceLists();
   logMessage(tr("Removed trace %1 from %2.").arg(row).arg(classes_[classIndex].name));
 }
 
@@ -581,14 +606,8 @@ bool MainWindow::loadImageFile(const QString& path) {
   originalImage_ = image;
   imagePath_ = path;
   imagePathLabel_->setText(path);
-  ensureAnnotationStorage();
-  for (auto& mask : classBrushMasks_) { mask = cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)); }
-  for (auto& traces : classTracePolygons_) { traces.clear(); }
-  pendingTrace_.clear();
-  rebuildMasksFromAnnotations();
-  labelResult_.release();
-  overlayImage_.release();
-  probabilityImage_.release();
+  clearInferenceOutputs();
+  clearAnnotationsForCurrentImage();
   model_.clear();
   trainingStats_ = {};
   rebuildFeatureStack();
@@ -599,6 +618,29 @@ bool MainWindow::loadImageFile(const QString& path) {
                  .arg(originalImage_.cols)
                  .arg(originalImage_.rows));
   return true;
+}
+
+bool MainWindow::applyClassifierToImage(const cv::Mat& image, const QString& path, bool resetAnnotations) {
+  if (image.empty() || !model_.isValid()) {
+    return false;
+  }
+
+  originalImage_ = image.clone();
+  imagePath_ = path;
+  imagePathLabel_->setText(path.isEmpty() ? tr("Unsaved image") : path);
+  clearInferenceOutputs();
+  if (resetAnnotations) {
+    clearAnnotationsForCurrentImage();
+  } else {
+    ensureAnnotationStorage();
+    rebuildMasksFromAnnotations();
+  }
+  rebuildFeatureStack();
+  labelResult_ = SegmentationEngine::applyModelLabels(model_, featureStack_, originalImage_.rows, originalImage_.cols);
+  updateProbabilityView();
+  updateViewer();
+  updateUiState();
+  return !labelResult_.empty();
 }
 
 bool MainWindow::saveTrainingData(const QString& path) {
@@ -711,6 +753,7 @@ bool MainWindow::loadTrainingData(const QString& path) {
   refreshClassList();
   pendingTrace_.clear();
   view_->clearPendingTrace();
+  clearInferenceOutputs();
   rebuildMasksFromAnnotations();
   rebuildFeatureStack();
   updateUiState();
@@ -784,14 +827,53 @@ void MainWindow::onTrainClassifier() {
 }
 
 void MainWindow::onApplyClassifier() {
-  if (!ensureImageLoaded(tr("applying the classifier")) || !ensureModelReady(tr("applying the classifier"))) {
+  if (!ensureModelReady(tr("applying the classifier"))) {
     return;
   }
-  rebuildFeatureStack();
-  labelResult_ = SegmentationEngine::applyModelLabels(model_, featureStack_, originalImage_.rows, originalImage_.cols);
-  updateProbabilityView();
-  updateViewer();
-  logMessage(tr("Applied classifier to the full image."));
+  QString targetPath;
+  bool useCurrentImage = !originalImage_.empty();
+  if (!originalImage_.empty()) {
+    QMessageBox choiceBox(this);
+    choiceBox.setWindowTitle(tr("Apply classifier"));
+    choiceBox.setText(tr("Apply the classifier to the current image, or choose another image file?"));
+    QPushButton* currentButton = choiceBox.addButton(tr("Current image"), QMessageBox::AcceptRole);
+    QPushButton* chooseButton = choiceBox.addButton(tr("Choose image..."), QMessageBox::ActionRole);
+    choiceBox.addButton(QMessageBox::Cancel);
+    choiceBox.exec();
+    if (choiceBox.clickedButton() == chooseButton) {
+      useCurrentImage = false;
+    } else if (choiceBox.clickedButton() != currentButton) {
+      return;
+    }
+  }
+
+  if (!useCurrentImage) {
+    targetPath = QFileDialog::getOpenFileName(this, tr("Apply classifier to image"), imagePath_,
+                                              tr("Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"));
+    if (targetPath.isEmpty()) {
+      return;
+    }
+    cv::Mat targetImage = cv::imread(targetPath.toStdString(), cv::IMREAD_COLOR);
+    if (targetImage.empty()) {
+      QMessageBox::warning(this, tr("Open image failed"), tr("Unable to load image: %1").arg(targetPath));
+      return;
+    }
+    if (!applyClassifierToImage(targetImage, targetPath, true)) {
+      QMessageBox::warning(this, tr("Apply failed"), tr("Failed to apply the classifier to %1.").arg(targetPath));
+      return;
+    }
+    logMessage(tr("Applied classifier to %1.").arg(QFileInfo(targetPath).fileName()));
+    return;
+  }
+
+  if (!ensureImageLoaded(tr("applying the classifier"))) {
+    return;
+  }
+  if (!applyClassifierToImage(originalImage_, imagePath_, false)) {
+    QMessageBox::warning(this, tr("Apply failed"), tr("Failed to apply the classifier to the current image."));
+    return;
+  }
+  logMessage(tr("Applied classifier to the full current image."));
 }
 
 void MainWindow::onToggleOverlay() {
@@ -806,6 +888,9 @@ void MainWindow::onCreateResult() {
   }
   if (labelResult_.empty()) {
     onApplyClassifier();
+    if (labelResult_.empty()) {
+      return;
+    }
   }
   QDialog dialog(this);
   dialog.setWindowTitle(tr("Segmentation result"));
@@ -824,8 +909,15 @@ void MainWindow::onGetProbability() {
   if (!ensureImageLoaded(tr("getting probability")) || !ensureModelReady(tr("getting probability"))) {
     return;
   }
+  if (!model_.supportsProbability()) {
+    QMessageBox::information(this, tr("Probability unavailable"),
+                             tr("The current classifier does not expose probabilities for this view."));
+    return;
+  }
   updateProbabilityView();
   if (probabilityImage_.empty()) {
+    QMessageBox::information(this, tr("Probability unavailable"),
+                             tr("Probability output is not available for the current image/classifier combination."));
     return;
   }
   QDialog dialog(this);
@@ -849,6 +941,9 @@ void MainWindow::onPlotResult() {
       return;
     }
     onApplyClassifier();
+    if (labelResult_.empty()) {
+      return;
+    }
   }
   QVector<double> ticks(classes_.size()), values(classes_.size());
   QVector<QString> labels(classes_.size());
@@ -911,19 +1006,9 @@ void MainWindow::onLoadClassifier() {
   classifierSettings_ = classifierSettings;
   trainingStats_ = stats;
   if (!originalImage_.empty()) {
-    ensureAnnotationStorage();
-    for (auto& mask : classBrushMasks_) {
-      mask = cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0));
-    }
-    for (auto& traces : classTracePolygons_) {
-      traces.clear();
-    }
-    pendingTrace_.clear();
-    rebuildMasksFromAnnotations();
+    clearAnnotationsForCurrentImage();
     rebuildFeatureStack();
-    labelResult_.release();
-    overlayImage_.release();
-    probabilityImage_.release();
+    clearInferenceOutputs();
   }
   refreshClassList();
   const int comboIndex = classifierCombo_->findData(classifierSettings_.kind);
@@ -964,9 +1049,13 @@ void MainWindow::onCreateNewClass() {
     classBrushMasks_.push_back(cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)));
     classTracePolygons_.push_back({});
   }
+  model_.clear();
+  trainingStats_ = {};
+  clearInferenceOutputs();
   refreshClassList();
   updateTraceLists();
   rebuildMasksFromAnnotations();
+  updateViewer();
   logMessage(tr("Added class %1.").arg(name.trimmed()));
 }
 
@@ -1011,7 +1100,12 @@ void MainWindow::onSettings() {
   featureSettings_.localStd = localStd->isChecked();
   featureSettings_.xPosition = xpos->isChecked();
   featureSettings_.yPosition = ypos->isChecked();
+  model_.clear();
+  trainingStats_ = {};
   rebuildFeatureStack();
+  clearInferenceOutputs();
+  updateViewer();
+  updateUiState();
   logMessage(tr("Updated feature extraction settings."));
 }
 
@@ -1036,14 +1130,21 @@ void MainWindow::onBrushRadiusChanged(int value) {
 }
 
 void MainWindow::onClassSelectionChanged() {
-  const int cls = classList_->currentItem() ? classList_->currentItem()->data(Qt::UserRole).toInt() : 0;
+  const int cls = currentSelectedClassIndex();
   if (cls >= 0 && cls < static_cast<int>(classes_.size())) {
     view_->setActiveClass(cls, classes_[cls].color);
     if (!pendingTrace_.isEmpty()) {
       view_->setPendingTrace(pendingTrace_, classes_[cls].color);
     }
-    infoLabel_->setText(tr("Active class: %1 — use left mouse to paint samples, or draw a ROI trace and commit it with Add to Class.").arg(classes_[cls].name));
+    addTraceButton_->setText(tr("Add ROI to %1").arg(classes_[cls].name));
+    addTraceButton_->setToolTip(tr("Commit the current ROI trace to %1.").arg(classes_[cls].name));
+    infoLabel_->setText(tr("Active class: %1 — use left mouse to paint samples, or draw a ROI trace and commit it to the selected class.").arg(classes_[cls].name));
+  } else if (addTraceButton_) {
+    addTraceButton_->setText(tr("Add ROI to selected class"));
+    addTraceButton_->setToolTip(tr("Commit the current ROI trace to the currently selected class."));
   }
+  updateTraceLists();
+  updateUiState();
 }
 
 void MainWindow::onProbabilityClassChanged(int index) {
@@ -1062,7 +1163,7 @@ void MainWindow::onPaintTool() {
 
 void MainWindow::onTraceTool() {
   view_->setToolMode(SegmentationView::TraceTool);
-  infoLabel_->setText(tr("Draw a freehand ROI, then click Add to Class 1 or Add to Class 2 to commit it."));
+  infoLabel_->setText(tr("Draw a freehand ROI, then click Add ROI to selected class to commit it."));
 }
 
 void MainWindow::onEraseTool() {
@@ -1077,18 +1178,10 @@ void MainWindow::onResetZoom() {
   view_->resetView();
 }
 
-void MainWindow::onAddToClass1() {
-  addPendingTraceToClass(0, tr("foreground target"));
+void MainWindow::onAddTraceToSelectedClass() {
+  addPendingTraceToSelectedClass();
 }
 
-void MainWindow::onAddToClass2() {
-  addPendingTraceToClass(1, tr("background object"));
-}
-
-void MainWindow::onRemoveSelectedClass1Trace() {
-  removeSelectedTraceFromClass(0);
-}
-
-void MainWindow::onRemoveSelectedClass2Trace() {
-  removeSelectedTraceFromClass(1);
+void MainWindow::onRemoveSelectedTrace() {
+  removeSelectedTraceFromClass();
 }
