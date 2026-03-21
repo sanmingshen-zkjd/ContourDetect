@@ -114,6 +114,10 @@ private:
   bool loadImageFile(const QString& path);
   bool saveTrainingData(const QString& path);
   bool loadTrainingData(const QString& path);
+  bool saveTrainingDataJson(const QString& path);
+  bool loadTrainingDataJson(const QString& path);
+  bool saveTrainingDataArff(const QString& path);
+  bool loadTrainingDataArff(const QString& path);
   bool saveProject(const QString& path);
   bool loadProject(const QString& path);
   void switchToProjectImage(int index);
@@ -127,6 +131,7 @@ private:
   void restoreSnapshot(const AnnotationSnapshot& snapshot);
   void trimUndoHistory();
   QString defaultTraceNameForClass(int classIndex) const;
+  void clearImportedTrainingData();
 
   static QImage cvMatToQImage(const cv::Mat& mat);
   static cv::Mat qImageToCvMat(const QImage& image);
@@ -197,4 +202,7 @@ private:
   std::vector<ProjectImageEntry> projectImages_;
   int currentProjectImageIndex_ = -1;
   bool switchingProjectSelection_ = false;
+  cv::Mat importedTrainingSamples_;
+  cv::Mat importedTrainingLabels_;
+  QString importedTrainingSource_;
 };

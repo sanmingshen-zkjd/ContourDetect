@@ -14,6 +14,8 @@ struct SegmentationFeatureSettings {
   bool gaussian7 = true;
   bool gaussian15 = false;
   bool differenceOfGaussians = false;
+  bool minimum = false;
+  bool maximum = false;
   bool median = false;
   bool bilateral = false;
   bool gradient = true;
@@ -22,6 +24,7 @@ struct SegmentationFeatureSettings {
   bool hessian = false;
   bool localMean = true;
   bool localStd = true;
+  bool localVariance = false;
   bool entropy = false;
   bool texture = false;
   bool clahe = false;
@@ -55,7 +58,7 @@ struct SegmentationClassifierSettings {
     LogisticRegression = 4,
   };
 
-  Kind kind = GaussianNaiveBayes;
+  Kind kind = RandomForest;
   int randomForestTrees = 200;
   int randomForestMaxDepth = 20;
   double svmC = 2.0;
@@ -133,7 +136,7 @@ private:
   static QString sidecarModelPath(const QString& metadataPath);
   static bool computeAccuracy(const cv::Mat& labels, const cv::Mat& predicted, SegmentationTrainingStats* stats, int classCount);
 
-  SegmentationClassifierSettings::Kind kind_ = SegmentationClassifierSettings::GaussianNaiveBayes;
+  SegmentationClassifierSettings::Kind kind_ = SegmentationClassifierSettings::RandomForest;
   GaussianNaiveBayesModel gnbModel_;
   cv::Ptr<cv::ml::RTrees> randomForest_;
   cv::Ptr<cv::ml::SVM> svm_;

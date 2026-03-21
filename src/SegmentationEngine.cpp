@@ -99,7 +99,7 @@ QString classifierKindToString(SegmentationClassifierSettings::Kind kind) {
     case SegmentationClassifierSettings::KNearestNeighbors: return QStringLiteral("knn");
     case SegmentationClassifierSettings::LogisticRegression: return QStringLiteral("logistic_regression");
   }
-  return QStringLiteral("gaussian_naive_bayes");
+  return QStringLiteral("random_forest");
 }
 
 SegmentationClassifierSettings::Kind classifierKindFromString(const QString& name) {
@@ -107,7 +107,7 @@ SegmentationClassifierSettings::Kind classifierKindFromString(const QString& nam
   if (name == QStringLiteral("svm")) return SegmentationClassifierSettings::SupportVectorMachine;
   if (name == QStringLiteral("knn")) return SegmentationClassifierSettings::KNearestNeighbors;
   if (name == QStringLiteral("logistic_regression")) return SegmentationClassifierSettings::LogisticRegression;
-  return SegmentationClassifierSettings::GaussianNaiveBayes;
+  return SegmentationClassifierSettings::RandomForest;
 }
 }
 
@@ -533,6 +533,8 @@ bool SegmentationClassifier::save(const QString& path,
   fs << "gaussian7" << static_cast<int>(featureSettings.gaussian7);
   fs << "gaussian15" << static_cast<int>(featureSettings.gaussian15);
   fs << "differenceOfGaussians" << static_cast<int>(featureSettings.differenceOfGaussians);
+  fs << "minimum" << static_cast<int>(featureSettings.minimum);
+  fs << "maximum" << static_cast<int>(featureSettings.maximum);
   fs << "median" << static_cast<int>(featureSettings.median);
   fs << "bilateral" << static_cast<int>(featureSettings.bilateral);
   fs << "gradient" << static_cast<int>(featureSettings.gradient);
@@ -541,6 +543,7 @@ bool SegmentationClassifier::save(const QString& path,
   fs << "hessian" << static_cast<int>(featureSettings.hessian);
   fs << "localMean" << static_cast<int>(featureSettings.localMean);
   fs << "localStd" << static_cast<int>(featureSettings.localStd);
+  fs << "localVariance" << static_cast<int>(featureSettings.localVariance);
   fs << "entropy" << static_cast<int>(featureSettings.entropy);
   fs << "texture" << static_cast<int>(featureSettings.texture);
   fs << "clahe" << static_cast<int>(featureSettings.clahe);
@@ -614,7 +617,7 @@ bool SegmentationClassifier::load(const QString& path,
                                ? QString::fromStdString(static_cast<std::string>(kindNode))
                                : QString();
   kind_ = hasExplicitKind ? classifierKindFromString(kindName)
-                          : SegmentationClassifierSettings::GaussianNaiveBayes;
+                          : SegmentationClassifierSettings::RandomForest;
 
   if (stats) {
     fs["training_accuracy"] >> stats->trainingAccuracy;
@@ -634,6 +637,8 @@ bool SegmentationClassifier::load(const QString& path,
       featureSettings->gaussian7 = static_cast<int>(node["gaussian7"]) != 0;
       featureSettings->gaussian15 = static_cast<int>(node["gaussian15"]) != 0;
       featureSettings->differenceOfGaussians = static_cast<int>(node["differenceOfGaussians"]) != 0;
+      featureSettings->minimum = static_cast<int>(node["minimum"]) != 0;
+      featureSettings->maximum = static_cast<int>(node["maximum"]) != 0;
       featureSettings->median = static_cast<int>(node["median"]) != 0;
       featureSettings->bilateral = static_cast<int>(node["bilateral"]) != 0;
       featureSettings->gradient = static_cast<int>(node["gradient"]) != 0;
@@ -642,6 +647,7 @@ bool SegmentationClassifier::load(const QString& path,
       featureSettings->hessian = static_cast<int>(node["hessian"]) != 0;
       featureSettings->localMean = static_cast<int>(node["localMean"]) != 0;
       featureSettings->localStd = static_cast<int>(node["localStd"]) != 0;
+      featureSettings->localVariance = static_cast<int>(node["localVariance"]) != 0;
       featureSettings->entropy = static_cast<int>(node["entropy"]) != 0;
       featureSettings->texture = static_cast<int>(node["texture"]) != 0;
       featureSettings->clahe = static_cast<int>(node["clahe"]) != 0;
@@ -791,6 +797,21 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
       cv::absdiff(blurSmall, blurLarge, dog);
       appendFeature(dog, channels);
     }
+    if (settings.minimum || settings.maximum) {
+      cv::Mat source8u;
+      source.convertTo(source8u, CV_8U, 255.0);
+      const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7));
+      if (settings.minimum) {
+        cv::Mat eroded;
+        cv::erode(source8u, eroded, kernel);
+        appendFeature(eroded, channels);
+      }
+      if (settings.maximum) {
+        cv::Mat dilated;
+        cv::dilate(source8u, dilated, kernel);
+        appendFeature(dilated, channels);
+      }
+    }
     if (settings.median) {
       cv::Mat source8u;
       source.convertTo(source8u, CV_8U, 255.0);
@@ -832,15 +853,17 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
       cv::sqrt(hessianNorm, hessianNorm);
       appendFeature(hessianNorm, channels);
     }
-    if (settings.localMean || settings.localStd) {
+    if (settings.localMean || settings.localStd || settings.localVariance) {
       cv::Mat mean, sqMean, variance;
       cv::blur(source, mean, cv::Size(9, 9));
       cv::blur(source.mul(source), sqMean, cv::Size(9, 9));
       variance = sqMean - mean.mul(mean);
       cv::max(variance, 0.0, variance);
-      cv::sqrt(variance, variance);
+      cv::Mat stddev;
+      cv::sqrt(variance, stddev);
       if (settings.localMean) appendFeature(mean, channels);
-      if (settings.localStd) appendFeature(variance, channels);
+      if (settings.localStd) appendFeature(stddev, channels);
+      if (settings.localVariance) appendFeature(variance, channels);
     }
     if (settings.entropy) {
       appendFeature(computeLocalEntropy(source), channels);

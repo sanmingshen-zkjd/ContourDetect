@@ -25,6 +25,7 @@
 #include <QSplitter>
 #include <QTemporaryDir>
 #include <QTextEdit>
+#include <QTextStream>
 #include <QToolBar>
 #include <QDateTime>
 #include <QGuiApplication>
@@ -126,6 +127,72 @@ BinaryMetrics computeBinaryCurves(const std::vector<float>& scores, const std::v
     metrics.ap += std::abs(b.x() - a.x()) * (a.y() + b.y()) * 0.5;
   }
   return metrics;
+}
+
+QJsonObject featureSettingsToJson(const SegmentationFeatureSettings& settings) {
+  return QJsonObject{{"intensity", settings.intensity},
+                     {"gaussian3", settings.gaussian3},
+                     {"gaussian7", settings.gaussian7},
+                     {"gaussian15", settings.gaussian15},
+                     {"differenceOfGaussians", settings.differenceOfGaussians},
+                     {"minimum", settings.minimum},
+                     {"maximum", settings.maximum},
+                     {"median", settings.median},
+                     {"bilateral", settings.bilateral},
+                     {"gradient", settings.gradient},
+                     {"laplacian", settings.laplacian},
+                     {"laplacianOfGaussian", settings.laplacianOfGaussian},
+                     {"hessian", settings.hessian},
+                     {"localMean", settings.localMean},
+                     {"localStd", settings.localStd},
+                     {"localVariance", settings.localVariance},
+                     {"entropy", settings.entropy},
+                     {"texture", settings.texture},
+                     {"clahe", settings.clahe},
+                     {"canny", settings.canny},
+                     {"structureTensor", settings.structureTensor},
+                     {"gabor", settings.gabor},
+                     {"membrane", settings.membrane},
+                     {"channelRatios", settings.channelRatios},
+                     {"xPosition", settings.xPosition},
+                     {"yPosition", settings.yPosition}};
+}
+
+void loadFeatureSettingsFromJson(const QJsonObject& settingsObject, SegmentationFeatureSettings* settings) {
+  if (!settings) return;
+  settings->intensity = settingsObject["intensity"].toBool(true);
+  settings->gaussian3 = settingsObject["gaussian3"].toBool(true);
+  settings->gaussian7 = settingsObject["gaussian7"].toBool(true);
+  settings->gaussian15 = settingsObject["gaussian15"].toBool(false);
+  settings->differenceOfGaussians = settingsObject["differenceOfGaussians"].toBool(false);
+  settings->minimum = settingsObject["minimum"].toBool(false);
+  settings->maximum = settingsObject["maximum"].toBool(false);
+  settings->median = settingsObject["median"].toBool(false);
+  settings->bilateral = settingsObject["bilateral"].toBool(false);
+  settings->gradient = settingsObject["gradient"].toBool(true);
+  settings->laplacian = settingsObject["laplacian"].toBool(true);
+  settings->laplacianOfGaussian = settingsObject["laplacianOfGaussian"].toBool(false);
+  settings->hessian = settingsObject["hessian"].toBool(false);
+  settings->localMean = settingsObject["localMean"].toBool(true);
+  settings->localStd = settingsObject["localStd"].toBool(true);
+  settings->localVariance = settingsObject["localVariance"].toBool(false);
+  settings->entropy = settingsObject["entropy"].toBool(false);
+  settings->texture = settingsObject["texture"].toBool(false);
+  settings->clahe = settingsObject["clahe"].toBool(false);
+  settings->canny = settingsObject["canny"].toBool(false);
+  settings->structureTensor = settingsObject["structureTensor"].toBool(false);
+  settings->gabor = settingsObject["gabor"].toBool(false);
+  settings->membrane = settingsObject["membrane"].toBool(false);
+  settings->channelRatios = settingsObject["channelRatios"].toBool(false);
+  settings->xPosition = settingsObject["xPosition"].toBool(true);
+  settings->yPosition = settingsObject["yPosition"].toBool(true);
+}
+
+QString arffEscape(const QString& value) {
+  QString escaped = value;
+  escaped.replace("\\", "\\\\");
+  escaped.replace("'", "\\'");
+  return QString("'%1'").arg(escaped);
 }
 }
 
@@ -333,6 +400,10 @@ void MainWindow::buildUi() {
   classifierCombo_ = new QComboBox(brushGroup);
   for (const auto& descriptor : SegmentationClassifier::availableClassifiers()) {
     classifierCombo_->addItem(descriptor.displayName, descriptor.kind);
+  }
+  const int defaultClassifierIndex = classifierCombo_->findData(classifierSettings_.kind);
+  if (defaultClassifierIndex >= 0) {
+    classifierCombo_->setCurrentIndex(defaultClassifierIndex);
   }
   overlayCheck_ = new QCheckBox(tr("Show classifier overlay"), brushGroup);
   overlayCheck_->setChecked(true);
@@ -545,7 +616,9 @@ void MainWindow::updateUiState() {
                                  .arg(trainingStats_.classCount)
                                  .arg(trainingStats_.sampleCount)
                                  .arg(QString::number(trainingStats_.trainingAccuracy * 100.0, 'f', 2))
-                           : tr("Model: not trained"));
+                           : (!importedTrainingSamples_.empty()
+                                  ? tr("Model: not trained | imported vectors=%1").arg(importedTrainingSamples_.rows)
+                                  : tr("Model: not trained")));
   sliceLabel_->setText(tr("Slice %1 / %2").arg(currentSliceIndex_ + 1).arg(std::max(1, static_cast<int>(imageVolume_.size()))));
 }
 
@@ -813,6 +886,12 @@ void MainWindow::clearInferenceOutputs() {
   for (auto& result : sliceProbabilityResults_) result.release();
 }
 
+void MainWindow::clearImportedTrainingData() {
+  importedTrainingSamples_.release();
+  importedTrainingLabels_.release();
+  importedTrainingSource_.clear();
+}
+
 void MainWindow::rebuildMasksFromAnnotations() {
   if (originalImage_.empty()) {
     return;
@@ -985,10 +1064,18 @@ bool MainWindow::applyClassifierToImage(const cv::Mat& image, const QString& pat
 }
 
 bool MainWindow::saveTrainingData(const QString& path) {
+  if (QFileInfo(path).suffix().compare("arff", Qt::CaseInsensitive) == 0) {
+    return saveTrainingDataArff(path);
+  }
+  return saveTrainingDataJson(path);
+}
+
+bool MainWindow::saveTrainingDataJson(const QString& path) {
   if (!ensureImageLoaded(tr("saving training data"))) {
     return false;
   }
   saveCurrentSliceState();
+  ensureSliceStorage();
   QFileInfo info(path);
   QDir dir = info.dir();
   const QString base = info.completeBaseName();
@@ -1008,29 +1095,7 @@ bool MainWindow::saveTrainingData(const QString& path) {
     classArray.append(clsObj);
   }
   root["classes"] = classArray;
-  root["featureSettings"] = QJsonObject{{"intensity", featureSettings_.intensity},
-                                         {"gaussian3", featureSettings_.gaussian3},
-                                         {"gaussian7", featureSettings_.gaussian7},
-                                         {"gaussian15", featureSettings_.gaussian15},
-                                         {"differenceOfGaussians", featureSettings_.differenceOfGaussians},
-                                         {"median", featureSettings_.median},
-                                         {"bilateral", featureSettings_.bilateral},
-                                         {"gradient", featureSettings_.gradient},
-                                         {"laplacian", featureSettings_.laplacian},
-                                         {"laplacianOfGaussian", featureSettings_.laplacianOfGaussian},
-                                         {"hessian", featureSettings_.hessian},
-                                         {"localMean", featureSettings_.localMean},
-                                         {"localStd", featureSettings_.localStd},
-                                         {"entropy", featureSettings_.entropy},
-                                         {"texture", featureSettings_.texture},
-                                         {"clahe", featureSettings_.clahe},
-                                         {"canny", featureSettings_.canny},
-                                         {"structureTensor", featureSettings_.structureTensor},
-                                         {"gabor", featureSettings_.gabor},
-                                         {"membrane", featureSettings_.membrane},
-                                         {"channelRatios", featureSettings_.channelRatios},
-                                         {"xPosition", featureSettings_.xPosition},
-                                         {"yPosition", featureSettings_.yPosition}};
+  root["featureSettings"] = featureSettingsToJson(featureSettings_);
   root["classifierSettings"] = QJsonObject{{"kind", static_cast<int>(classifierSettings_.kind)},
                                            {"randomForestTrees", classifierSettings_.randomForestTrees},
                                            {"randomForestMaxDepth", classifierSettings_.randomForestMaxDepth},
@@ -1089,6 +1154,13 @@ bool MainWindow::saveTrainingData(const QString& path) {
 }
 
 bool MainWindow::loadTrainingData(const QString& path) {
+  if (QFileInfo(path).suffix().compare("arff", Qt::CaseInsensitive) == 0) {
+    return loadTrainingDataArff(path);
+  }
+  return loadTrainingDataJson(path);
+}
+
+bool MainWindow::loadTrainingDataJson(const QString& path) {
   QFile file(path);
   if (!file.open(QIODevice::ReadOnly)) {
     return false;
@@ -1114,30 +1186,7 @@ bool MainWindow::loadTrainingData(const QString& path) {
   }
   refreshClassList();
 
-  const QJsonObject settings = root["featureSettings"].toObject();
-  featureSettings_.intensity = settings["intensity"].toBool(true);
-  featureSettings_.gaussian3 = settings["gaussian3"].toBool(true);
-  featureSettings_.gaussian7 = settings["gaussian7"].toBool(true);
-  featureSettings_.gaussian15 = settings["gaussian15"].toBool(false);
-  featureSettings_.differenceOfGaussians = settings["differenceOfGaussians"].toBool(false);
-  featureSettings_.median = settings["median"].toBool(false);
-  featureSettings_.bilateral = settings["bilateral"].toBool(false);
-  featureSettings_.gradient = settings["gradient"].toBool(true);
-  featureSettings_.laplacian = settings["laplacian"].toBool(true);
-  featureSettings_.laplacianOfGaussian = settings["laplacianOfGaussian"].toBool(false);
-  featureSettings_.hessian = settings["hessian"].toBool(false);
-  featureSettings_.localMean = settings["localMean"].toBool(true);
-  featureSettings_.localStd = settings["localStd"].toBool(true);
-  featureSettings_.entropy = settings["entropy"].toBool(false);
-  featureSettings_.texture = settings["texture"].toBool(false);
-  featureSettings_.clahe = settings["clahe"].toBool(false);
-  featureSettings_.canny = settings["canny"].toBool(false);
-  featureSettings_.structureTensor = settings["structureTensor"].toBool(false);
-  featureSettings_.gabor = settings["gabor"].toBool(false);
-  featureSettings_.membrane = settings["membrane"].toBool(false);
-  featureSettings_.channelRatios = settings["channelRatios"].toBool(false);
-  featureSettings_.xPosition = settings["xPosition"].toBool(true);
-  featureSettings_.yPosition = settings["yPosition"].toBool(true);
+  loadFeatureSettingsFromJson(root["featureSettings"].toObject(), &featureSettings_);
 
   const QJsonObject classifierSettings = root["classifierSettings"].toObject();
   if (!classifierSettings.isEmpty()) {
@@ -1198,7 +1247,178 @@ bool MainWindow::loadTrainingData(const QString& path) {
   sliceSlider_->blockSignals(false);
   updateViewer();
   updateUiState();
+  clearImportedTrainingData();
   logMessage(tr("Loaded training data from %1.").arg(path));
+  return true;
+}
+
+bool MainWindow::saveTrainingDataArff(const QString& path) {
+  if (!ensureImageLoaded(tr("saving training data"))) {
+    return false;
+  }
+  saveCurrentSliceState();
+
+  cv::Mat allSamples;
+  cv::Mat allLabels;
+  for (int sliceIndex = 0; sliceIndex < static_cast<int>(imageVolume_.size()); ++sliceIndex) {
+    cv::Mat features = sliceIndex < static_cast<int>(featureVolume_.size()) && !featureVolume_[sliceIndex].empty()
+                           ? featureVolume_[sliceIndex]
+                           : SegmentationEngine::computeFeatureStack(imageVolume_[sliceIndex], featureSettings_);
+    if (features.empty()) continue;
+    cv::Mat labels;
+    const auto masks = masksFromAnnotationSnapshot(sliceAnnotationStates_[sliceIndex], imageVolume_[sliceIndex].size(), static_cast<int>(classes_.size()));
+    const cv::Mat samples = SegmentationEngine::gatherSamples(features, masks, &labels, 120000, false);
+    if (samples.empty() || labels.empty()) continue;
+    if (allSamples.empty()) allSamples = samples.clone();
+    else cv::vconcat(allSamples, samples, allSamples);
+    if (allLabels.empty()) allLabels = labels.clone();
+    else cv::vconcat(allLabels, labels, allLabels);
+  }
+
+  if (allSamples.empty() || allLabels.empty()) {
+    return false;
+  }
+
+  QFile file(path);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+    return false;
+  }
+
+  QTextStream stream(&file);
+  stream.setRealNumberNotation(QTextStream::FixedNotation);
+  stream.setRealNumberPrecision(7);
+  stream << "% QtTrainableSegmentation ARFF export\n";
+  stream << "% imagePath=" << imagePath_ << "\n";
+  stream << "% classCount=" << classes_.size() << "\n";
+  stream << "% featureSettings=" << QString::fromUtf8(QJsonDocument(featureSettingsToJson(featureSettings_)).toJson(QJsonDocument::Compact)) << "\n";
+  stream << "@RELATION qt_trainable_segmentation\n\n";
+  for (int col = 0; col < allSamples.cols; ++col) {
+    stream << "@ATTRIBUTE feature_" << QString("%1").arg(col, 4, 10, QLatin1Char('0')) << " NUMERIC\n";
+  }
+  QStringList classNames;
+  for (const auto& cls : classes_) {
+    classNames << arffEscape(cls.name);
+  }
+  stream << "@ATTRIBUTE class {" << classNames.join(",") << "}\n\n";
+  stream << "@DATA\n";
+  for (int row = 0; row < allSamples.rows; ++row) {
+    QStringList values;
+    values.reserve(allSamples.cols + 1);
+    for (int col = 0; col < allSamples.cols; ++col) {
+      values << QString::number(allSamples.at<float>(row, col), 'f', 7);
+    }
+    const int cls = allLabels.at<int>(row, 0);
+    if (cls < 0 || cls >= static_cast<int>(classes_.size())) {
+      continue;
+    }
+    values << arffEscape(classes_[cls].name);
+    stream << values.join(",") << "\n";
+  }
+  logMessage(tr("Saved ARFF training data to %1 (%2 samples).").arg(path).arg(allSamples.rows));
+  return true;
+}
+
+bool MainWindow::loadTrainingDataArff(const QString& path) {
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    return false;
+  }
+
+  QStringList classNames;
+  std::vector<std::vector<float>> rows;
+  std::vector<int> labels;
+  bool inData = false;
+  int featureCount = -1;
+  QTextStream stream(&file);
+  while (!stream.atEnd()) {
+    const QString rawLine = stream.readLine();
+    const QString line = rawLine.trimmed();
+    if (line.isEmpty() || line.startsWith('%')) continue;
+    const QString lower = line.toLower();
+    if (!inData) {
+      if (lower.startsWith("@attribute")) {
+        if (line.contains('{') && line.contains('}')) {
+          const int start = line.indexOf('{');
+          const int end = line.lastIndexOf('}');
+          const QStringList tokens = line.mid(start + 1, end - start - 1).split(',', Qt::SkipEmptyParts);
+          classNames.clear();
+          for (QString token : tokens) {
+            token = token.trimmed();
+            if (token.startsWith('\'')) token.remove(0, 1);
+            if (token.endsWith('\'')) token.chop(1);
+            token.replace("\\'", "'");
+            token.replace("\\\\", "\\");
+            classNames << token;
+          }
+        } else {
+          featureCount += 1;
+        }
+      } else if (lower == "@data") {
+        inData = true;
+      }
+      continue;
+    }
+
+    const QStringList tokens = line.split(',', Qt::KeepEmptyParts);
+    if (tokens.size() != featureCount + 2 || classNames.isEmpty()) {
+      return false;
+    }
+    std::vector<float> featureRow;
+    featureRow.reserve(featureCount + 1);
+    for (int index = 0; index <= featureCount; ++index) {
+      bool ok = false;
+      const float value = tokens[index].trimmed().toFloat(&ok);
+      if (!ok) return false;
+      featureRow.push_back(value);
+    }
+    QString classToken = tokens.back().trimmed();
+    if (classToken.startsWith('\'')) classToken.remove(0, 1);
+    if (classToken.endsWith('\'')) classToken.chop(1);
+    classToken.replace("\\'", "'");
+    classToken.replace("\\\\", "\\");
+    const int classIndex = classNames.indexOf(classToken);
+    if (classIndex < 0) {
+      return false;
+    }
+    rows.push_back(std::move(featureRow));
+    labels.push_back(classIndex);
+  }
+
+  if (rows.empty() || classNames.isEmpty()) {
+    return false;
+  }
+  const int importedFeatureCount = featureCount + 1;
+  if (importedFeatureCount <= 0) {
+    return false;
+  }
+  if (!featureStack_.empty() && featureStack_.cols != importedFeatureCount) {
+    return false;
+  }
+
+  if (static_cast<int>(classes_.size()) != classNames.size()) {
+    return false;
+  }
+  for (int i = 0; i < classNames.size(); ++i) {
+    if (classes_[i].name != classNames[i]) {
+      return false;
+    }
+  }
+
+  importedTrainingSamples_ = cv::Mat(static_cast<int>(rows.size()), importedFeatureCount, CV_32F);
+  importedTrainingLabels_ = cv::Mat(static_cast<int>(rows.size()), 1, CV_32S);
+  for (int row = 0; row < static_cast<int>(rows.size()); ++row) {
+    for (int col = 0; col < importedFeatureCount; ++col) {
+      importedTrainingSamples_.at<float>(row, col) = rows[row][col];
+    }
+    importedTrainingLabels_.at<int>(row, 0) = labels[row];
+  }
+
+  importedTrainingSource_ = path;
+  model_.clear();
+  trainingStats_ = {};
+  clearInferenceOutputs();
+  updateUiState();
+  logMessage(tr("Loaded ARFF training vectors from %1 (%2 samples).").arg(path).arg(importedTrainingSamples_.rows));
   return true;
 }
 
@@ -1409,6 +1629,7 @@ void MainWindow::onTrainClassifier() {
   cv::Mat currentLabels;
   cv::Mat currentSamples = SegmentationEngine::gatherSamples(featureStack_, classMasks_, &currentLabels, 12000, classifierSettings_.balanceClasses);
   appendTrainingSet(currentSamples, currentLabels);
+  appendTrainingSet(importedTrainingSamples_, importedTrainingLabels_);
 
   if (projectImages_.size() > 1) {
     for (int imageIndex = 0; imageIndex < static_cast<int>(projectImages_.size()); ++imageIndex) {
@@ -1793,6 +2014,7 @@ void MainWindow::onLoadClassifier() {
   featureSettings_ = settings;
   classifierSettings_ = classifierSettings;
   trainingStats_ = stats;
+  clearImportedTrainingData();
   refreshClassList();
   const int comboIndex = classifierCombo_->findData(classifierSettings_.kind);
   if (comboIndex >= 0) classifierCombo_->setCurrentIndex(comboIndex);
@@ -1802,14 +2024,14 @@ void MainWindow::onLoadClassifier() {
 }
 
 void MainWindow::onSaveData() {
-  const QString path = QFileDialog::getSaveFileName(this, tr("Save training data"), QString(), tr("Training data (*.json)"));
+  const QString path = QFileDialog::getSaveFileName(this, tr("Save training data"), QString(), tr("Training data (*.json *.arff)"));
   if (!path.isEmpty() && !saveTrainingData(path)) {
     QMessageBox::warning(this, tr("Save failed"), tr("Failed to save training data."));
   }
 }
 
 void MainWindow::onLoadData() {
-  const QString path = QFileDialog::getOpenFileName(this, tr("Load training data"), QString(), tr("Training data (*.json)"));
+  const QString path = QFileDialog::getOpenFileName(this, tr("Load training data"), QString(), tr("Training data (*.json *.arff)"));
   if (!path.isEmpty() && !loadTrainingData(path)) {
     QMessageBox::warning(this, tr("Load failed"), tr("Failed to load training data."));
   }
@@ -1830,6 +2052,7 @@ void MainWindow::onCreateNewClass() {
   }
   model_.clear();
   trainingStats_ = {};
+  clearImportedTrainingData();
   clearInferenceOutputs();
   refreshClassList();
   rebuildMasksFromAnnotations();
@@ -1848,6 +2071,8 @@ void MainWindow::onSettings() {
   auto* gaussian7 = new QCheckBox(tr("Gaussian sigma large"), &dialog);
   auto* gaussian15 = new QCheckBox(tr("Gaussian sigma extra large"), &dialog);
   auto* differenceOfGaussians = new QCheckBox(tr("Difference of Gaussians"), &dialog);
+  auto* minimum = new QCheckBox(tr("Minimum filter"), &dialog);
+  auto* maximum = new QCheckBox(tr("Maximum filter"), &dialog);
   auto* median = new QCheckBox(tr("Median filter"), &dialog);
   auto* bilateral = new QCheckBox(tr("Bilateral filter"), &dialog);
   auto* gradient = new QCheckBox(tr("Gradient magnitude"), &dialog);
@@ -1856,6 +2081,7 @@ void MainWindow::onSettings() {
   auto* hessian = new QCheckBox(tr("Hessian norm"), &dialog);
   auto* localMean = new QCheckBox(tr("Local mean"), &dialog);
   auto* localStd = new QCheckBox(tr("Local std-dev"), &dialog);
+  auto* localVariance = new QCheckBox(tr("Local variance"), &dialog);
   auto* entropy = new QCheckBox(tr("Local entropy"), &dialog);
   auto* texture = new QCheckBox(tr("Texture energy"), &dialog);
   auto* clahe = new QCheckBox(tr("CLAHE"), &dialog);
@@ -1871,6 +2097,8 @@ void MainWindow::onSettings() {
   gaussian7->setChecked(featureSettings_.gaussian7);
   gaussian15->setChecked(featureSettings_.gaussian15);
   differenceOfGaussians->setChecked(featureSettings_.differenceOfGaussians);
+  minimum->setChecked(featureSettings_.minimum);
+  maximum->setChecked(featureSettings_.maximum);
   median->setChecked(featureSettings_.median);
   bilateral->setChecked(featureSettings_.bilateral);
   gradient->setChecked(featureSettings_.gradient);
@@ -1879,6 +2107,7 @@ void MainWindow::onSettings() {
   hessian->setChecked(featureSettings_.hessian);
   localMean->setChecked(featureSettings_.localMean);
   localStd->setChecked(featureSettings_.localStd);
+  localVariance->setChecked(featureSettings_.localVariance);
   entropy->setChecked(featureSettings_.entropy);
   texture->setChecked(featureSettings_.texture);
   clahe->setChecked(featureSettings_.clahe);
@@ -1889,8 +2118,9 @@ void MainWindow::onSettings() {
   channelRatios->setChecked(featureSettings_.channelRatios);
   xpos->setChecked(featureSettings_.xPosition);
   ypos->setChecked(featureSettings_.yPosition);
-  for (QCheckBox* checkbox : {intensity, gaussian3, gaussian7, gaussian15, differenceOfGaussians, median, bilateral, gradient, laplacian, laplacianOfGaussian, hessian,
-                              localMean, localStd, entropy, texture, clahe, canny, structureTensor, gabor, membrane, channelRatios, xpos, ypos}) {
+  for (QCheckBox* checkbox : {intensity, gaussian3, gaussian7, gaussian15, differenceOfGaussians, minimum, maximum, median, bilateral, gradient, laplacian,
+                              laplacianOfGaussian, hessian, localMean, localStd, localVariance, entropy, texture, clahe, canny, structureTensor, gabor,
+                              membrane, channelRatios, xpos, ypos}) {
     featureLayout->addWidget(checkbox);
   }
 
@@ -1945,6 +2175,8 @@ void MainWindow::onSettings() {
   featureSettings_.gaussian7 = gaussian7->isChecked();
   featureSettings_.gaussian15 = gaussian15->isChecked();
   featureSettings_.differenceOfGaussians = differenceOfGaussians->isChecked();
+  featureSettings_.minimum = minimum->isChecked();
+  featureSettings_.maximum = maximum->isChecked();
   featureSettings_.median = median->isChecked();
   featureSettings_.bilateral = bilateral->isChecked();
   featureSettings_.gradient = gradient->isChecked();
@@ -1953,6 +2185,7 @@ void MainWindow::onSettings() {
   featureSettings_.hessian = hessian->isChecked();
   featureSettings_.localMean = localMean->isChecked();
   featureSettings_.localStd = localStd->isChecked();
+  featureSettings_.localVariance = localVariance->isChecked();
   featureSettings_.entropy = entropy->isChecked();
   featureSettings_.texture = texture->isChecked();
   featureSettings_.clahe = clahe->isChecked();
@@ -1973,6 +2206,7 @@ void MainWindow::onSettings() {
   classifierSettings_.logisticIterations = logisticIterations->value();
   model_.clear();
   trainingStats_ = {};
+  clearImportedTrainingData();
   rebuildFeatureStack();
   clearInferenceOutputs();
   updateViewer();
