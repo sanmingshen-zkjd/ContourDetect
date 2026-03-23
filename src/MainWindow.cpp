@@ -21,6 +21,7 @@
 #include <QJsonObject>
 #include <QMessageBox>
 #include <QPainter>
+#include <QProgressDialog>
 #include <QScreen>
 #include <QSplitter>
 #include <QTemporaryDir>
@@ -308,10 +309,6 @@ MainWindow::MainWindow(QWidget* parent)
 void MainWindow::buildUi() {
   auto* toolBar = addToolBar(tr("Main"));
   toolBar->setMovable(false);
-  QAction* newProjectAction = toolBar->addAction(tr("New Project"));
-  QAction* openProjectAction = toolBar->addAction(tr("Open Project"));
-  QAction* saveProjectAction = toolBar->addAction(tr("Save Project"));
-  toolBar->addSeparator();
   QAction* openImageAction = toolBar->addAction(tr("Open Image"));
   QAction* saveMaskAction = toolBar->addAction(tr("Export Mask"));
   toolBar->addSeparator();
@@ -324,9 +321,6 @@ void MainWindow::buildUi() {
   QAction* traceAction = toolBar->addAction(tr("Trace ROI"));
   QAction* resetZoomAction = toolBar->addAction(tr("Reset Zoom"));
 
-  connect(newProjectAction, &QAction::triggered, this, &MainWindow::onNewProject);
-  connect(openProjectAction, &QAction::triggered, this, &MainWindow::onOpenProject);
-  connect(saveProjectAction, &QAction::triggered, this, &MainWindow::onSaveProject);
   connect(openImageAction, &QAction::triggered, this, &MainWindow::onOpenImage);
   connect(saveMaskAction, &QAction::triggered, this, &MainWindow::onExportMask);
   connect(undoAction, &QAction::triggered, this, &MainWindow::onUndo);
@@ -375,8 +369,6 @@ void MainWindow::buildUi() {
   QPushButton* saveDataButton = new QPushButton(tr("Save data"), optionsGroup);
   QPushButton* createClassButton = new QPushButton(tr("Create new class"), optionsGroup);
   QPushButton* settingsButton = new QPushButton(tr("Settings"), optionsGroup);
-  QPushButton* addProjectImageButton = new QPushButton(tr("Add image to project"), optionsGroup);
-  QPushButton* removeProjectImageButton = new QPushButton(tr("Remove project image"), optionsGroup);
   optionsLayout->addWidget(applyButton_);
   optionsLayout->addWidget(loadClassifierButton);
   optionsLayout->addWidget(saveClassifierButton);
@@ -384,8 +376,6 @@ void MainWindow::buildUi() {
   optionsLayout->addWidget(saveDataButton);
   optionsLayout->addWidget(createClassButton);
   optionsLayout->addWidget(settingsButton);
-  optionsLayout->addWidget(addProjectImageButton);
-  optionsLayout->addWidget(removeProjectImageButton);
   leftLayout->addWidget(optionsGroup);
 
   auto* brushGroup = new QGroupBox(tr("Brush / Slice"), leftPanel);
@@ -439,8 +429,6 @@ void MainWindow::buildUi() {
   connect(saveDataButton, &QPushButton::clicked, this, &MainWindow::onSaveData);
   connect(createClassButton, &QPushButton::clicked, this, &MainWindow::onCreateNewClass);
   connect(settingsButton, &QPushButton::clicked, this, &MainWindow::onSettings);
-  connect(addProjectImageButton, &QPushButton::clicked, this, &MainWindow::onAddImageToProject);
-  connect(removeProjectImageButton, &QPushButton::clicked, this, &MainWindow::onRemoveProjectImage);
 
   auto* centerPanel = new QWidget(splitter);
   auto* centerLayout = new QVBoxLayout(centerPanel);
@@ -462,12 +450,6 @@ void MainWindow::buildUi() {
   auto* rightLayout = new QVBoxLayout(rightPanel);
   rightLayout->setContentsMargins(12, 12, 12, 12);
   rightLayout->setSpacing(12);
-
-  auto* projectGroup = new QGroupBox(tr("Project images"), rightPanel);
-  auto* projectLayout = new QVBoxLayout(projectGroup);
-  projectList_ = new QListWidget(projectGroup);
-  projectLayout->addWidget(projectList_);
-  rightLayout->addWidget(projectGroup, 1);
 
   auto* labelsGroup = new QGroupBox(tr("Labels"), rightPanel);
   auto* labelsLayout = new QVBoxLayout(labelsGroup);
@@ -534,8 +516,6 @@ void MainWindow::connectSignals() {
   connect(clearTraceButton_, &QPushButton::clicked, this, &MainWindow::onClearTracesForSelectedClass);
   connect(undoButton_, &QPushButton::clicked, this, &MainWindow::onUndo);
   connect(redoButton_, &QPushButton::clicked, this, &MainWindow::onRedo);
-  connect(projectList_, &QListWidget::itemSelectionChanged, this, &MainWindow::onProjectSelectionChanged);
-
   view_->onBrushStroke = [this](const QPoint& imagePos, int radius, bool erase) {
     applyBrushStroke(imagePos, radius, erase);
   };
@@ -724,18 +704,101 @@ void MainWindow::updateViewer() {
   repaintAnnotationPreview();
 }
 
-void MainWindow::updateProbabilityView() {
+bool MainWindow::computeProbabilityOutputs(const QString& title,
+                                           int classIndex,
+                                           cv::Mat* probabilityImage,
+                                           cv::Mat* fullProbabilities) {
+  if (!probabilityImage && !fullProbabilities) {
+    return false;
+  }
+  if (originalImage_.empty() || !model_.isValid() || featureStack_.empty() || !model_.supportsProbability()) {
+    if (probabilityImage) probabilityImage->release();
+    if (fullProbabilities) fullProbabilities->release();
+    return false;
+  }
+
+  QProgressDialog progress(title.isEmpty() ? tr("Computing probability map...") : title,
+                           tr("Cancel"),
+                           0,
+                           featureStack_.rows,
+                           this);
+  progress.setWindowModality(Qt::ApplicationModal);
+  progress.setMinimumDuration(0);
+  progress.setAutoClose(false);
+  progress.setValue(0);
+  progress.show();
+  QApplication::processEvents();
+
+  cv::Mat probabilities;
+  constexpr int kBatchSize = 4096;
+  for (int start = 0; start < featureStack_.rows; start += kBatchSize) {
+    if (progress.wasCanceled()) {
+      if (probabilityImage) probabilityImage->release();
+      if (fullProbabilities) fullProbabilities->release();
+      return false;
+    }
+    const int end = std::min(featureStack_.rows, start + kBatchSize);
+    const cv::Mat batch = model_.predictProbabilities(featureStack_.rowRange(start, end));
+    if (batch.empty()) {
+      if (probabilityImage) probabilityImage->release();
+      if (fullProbabilities) fullProbabilities->release();
+      return false;
+    }
+    if (probabilities.empty()) {
+      probabilities = cv::Mat::zeros(featureStack_.rows, batch.cols, CV_32F);
+    } else if (batch.cols != probabilities.cols) {
+      if (probabilityImage) probabilityImage->release();
+      if (fullProbabilities) fullProbabilities->release();
+      return false;
+    }
+    batch.copyTo(probabilities.rowRange(start, end));
+    progress.setValue(end);
+    QApplication::processEvents();
+  }
+
+  if (probabilities.empty() || classIndex < 0 || classIndex >= probabilities.cols) {
+    if (probabilityImage) probabilityImage->release();
+    if (fullProbabilities) fullProbabilities->release();
+    return false;
+  }
+
+  if (fullProbabilities) {
+    *fullProbabilities = probabilities;
+  }
+  if (probabilityImage) {
+    cv::Mat channel(originalImage_.rows, originalImage_.cols, CV_32F);
+    for (int row = 0; row < originalImage_.rows; ++row) {
+      float* out = channel.ptr<float>(row);
+      for (int col = 0; col < originalImage_.cols; ++col) {
+        out[col] = probabilities.at<float>(row * originalImage_.cols + col, classIndex);
+      }
+    }
+    *probabilityImage = channel;
+  }
+  progress.setValue(featureStack_.rows);
+  return true;
+}
+
+bool MainWindow::updateProbabilityView(bool showProgress, const QString& title) {
   if (originalImage_.empty() || !model_.isValid() || featureStack_.empty()) {
     probabilityImage_.release();
-    return;
+    return false;
   }
   const int cls = probabilityCombo_->currentData().toInt();
-  probabilityImage_ = model_.supportsProbability()
-                          ? SegmentationEngine::applyModelProbabilities(model_, featureStack_, originalImage_.rows, originalImage_.cols, cls)
-                          : cv::Mat();
+  if (showProgress) {
+    cv::Mat updatedProbability;
+    probabilityImage_ = computeProbabilityOutputs(title, cls, &updatedProbability, nullptr)
+                            ? updatedProbability
+                            : cv::Mat();
+  } else {
+    probabilityImage_ = model_.supportsProbability()
+                            ? SegmentationEngine::applyModelProbabilities(model_, featureStack_, originalImage_.rows, originalImage_.cols, cls)
+                            : cv::Mat();
+  }
   if (!sliceProbabilityResults_.empty() && currentSliceIndex_ < static_cast<int>(sliceProbabilityResults_.size())) {
     sliceProbabilityResults_[currentSliceIndex_] = probabilityImage_.clone();
   }
+  return !probabilityImage_.empty();
 }
 
 int MainWindow::currentSelectedClassIndex() const {
@@ -1607,12 +1670,35 @@ void MainWindow::onTrainClassifier() {
   trainingInProgress_ = true;
   stopTrainingRequested_ = false;
   updateUiState();
+  QProgressDialog progress(tr("Training classifier..."), tr("Cancel"), 0, 6, this);
+  progress.setWindowModality(Qt::ApplicationModal);
+  progress.setMinimumDuration(0);
+  progress.setAutoClose(false);
+  progress.setValue(0);
+  progress.show();
   QApplication::processEvents();
-  rebuildFeatureStack();
-  persistCurrentProjectImageState();
-  if (stopTrainingRequested_) {
+
+  auto finishTrainingUi = [&]() {
+    progress.setValue(progress.maximum());
     trainingInProgress_ = false;
     updateUiState();
+  };
+
+  auto checkCanceled = [&]() {
+    stopTrainingRequested_ = stopTrainingRequested_ || progress.wasCanceled();
+    if (stopTrainingRequested_) {
+      finishTrainingUi();
+      logMessage(tr("Training cancelled."));
+      return true;
+    }
+    return false;
+  };
+
+  progress.setLabelText(tr("Computing image features..."));
+  rebuildFeatureStack();
+  progress.setValue(1);
+  QApplication::processEvents();
+  if (checkCanceled()) {
     return;
   }
 
@@ -1626,48 +1712,47 @@ void MainWindow::onTrainClassifier() {
     else cv::vconcat(allLabels, labels, allLabels);
   };
 
+  progress.setLabelText(tr("Gathering annotated training samples..."));
   cv::Mat currentLabels;
   cv::Mat currentSamples = SegmentationEngine::gatherSamples(featureStack_, classMasks_, &currentLabels, 12000, classifierSettings_.balanceClasses);
   appendTrainingSet(currentSamples, currentLabels);
   appendTrainingSet(importedTrainingSamples_, importedTrainingLabels_);
-
-  if (projectImages_.size() > 1) {
-    for (int imageIndex = 0; imageIndex < static_cast<int>(projectImages_.size()); ++imageIndex) {
-      if (imageIndex == currentProjectImageIndex_) continue;
-      const QString dataPath = projectImages_[imageIndex].workingDataPath;
-      if (dataPath.isEmpty() || !QFile::exists(dataPath)) continue;
-      ProjectTrainingBundle bundle;
-      if (!loadProjectTrainingBundle(dataPath, classes_, &bundle)) continue;
-      for (int sliceIndex = 0; sliceIndex < static_cast<int>(bundle.slices.size()) && sliceIndex < static_cast<int>(bundle.annotations.size()); ++sliceIndex) {
-        const cv::Mat features = SegmentationEngine::computeFeatureStack(bundle.slices[sliceIndex], featureSettings_);
-        cv::Mat labels;
-        const auto masks = masksFromAnnotationSnapshot(bundle.annotations[sliceIndex], bundle.slices[sliceIndex].size(), static_cast<int>(classes_.size()));
-        const cv::Mat samples = SegmentationEngine::gatherSamples(features, masks, &labels, 12000, classifierSettings_.balanceClasses);
-        appendTrainingSet(samples, labels);
-      }
-    }
+  progress.setValue(2);
+  QApplication::processEvents();
+  if (checkCanceled()) {
+    return;
   }
 
   if (allSamples.empty()) {
-    trainingInProgress_ = false;
-    updateUiState();
+    finishTrainingUi();
     QMessageBox::information(this, tr("No annotations"), tr("Please paint at least one pixel for each class before training."));
     return;
   }
+  progress.setLabelText(tr("Fitting classifier model..."));
+  progress.setValue(3);
+  QApplication::processEvents();
   if (!model_.train(allSamples, allLabels, static_cast<int>(classes_.size()), classifierSettings_, &trainingStats_)) {
-    trainingInProgress_ = false;
-    updateUiState();
+    finishTrainingUi();
     QMessageBox::warning(this, tr("Training failed"), tr("Training failed. Ensure every class has annotations."));
     return;
   }
+  if (checkCanceled()) {
+    return;
+  }
+
+  progress.setLabelText(tr("Applying classifier to current slice..."));
+  progress.setValue(4);
+  QApplication::processEvents();
   labelResult_ = SegmentationEngine::applyModelLabels(model_, featureStack_, originalImage_.rows, originalImage_.cols);
   if (!sliceLabelResults_.empty()) {
     sliceLabelResults_[currentSliceIndex_] = labelResult_.clone();
   }
-  updateProbabilityView();
+  progress.setLabelText(tr("Updating probability preview..."));
+  progress.setValue(5);
+  QApplication::processEvents();
+  updateProbabilityView(false);
   updateViewer();
-  trainingInProgress_ = false;
-  updateUiState();
+  finishTrainingUi();
   logMessage(tr("Trained classifier with %1 samples across %2 classes.").arg(trainingStats_.sampleCount).arg(trainingStats_.classCount));
 }
 
@@ -1776,8 +1861,7 @@ void MainWindow::onGetProbability() {
     QMessageBox::information(this, tr("Probability unavailable"), tr("The current classifier does not expose probabilities for this view."));
     return;
   }
-  updateProbabilityView();
-  if (probabilityImage_.empty()) {
+  if (!updateProbabilityView(true, tr("Computing probability map..."))) {
     QMessageBox::information(this, tr("Probability unavailable"), tr("Probability output is not available for the current image/classifier combination."));
     return;
   }
@@ -1945,7 +2029,14 @@ void MainWindow::onSuggestLabels() {
     QMessageBox::information(this, tr("Suggestions unavailable"), tr("Automatic suggestions currently require a classifier with probability output."));
     return;
   }
-  const cv::Mat probs = model_.predictProbabilities(featureStack_);
+  cv::Mat probs;
+  if (!computeProbabilityOutputs(tr("Scoring uncertainty for label suggestions..."),
+                                 probabilityCombo_->currentData().toInt(),
+                                 nullptr,
+                                 &probs)) {
+    QMessageBox::information(this, tr("Suggestions unavailable"), tr("The current model did not return probability estimates."));
+    return;
+  }
   if (probs.empty()) {
     QMessageBox::information(this, tr("Suggestions unavailable"), tr("The current model did not return probability estimates."));
     return;
@@ -2244,7 +2335,7 @@ void MainWindow::onClassSelectionChanged() {
 }
 
 void MainWindow::onProbabilityClassChanged(int) {
-  updateProbabilityView();
+  updateProbabilityView(true, tr("Updating probability map..."));
   updateUiState();
 }
 

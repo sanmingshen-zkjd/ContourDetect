@@ -94,7 +94,11 @@ private:
   void updateUiState();
   void rebuildFeatureStack();
   void updateViewer();
-  void updateProbabilityView();
+  bool updateProbabilityView(bool showProgress = false, const QString& title = QString());
+  bool computeProbabilityOutputs(const QString& title,
+                                 int classIndex,
+                                 cv::Mat* probabilityImage,
+                                 cv::Mat* fullProbabilities = nullptr);
   void repaintAnnotationPreview();
   void applyBrushStroke(const QPoint& imagePos, int radius, bool erase);
   bool ensureImageLoaded(const QString& actionName);
