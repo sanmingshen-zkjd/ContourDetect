@@ -42,6 +42,10 @@
 #include <numeric>
 
 namespace {
+std::string cvPath(const QString& path) {
+  return QFile::encodeName(path).toStdString();
+}
+
 QString nowString() {
   return QDateTime::currentDateTime().toString("hh:mm:ss");
 }
@@ -235,7 +239,7 @@ bool loadProjectTrainingBundle(const QString& path,
     const QJsonArray classEntries = sliceObject["classes"].toArray();
     for (int classIndex = 0; classIndex < classEntries.size(); ++classIndex) {
       const QJsonObject clsObj = classEntries[classIndex].toObject();
-      cv::Mat mask = cv::imread(QFileInfo(path).dir().filePath(clsObj["mask"].toString()).toStdString(), cv::IMREAD_GRAYSCALE);
+      cv::Mat mask = cv::imread(cvPath(QFileInfo(path).dir().filePath(clsObj["mask"].toString())), cv::IMREAD_GRAYSCALE);
       if (mask.empty()) {
         mask = cv::Mat(bundle->slices[sliceIndex].rows, bundle->slices[sliceIndex].cols, CV_8U, cv::Scalar(0));
       }
@@ -1183,7 +1187,7 @@ bool MainWindow::saveTrainingDataJson(const QString& path) {
       if (mask.empty()) {
         mask = cv::Mat(imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols, CV_8U, cv::Scalar(0));
       }
-      cv::imwrite(dir.filePath(maskName).toStdString(), mask);
+      cv::imwrite(cvPath(dir.filePath(maskName)), mask);
       QJsonObject cls;
       cls["mask"] = maskName;
       QJsonArray traces;
@@ -1280,7 +1284,7 @@ bool MainWindow::loadTrainingDataJson(const QString& path) {
     const QJsonArray sliceClasses = sliceObject["classes"].toArray();
     for (int classIndex = 0; classIndex < sliceClasses.size() && classIndex < static_cast<int>(classes_.size()); ++classIndex) {
       const QJsonObject clsObj = sliceClasses[classIndex].toObject();
-      cv::Mat mask = cv::imread(QFileInfo(path).dir().filePath(clsObj["mask"].toString()).toStdString(), cv::IMREAD_GRAYSCALE);
+      cv::Mat mask = cv::imread(cvPath(QFileInfo(path).dir().filePath(clsObj["mask"].toString())), cv::IMREAD_GRAYSCALE);
       if (mask.empty()) {
         mask = cv::Mat(imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols, CV_8U, cv::Scalar(0));
       }
@@ -2315,7 +2319,7 @@ void MainWindow::onExportMask() {
   if (path.isEmpty()) return;
   cv::Mat exportMask;
   labelResult_.convertTo(exportMask, CV_8U);
-  if (!cv::imwrite(path.toStdString(), exportMask)) {
+  if (!cv::imwrite(cvPath(path), exportMask)) {
     QMessageBox::warning(this, tr("Export failed"), tr("Failed to export the label mask."));
     return;
   }
