@@ -210,6 +210,9 @@ struct ProjectTrainingBundle {
   std::vector<AnnotationSnapshot> annotations;
 };
 
+cv::Mat buildExclusionMask(const cv::Size& size, const std::vector<QPolygon>& regions);
+cv::Mat buildInferenceMask(const cv::Size& size, const std::vector<QPolygon>& regions);
+
 bool loadProjectTrainingBundle(const QString& path,
                                const std::vector<SegmentationClassInfo>& expectedClasses,
                                ProjectTrainingBundle* bundle) {
