@@ -164,6 +164,7 @@ private:
   QComboBox* classifierCombo_ = nullptr;
   QCheckBox* overlayCheck_ = nullptr;
   QCheckBox* contourCheck_ = nullptr;
+  QCheckBox* annotationCheck_ = nullptr;
 
   QPushButton* trainButton_ = nullptr;
   QPushButton* stopTrainingButton_ = nullptr;

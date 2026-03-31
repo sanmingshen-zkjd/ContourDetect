@@ -647,6 +647,8 @@ void MainWindow::buildUi() {
   overlayCheck_->setChecked(true);
   contourCheck_ = new QCheckBox(tr("Draw contours"), brushGroup);
   contourCheck_->setChecked(true);
+  annotationCheck_ = new QCheckBox(tr("Show annotations"), brushGroup);
+  annotationCheck_->setChecked(true);
   sliceSlider_ = new QSlider(Qt::Horizontal, brushGroup);
   sliceSlider_->setRange(0, 0);
   sliceLabel_ = new QLabel(tr("Slice 1 / 1"), brushGroup);
@@ -658,6 +660,7 @@ void MainWindow::buildUi() {
   brushLayout->addRow(QString(), sliceLabel_);
   brushLayout->addRow(overlayCheck_);
   brushLayout->addRow(contourCheck_);
+  brushLayout->addRow(annotationCheck_);
   leftLayout->addWidget(brushGroup);
 
   undoButton_ = new QPushButton(tr("Undo"), leftPanel);
@@ -768,6 +771,7 @@ void MainWindow::connectSignals() {
     updateViewer();
   });
   connect(contourCheck_, &QCheckBox::toggled, this, [this](bool) { updateViewer(); });
+  connect(annotationCheck_, &QCheckBox::toggled, this, [this](bool) { repaintAnnotationPreview(); });
   connect(addTraceButton_, &QPushButton::clicked, this, &MainWindow::onAddTraceToSelectedClass);
   connect(addInferenceRoiButton_, &QPushButton::clicked, this, &MainWindow::onAddInferenceRoi);
   connect(clearInferenceRoiButton_, &QPushButton::clicked, this, &MainWindow::onClearInferenceRois);
@@ -856,6 +860,7 @@ void MainWindow::updateUiState() {
   }
   overlayCheck_->setEnabled(hasModel || !labelResult_.empty());
   contourCheck_->setEnabled(hasModel || !labelResult_.empty());
+  annotationCheck_->setEnabled(hasImage);
   view_->setPaintEnabled(hasImage);
   modelLabel_->setText(hasModel
                            ? tr("Model: %1 | %2 classes, %3 samples, acc=%4%")
@@ -1090,6 +1095,10 @@ int MainWindow::currentSelectedClassIndex() const {
 
 void MainWindow::repaintAnnotationPreview() {
   if (originalImage_.empty()) {
+    view_->setAnnotationPreview(QImage());
+    return;
+  }
+  if (annotationCheck_ && !annotationCheck_->isChecked()) {
     view_->setAnnotationPreview(QImage());
     return;
   }
