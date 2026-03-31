@@ -291,6 +291,86 @@ std::vector<cv::Mat> masksFromAnnotationSnapshot(const AnnotationSnapshot& snaps
   return masks;
 }
 
+cv::Mat buildExclusionMask(const cv::Size& size, const std::vector<QPolygon>& regions) {
+  cv::Mat mask(size, CV_8U, cv::Scalar(0));
+  for (const QPolygon& polygonQt : regions) {
+    if (polygonQt.size() < 3) continue;
+    std::vector<cv::Point> points;
+    points.reserve(polygonQt.size());
+    for (const QPoint& pt : polygonQt) points.emplace_back(pt.x(), pt.y());
+    std::vector<std::vector<cv::Point>> polygons{points};
+    cv::fillPoly(mask, polygons, cv::Scalar(255), cv::LINE_AA);
+  }
+  return mask;
+}
+
+cv::Mat applyModelLabelsWithExclusion(const SegmentationClassifier& model,
+                                      const cv::Mat& featureStack,
+                                      int rows,
+                                      int cols,
+                                      const cv::Mat& exclusionMask) {
+  if (exclusionMask.empty()) {
+    return SegmentationEngine::applyModelLabels(model, featureStack, rows, cols);
+  }
+  std::vector<int> active;
+  active.reserve(rows * cols);
+  for (int row = 0; row < rows; ++row) {
+    const uchar* maskPtr = exclusionMask.ptr<uchar>(row);
+    for (int col = 0; col < cols; ++col) {
+      if (maskPtr[col] == 0) {
+        active.push_back(row * cols + col);
+      }
+    }
+  }
+  if (active.empty()) {
+    return cv::Mat(rows, cols, CV_32S, cv::Scalar(0));
+  }
+  cv::Mat sampled(static_cast<int>(active.size()), featureStack.cols, featureStack.type());
+  for (int i = 0; i < static_cast<int>(active.size()); ++i) {
+    featureStack.row(active[i]).copyTo(sampled.row(i));
+  }
+  const cv::Mat sampledLabels = model.predictLabels(sampled);
+  if (sampledLabels.empty()) return cv::Mat();
+  cv::Mat full(rows * cols, 1, CV_32S, cv::Scalar(0));
+  for (int i = 0; i < static_cast<int>(active.size()); ++i) {
+    full.at<int>(active[i], 0) = sampledLabels.at<int>(i, 0);
+  }
+  return full.reshape(1, rows).clone();
+}
+
+cv::Mat applyModelProbabilitiesWithExclusion(const SegmentationClassifier& model,
+                                             const cv::Mat& featureStack,
+                                             int rows,
+                                             int cols,
+                                             int classIndex,
+                                             const cv::Mat& exclusionMask) {
+  if (exclusionMask.empty()) {
+    return SegmentationEngine::applyModelProbabilities(model, featureStack, rows, cols, classIndex);
+  }
+  std::vector<int> active;
+  active.reserve(rows * cols);
+  for (int row = 0; row < rows; ++row) {
+    const uchar* maskPtr = exclusionMask.ptr<uchar>(row);
+    for (int col = 0; col < cols; ++col) {
+      if (maskPtr[col] == 0) active.push_back(row * cols + col);
+    }
+  }
+  if (active.empty()) {
+    return cv::Mat(rows, cols, CV_32F, cv::Scalar(0));
+  }
+  cv::Mat sampled(static_cast<int>(active.size()), featureStack.cols, featureStack.type());
+  for (int i = 0; i < static_cast<int>(active.size()); ++i) {
+    featureStack.row(active[i]).copyTo(sampled.row(i));
+  }
+  cv::Mat probs = model.predictProbabilities(sampled);
+  if (probs.empty() || classIndex < 0 || classIndex >= probs.cols) return cv::Mat();
+  cv::Mat full(rows * cols, 1, CV_32F, cv::Scalar(0));
+  for (int i = 0; i < static_cast<int>(active.size()); ++i) {
+    full.at<float>(active[i], 0) = probs.at<float>(i, classIndex);
+  }
+  return full.reshape(1, rows).clone();
+}
+
 QJsonArray readVersionHistory(const QString& path) {
   QFile file(path);
   if (!file.open(QIODevice::ReadOnly)) return {};
@@ -464,6 +544,8 @@ void MainWindow::buildUi() {
   auto* labelsGroup = new QGroupBox(tr("Labels"), rightPanel);
   auto* labelsLayout = new QVBoxLayout(labelsGroup);
   addTraceButton_ = new QPushButton(tr("Add ROI to selected class"), labelsGroup);
+  addExclusionRoiButton_ = new QPushButton(tr("Add exclusion ROI"), labelsGroup);
+  clearExclusionRoiButton_ = new QPushButton(tr("Clear exclusion ROIs"), labelsGroup);
   classList_ = new QListWidget(labelsGroup);
   traceList_ = new QListWidget(labelsGroup);
   removeTraceButton_ = new QPushButton(tr("Remove selected trace"), labelsGroup);
@@ -476,6 +558,8 @@ void MainWindow::buildUi() {
   traceLayout->addWidget(renameTraceButton_);
   traceLayout->addWidget(clearTraceButton_);
   labelsLayout->addWidget(addTraceButton_);
+  labelsLayout->addWidget(addExclusionRoiButton_);
+  labelsLayout->addWidget(clearExclusionRoiButton_);
   labelsLayout->addWidget(classList_);
   labelsLayout->addWidget(traceGroup_);
   rightLayout->addWidget(labelsGroup, 2);
@@ -521,6 +605,8 @@ void MainWindow::connectSignals() {
   });
   connect(contourCheck_, &QCheckBox::toggled, this, [this](bool) { updateViewer(); });
   connect(addTraceButton_, &QPushButton::clicked, this, &MainWindow::onAddTraceToSelectedClass);
+  connect(addExclusionRoiButton_, &QPushButton::clicked, this, &MainWindow::onAddExclusionRoi);
+  connect(clearExclusionRoiButton_, &QPushButton::clicked, this, &MainWindow::onClearExclusionRois);
   connect(removeTraceButton_, &QPushButton::clicked, this, &MainWindow::onRemoveSelectedTrace);
   connect(renameTraceButton_, &QPushButton::clicked, this, &MainWindow::onRenameSelectedTrace);
   connect(clearTraceButton_, &QPushButton::clicked, this, &MainWindow::onClearTracesForSelectedClass);
@@ -592,6 +678,8 @@ void MainWindow::updateUiState() {
   probabilityCombo_->setEnabled(hasProbability && !trainingInProgress_);
   classifierCombo_->setEnabled(!trainingInProgress_);
   addTraceButton_->setEnabled(hasImage && hasClassSelection && !trainingInProgress_);
+  addExclusionRoiButton_->setEnabled(hasImage && !trainingInProgress_);
+  clearExclusionRoiButton_->setEnabled(hasImage && !trainingInProgress_ && !exclusionRegions_.empty());
   traceList_->setEnabled(hasImage && hasClassSelection && !trainingInProgress_);
   sliceSlider_->setEnabled(imageVolume_.size() > 1 && !trainingInProgress_);
   if (traceGroup_) {
@@ -638,6 +726,7 @@ void MainWindow::saveCurrentSliceState() {
   }
   sliceAnnotationStates_[currentSliceIndex_].classBrushMasks = cloneMaskVector(classBrushMasks_);
   sliceAnnotationStates_[currentSliceIndex_].classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  sliceAnnotationStates_[currentSliceIndex_].exclusionRegions = exclusionRegions_;
   sliceLabelResults_[currentSliceIndex_] = labelResult_.clone();
   sliceProbabilityResults_[currentSliceIndex_] = probabilityImage_.clone();
 }
@@ -649,6 +738,7 @@ void MainWindow::restoreSliceState(int sliceIndex) {
   }
   classBrushMasks_ = cloneMaskVector(sliceAnnotationStates_[sliceIndex].classBrushMasks);
   classTraceRegions_ = cloneTraceRegions(sliceAnnotationStates_[sliceIndex].classTraceRegions);
+  exclusionRegions_ = sliceAnnotationStates_[sliceIndex].exclusionRegions;
   labelResult_ = sliceLabelResults_[sliceIndex].clone();
   probabilityImage_ = sliceProbabilityResults_[sliceIndex].clone();
   pendingTrace_.clear();
@@ -671,6 +761,7 @@ void MainWindow::pushUndoSnapshot() {
   AnnotationSnapshot snapshot;
   snapshot.classBrushMasks = cloneMaskVector(classBrushMasks_);
   snapshot.classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  snapshot.exclusionRegions = exclusionRegions_;
   undoStack_.push_back(std::move(snapshot));
   trimUndoHistory();
   redoStack_.clear();
@@ -686,6 +777,7 @@ void MainWindow::trimUndoHistory() {
 void MainWindow::restoreSnapshot(const AnnotationSnapshot& snapshot) {
   classBrushMasks_ = cloneMaskVector(snapshot.classBrushMasks);
   classTraceRegions_ = cloneTraceRegions(snapshot.classTraceRegions);
+  exclusionRegions_ = snapshot.exclusionRegions;
   rebuildMasksFromAnnotations();
 }
 
@@ -802,7 +894,7 @@ bool MainWindow::updateProbabilityView(bool showProgress, const QString& title) 
                             : cv::Mat();
   } else {
     probabilityImage_ = model_.supportsProbability()
-                            ? SegmentationEngine::applyModelProbabilities(model_, featureStack_, originalImage_.rows, originalImage_.cols, cls)
+                            ? applyModelProbabilitiesWithExclusion(model_, featureStack_, originalImage_.rows, originalImage_.cols, cls, exclusionMask_)
                             : cv::Mat();
   }
   if (!sliceProbabilityResults_.empty() && currentSliceIndex_ < static_cast<int>(sliceProbabilityResults_.size())) {
@@ -859,6 +951,19 @@ void MainWindow::repaintAnnotationPreview() {
         painter.drawPolygon(polygon);
       }
     }
+  }
+  if (!exclusionMask_.empty()) {
+    QImage exMask(exclusionMask_.data, exclusionMask_.cols, exclusionMask_.rows, static_cast<int>(exclusionMask_.step), QImage::Format_Grayscale8);
+    QImage colored(exMask.size(), QImage::Format_ARGB32_Premultiplied);
+    colored.fill(Qt::transparent);
+    for (int y = 0; y < exMask.height(); ++y) {
+      const uchar* src = exMask.constScanLine(y);
+      QRgb* dst = reinterpret_cast<QRgb*>(colored.scanLine(y));
+      for (int x = 0; x < exMask.width(); ++x) {
+        if (src[x] > 0) dst[x] = qRgba(255, 60, 60, 70);
+      }
+    }
+    painter.drawImage(0, 0, colored);
   }
   painter.end();
   view_->setAnnotationPreview(annotation);
@@ -963,6 +1068,8 @@ void MainWindow::clearAnnotationsForCurrentImage() {
   classMasks_.assign(classes_.size(), cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)));
   classBrushMasks_.assign(classes_.size(), cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)));
   classTraceRegions_.assign(classes_.size(), {});
+  exclusionRegions_.clear();
+  exclusionMask_.release();
   undoStack_.clear();
   redoStack_.clear();
   pendingTrace_.clear();
@@ -1009,6 +1116,16 @@ void MainWindow::rebuildMasksFromAnnotations() {
         classMasks_[other].setTo(cv::Scalar(0), traceMask);
       }
       classMasks_[cls].setTo(cv::Scalar(255), traceMask);
+    }
+  }
+
+  exclusionMask_ = buildExclusionMask(originalImage_.size(), exclusionRegions_);
+  if (!exclusionMask_.empty()) {
+    for (auto& mask : classMasks_) {
+      if (!mask.empty()) mask.setTo(cv::Scalar(0), exclusionMask_);
+    }
+    for (auto& mask : classBrushMasks_) {
+      if (!mask.empty()) mask.setTo(cv::Scalar(0), exclusionMask_);
     }
   }
 
@@ -1147,7 +1264,7 @@ bool MainWindow::applyClassifierToImage(const cv::Mat& image, const QString& pat
     rebuildMasksFromAnnotations();
   }
   rebuildFeatureStack();
-  labelResult_ = SegmentationEngine::applyModelLabels(model_, featureStack_, originalImage_.rows, originalImage_.cols);
+  labelResult_ = applyModelLabelsWithExclusion(model_, featureStack_, originalImage_.rows, originalImage_.cols, exclusionMask_);
   sliceLabelResults_[0] = labelResult_.clone();
   updateProbabilityView();
   updateViewer();
@@ -1785,7 +1902,7 @@ void MainWindow::onTrainClassifier() {
   }
   model_ = result.model;
   trainingStats_ = result.stats;
-  labelResult_ = SegmentationEngine::applyModelLabels(model_, featureStack_, originalImage_.rows, originalImage_.cols);
+  labelResult_ = applyModelLabelsWithExclusion(model_, featureStack_, originalImage_.rows, originalImage_.cols, exclusionMask_);
   if (!sliceLabelResults_.empty()) {
     sliceLabelResults_[currentSliceIndex_] = labelResult_.clone();
   }
@@ -1845,9 +1962,10 @@ void MainWindow::onApplyClassifier() {
   for (int sliceIndex = 0; sliceIndex < static_cast<int>(imageVolume_.size()); ++sliceIndex) {
     const cv::Mat features = SegmentationEngine::computeFeatureStack(imageVolume_[sliceIndex], featureSettings_);
     featureVolume_[sliceIndex] = features;
-    sliceLabelResults_[sliceIndex] = SegmentationEngine::applyModelLabels(model_, features, imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols);
+    sliceLabelResults_[sliceIndex] = applyModelLabelsWithExclusion(model_, features, imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols, exclusionMask_);
     if (model_.supportsProbability()) {
-      sliceProbabilityResults_[sliceIndex] = SegmentationEngine::applyModelProbabilities(model_, features, imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols, probabilityCombo_->currentData().toInt());
+      sliceProbabilityResults_[sliceIndex] = applyModelProbabilitiesWithExclusion(model_, features, imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols,
+                                                                                  probabilityCombo_->currentData().toInt(), exclusionMask_);
     }
   }
   currentSliceIndex_ = std::clamp(currentSliceIndex_, 0, std::max(0, static_cast<int>(imageVolume_.size()) - 1));
@@ -1905,6 +2023,7 @@ void MainWindow::onGetProbability() {
   probabilityTaskRunning_ = true;
   const int cls = probabilityCombo_->currentData().toInt();
   const cv::Mat features = featureStack_.clone();
+  const cv::Mat exclusionMask = exclusionMask_.clone();
   const int rows = originalImage_.rows;
   const int cols = originalImage_.cols;
   const SegmentationClassifier modelCopy = model_;
@@ -1917,24 +2036,51 @@ void MainWindow::onGetProbability() {
   progress.show();
   QApplication::processEvents();
 
-  QFuture<cv::Mat> future = QtConcurrent::run([modelCopy, features, rows, cols, cls, &cancelRequested]() {
+  QFuture<cv::Mat> future = QtConcurrent::run([modelCopy, features, exclusionMask, rows, cols, cls, &cancelRequested]() {
     if (cancelRequested.load()) return cv::Mat();
+    std::vector<int> active;
+    if (!exclusionMask.empty()) {
+      active.reserve(rows * cols);
+      for (int row = 0; row < rows; ++row) {
+        const uchar* maskPtr = exclusionMask.ptr<uchar>(row);
+        for (int col = 0; col < cols; ++col) {
+          if (maskPtr[col] == 0) active.push_back(row * cols + col);
+        }
+      }
+      if (active.empty()) return cv::Mat(rows, cols, CV_32F, cv::Scalar(0));
+    }
+    const bool useSubset = !active.empty();
+    const cv::Mat inferFeatures = [&]() {
+      if (!useSubset) return features;
+      cv::Mat sampled(static_cast<int>(active.size()), features.cols, features.type());
+      for (int i = 0; i < static_cast<int>(active.size()); ++i) {
+        features.row(active[i]).copyTo(sampled.row(i));
+      }
+      return sampled;
+    }();
     constexpr int kBatchSize = 4096;
     cv::Mat probabilities;
-    for (int start = 0; start < features.rows; start += kBatchSize) {
+    for (int start = 0; start < inferFeatures.rows; start += kBatchSize) {
       if (cancelRequested.load()) return cv::Mat();
-      const int end = std::min(features.rows, start + kBatchSize);
-      const cv::Mat batch = modelCopy.predictProbabilities(features.rowRange(start, end));
+      const int end = std::min(inferFeatures.rows, start + kBatchSize);
+      const cv::Mat batch = modelCopy.predictProbabilities(inferFeatures.rowRange(start, end));
       if (batch.empty()) return cv::Mat();
-      if (probabilities.empty()) probabilities = cv::Mat::zeros(features.rows, batch.cols, CV_32F);
+      if (probabilities.empty()) probabilities = cv::Mat::zeros(inferFeatures.rows, batch.cols, CV_32F);
       batch.copyTo(probabilities.rowRange(start, end));
     }
     if (probabilities.empty() || cls < 0 || cls >= probabilities.cols) return cv::Mat();
     cv::Mat channel(rows, cols, CV_32F);
-    for (int row = 0; row < rows; ++row) {
-      float* out = channel.ptr<float>(row);
-      for (int col = 0; col < cols; ++col) {
-        out[col] = probabilities.at<float>(row * cols + col, cls);
+    channel.setTo(0);
+    if (useSubset) {
+      for (int i = 0; i < static_cast<int>(active.size()); ++i) {
+        channel.at<float>(active[i] / cols, active[i] % cols) = probabilities.at<float>(i, cls);
+      }
+    } else {
+      for (int row = 0; row < rows; ++row) {
+        float* out = channel.ptr<float>(row);
+        for (int col = 0; col < cols; ++col) {
+          out[col] = probabilities.at<float>(row * cols + col, cls);
+        }
       }
     }
     return channel;
@@ -2160,6 +2306,9 @@ void MainWindow::onSuggestLabels() {
   candidates.reserve(probs.rows);
   for (int row = 0; row < originalImage_.rows; ++row) {
     for (int col = 0; col < originalImage_.cols; ++col) {
+      if (!exclusionMask_.empty() && exclusionMask_.at<uchar>(row, col) > 0) {
+        continue;
+      }
       const cv::Mat probRow = probs.row(row * originalImage_.cols + col);
       double maxValue = 0.0;
       cv::minMaxLoc(probRow, nullptr, &maxValue, nullptr, nullptr);
@@ -2560,6 +2709,27 @@ void MainWindow::onPanTool() { view_->setToolMode(SegmentationView::PanTool); }
 void MainWindow::onTraceTool() { view_->setToolMode(SegmentationView::TraceTool); }
 void MainWindow::onResetZoom() { view_->resetView(); }
 void MainWindow::onAddTraceToSelectedClass() { addPendingTraceToSelectedClass(); }
+void MainWindow::onAddExclusionRoi() {
+  if (pendingTrace_.size() < 3) {
+    QMessageBox::information(this, tr("No ROI"), tr("Draw a ROI trace first, then add it as an exclusion region."));
+    return;
+  }
+  pushUndoSnapshot();
+  exclusionRegions_.push_back(pendingTrace_);
+  pendingTrace_.clear();
+  view_->clearPendingTrace();
+  infoLabel_->setText(tr("Added exclusion ROI (%1 total).").arg(exclusionRegions_.size()));
+  logMessage(tr("Added exclusion ROI to ignore area during training/inference."));
+  rebuildMasksFromAnnotations();
+}
+void MainWindow::onClearExclusionRois() {
+  if (exclusionRegions_.empty()) return;
+  pushUndoSnapshot();
+  exclusionRegions_.clear();
+  exclusionMask_.release();
+  logMessage(tr("Cleared exclusion ROIs."));
+  rebuildMasksFromAnnotations();
+}
 void MainWindow::onRemoveSelectedTrace() { removeSelectedTraceFromClass(); }
 
 void MainWindow::onRenameSelectedTrace() {
@@ -2592,6 +2762,7 @@ void MainWindow::onUndo() {
   AnnotationSnapshot current;
   current.classBrushMasks = cloneMaskVector(classBrushMasks_);
   current.classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  current.exclusionRegions = exclusionRegions_;
   redoStack_.push_back(std::move(current));
   const AnnotationSnapshot snapshot = undoStack_.back();
   undoStack_.pop_back();
@@ -2603,6 +2774,7 @@ void MainWindow::onRedo() {
   AnnotationSnapshot current;
   current.classBrushMasks = cloneMaskVector(classBrushMasks_);
   current.classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  current.exclusionRegions = exclusionRegions_;
   undoStack_.push_back(std::move(current));
   const AnnotationSnapshot snapshot = redoStack_.back();
   redoStack_.pop_back();
