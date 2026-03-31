@@ -428,19 +428,25 @@ cv::Mat SegmentationClassifier::predictLabels(const cv::Mat& features) const {
     return gnbModel_.predictLabels(features);
   }
 
-  labels = cv::Mat::zeros(features.rows, 1, CV_32S);
-  for (int row = 0; row < features.rows; ++row) {
-    float predicted = 0.0f;
-    if (kind_ == SegmentationClassifierSettings::RandomForest) {
-      predicted = randomForest_->predict(features.row(row));
-    } else if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
-      predicted = svm_->predict(features.row(row));
-    } else if (kind_ == SegmentationClassifierSettings::KNearestNeighbors) {
-      predicted = knn_->predict(features.row(row));
-    } else if (kind_ == SegmentationClassifierSettings::LogisticRegression) {
-      predicted = logisticRegression_->predict(features.row(row));
-    }
-    labels.at<int>(row, 0) = static_cast<int>(std::lround(predicted));
+  cv::Mat raw;
+  if (kind_ == SegmentationClassifierSettings::RandomForest && randomForest_) {
+    randomForest_->predict(features, raw);
+  } else if (kind_ == SegmentationClassifierSettings::SupportVectorMachine && svm_) {
+    svm_->predict(features, raw);
+  } else if (kind_ == SegmentationClassifierSettings::KNearestNeighbors && knn_) {
+    knn_->findNearest(features, std::max(1, knn_->getDefaultK()), raw);
+  } else if (kind_ == SegmentationClassifierSettings::LogisticRegression && logisticRegression_) {
+    logisticRegression_->predict(features, raw);
+  }
+  if (raw.empty()) {
+    return cv::Mat();
+  }
+  if (raw.type() != CV_32F) {
+    raw.convertTo(raw, CV_32F);
+  }
+  labels = cv::Mat::zeros(raw.rows, 1, CV_32S);
+  for (int row = 0; row < raw.rows; ++row) {
+    labels.at<int>(row, 0) = static_cast<int>(std::lround(raw.at<float>(row, 0)));
   }
   return labels;
 }
