@@ -1028,17 +1028,24 @@ void MainWindow::repaintAnnotationPreview() {
     }
   }
   if (!inferenceMask_.empty()) {
-    QImage inMask(inferenceMask_.data, inferenceMask_.cols, inferenceMask_.rows, static_cast<int>(inferenceMask_.step), QImage::Format_Grayscale8);
-    QImage colored(inMask.size(), QImage::Format_ARGB32_Premultiplied);
-    colored.fill(Qt::transparent);
-    for (int y = 0; y < inMask.height(); ++y) {
-      const uchar* src = inMask.constScanLine(y);
-      QRgb* dst = reinterpret_cast<QRgb*>(colored.scanLine(y));
-      for (int x = 0; x < inMask.width(); ++x) {
-        if (src[x] > 0) dst[x] = qRgba(60, 200, 90, 25);
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(inferenceMask_.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    QPen pen(QColor(60, 200, 90, 220));
+    pen.setWidth(2);
+    pen.setStyle(Qt::DashLine);
+    painter.setPen(pen);
+    painter.setBrush(Qt::NoBrush);
+    for (const auto& contour : contours) {
+      if (contour.empty()) continue;
+      QPolygon polygon;
+      polygon.reserve(static_cast<int>(contour.size()));
+      for (const auto& pt : contour) {
+        polygon << QPoint(pt.x, pt.y);
+      }
+      if (polygon.size() >= 3) {
+        painter.drawPolygon(polygon);
       }
     }
-    painter.drawImage(0, 0, colored);
   }
   if (!exclusionMask_.empty()) {
     QImage exMask(exclusionMask_.data, exclusionMask_.cols, exclusionMask_.rows, static_cast<int>(exclusionMask_.step), QImage::Format_Grayscale8);
