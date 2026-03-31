@@ -34,6 +34,7 @@ struct AnnotationSnapshot {
   std::vector<cv::Mat> classBrushMasks;
   std::vector<std::vector<TraceRegion>> classTraceRegions;
   std::vector<QPolygon> exclusionRegions;
+  std::vector<QPolygon> inferenceRegions;
 };
 
 struct ProjectImageEntry {
@@ -76,6 +77,8 @@ private slots:
   void onTraceTool();
   void onResetZoom();
   void onAddTraceToSelectedClass();
+  void onAddInferenceRoi();
+  void onClearInferenceRois();
   void onAddExclusionRoi();
   void onClearExclusionRois();
   void onRemoveSelectedTrace();
@@ -167,6 +170,8 @@ private:
   QPushButton* createResultButton_ = nullptr;
   QPushButton* probabilityButton_ = nullptr;
   QPushButton* addTraceButton_ = nullptr;
+  QPushButton* addInferenceRoiButton_ = nullptr;
+  QPushButton* clearInferenceRoiButton_ = nullptr;
   QPushButton* addExclusionRoiButton_ = nullptr;
   QPushButton* clearExclusionRoiButton_ = nullptr;
   QPushButton* removeTraceButton_ = nullptr;
@@ -189,6 +194,8 @@ private:
   std::vector<cv::Mat> classMasks_;
   std::vector<cv::Mat> classBrushMasks_;
   std::vector<std::vector<TraceRegion>> classTraceRegions_;
+  std::vector<QPolygon> inferenceRegions_;
+  cv::Mat inferenceMask_;
   std::vector<QPolygon> exclusionRegions_;
   cv::Mat exclusionMask_;
   QPolygon pendingTrace_;

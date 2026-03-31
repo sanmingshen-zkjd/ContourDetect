@@ -257,6 +257,22 @@ bool loadProjectTrainingBundle(const QString& path,
         snapshot.classTraceRegions[classIndex].push_back({traceObject["name"].toString(), polygon});
       }
     }
+    for (const auto& regionValue : sliceObject["inferenceRegions"].toArray()) {
+      QPolygon polygon;
+      for (const auto& pointValue : regionValue.toArray()) {
+        const QJsonObject pointObject = pointValue.toObject();
+        polygon << QPoint(pointObject["x"].toInt(), pointObject["y"].toInt());
+      }
+      if (polygon.size() >= 3) snapshot.inferenceRegions.push_back(polygon);
+    }
+    for (const auto& regionValue : sliceObject["exclusionRegions"].toArray()) {
+      QPolygon polygon;
+      for (const auto& pointValue : regionValue.toArray()) {
+        const QJsonObject pointObject = pointValue.toObject();
+        polygon << QPoint(pointObject["x"].toInt(), pointObject["y"].toInt());
+      }
+      if (polygon.size() >= 3) snapshot.exclusionRegions.push_back(polygon);
+    }
     bundle->annotations[sliceIndex] = snapshot;
   }
   return true;
@@ -288,6 +304,20 @@ std::vector<cv::Mat> masksFromAnnotationSnapshot(const AnnotationSnapshot& snaps
       masks[cls].setTo(cv::Scalar(255), traceMask);
     }
   }
+  const cv::Mat inferenceMask = buildInferenceMask(size, snapshot.inferenceRegions);
+  if (!inferenceMask.empty()) {
+    cv::Mat outsideMask;
+    cv::bitwise_not(inferenceMask, outsideMask);
+    for (auto& mask : masks) {
+      if (!mask.empty()) mask.setTo(cv::Scalar(0), outsideMask);
+    }
+  }
+  const cv::Mat exclusionMask = buildExclusionMask(size, snapshot.exclusionRegions);
+  if (!exclusionMask.empty()) {
+    for (auto& mask : masks) {
+      if (!mask.empty()) mask.setTo(cv::Scalar(0), exclusionMask);
+    }
+  }
   return masks;
 }
 
@@ -304,20 +334,38 @@ cv::Mat buildExclusionMask(const cv::Size& size, const std::vector<QPolygon>& re
   return mask;
 }
 
+cv::Mat buildInferenceMask(const cv::Size& size, const std::vector<QPolygon>& regions) {
+  if (regions.empty()) return cv::Mat();
+  cv::Mat mask(size, CV_8U, cv::Scalar(0));
+  for (const QPolygon& polygonQt : regions) {
+    if (polygonQt.size() < 3) continue;
+    std::vector<cv::Point> points;
+    points.reserve(polygonQt.size());
+    for (const QPoint& pt : polygonQt) points.emplace_back(pt.x(), pt.y());
+    std::vector<std::vector<cv::Point>> polygons{points};
+    cv::fillPoly(mask, polygons, cv::Scalar(255), cv::LINE_AA);
+  }
+  return mask;
+}
+
 cv::Mat applyModelLabelsWithExclusion(const SegmentationClassifier& model,
                                       const cv::Mat& featureStack,
                                       int rows,
                                       int cols,
+                                      const cv::Mat& inferenceMask,
                                       const cv::Mat& exclusionMask) {
-  if (exclusionMask.empty()) {
+  if (inferenceMask.empty() && exclusionMask.empty()) {
     return SegmentationEngine::applyModelLabels(model, featureStack, rows, cols);
   }
   std::vector<int> active;
   active.reserve(rows * cols);
   for (int row = 0; row < rows; ++row) {
-    const uchar* maskPtr = exclusionMask.ptr<uchar>(row);
+    const uchar* includePtr = inferenceMask.empty() ? nullptr : inferenceMask.ptr<uchar>(row);
+    const uchar* excludePtr = exclusionMask.empty() ? nullptr : exclusionMask.ptr<uchar>(row);
     for (int col = 0; col < cols; ++col) {
-      if (maskPtr[col] == 0) {
+      const bool included = !includePtr || includePtr[col] > 0;
+      const bool excluded = excludePtr && excludePtr[col] > 0;
+      if (included && !excluded) {
         active.push_back(row * cols + col);
       }
     }
@@ -343,16 +391,20 @@ cv::Mat applyModelProbabilitiesWithExclusion(const SegmentationClassifier& model
                                              int rows,
                                              int cols,
                                              int classIndex,
+                                             const cv::Mat& inferenceMask,
                                              const cv::Mat& exclusionMask) {
-  if (exclusionMask.empty()) {
+  if (inferenceMask.empty() && exclusionMask.empty()) {
     return SegmentationEngine::applyModelProbabilities(model, featureStack, rows, cols, classIndex);
   }
   std::vector<int> active;
   active.reserve(rows * cols);
   for (int row = 0; row < rows; ++row) {
-    const uchar* maskPtr = exclusionMask.ptr<uchar>(row);
+    const uchar* includePtr = inferenceMask.empty() ? nullptr : inferenceMask.ptr<uchar>(row);
+    const uchar* excludePtr = exclusionMask.empty() ? nullptr : exclusionMask.ptr<uchar>(row);
     for (int col = 0; col < cols; ++col) {
-      if (maskPtr[col] == 0) active.push_back(row * cols + col);
+      const bool included = !includePtr || includePtr[col] > 0;
+      const bool excluded = excludePtr && excludePtr[col] > 0;
+      if (included && !excluded) active.push_back(row * cols + col);
     }
   }
   if (active.empty()) {
@@ -544,6 +596,8 @@ void MainWindow::buildUi() {
   auto* labelsGroup = new QGroupBox(tr("Labels"), rightPanel);
   auto* labelsLayout = new QVBoxLayout(labelsGroup);
   addTraceButton_ = new QPushButton(tr("Add ROI to selected class"), labelsGroup);
+  addInferenceRoiButton_ = new QPushButton(tr("Add recognition ROI"), labelsGroup);
+  clearInferenceRoiButton_ = new QPushButton(tr("Clear recognition ROIs"), labelsGroup);
   addExclusionRoiButton_ = new QPushButton(tr("Add exclusion ROI"), labelsGroup);
   clearExclusionRoiButton_ = new QPushButton(tr("Clear exclusion ROIs"), labelsGroup);
   classList_ = new QListWidget(labelsGroup);
@@ -558,6 +612,8 @@ void MainWindow::buildUi() {
   traceLayout->addWidget(renameTraceButton_);
   traceLayout->addWidget(clearTraceButton_);
   labelsLayout->addWidget(addTraceButton_);
+  labelsLayout->addWidget(addInferenceRoiButton_);
+  labelsLayout->addWidget(clearInferenceRoiButton_);
   labelsLayout->addWidget(addExclusionRoiButton_);
   labelsLayout->addWidget(clearExclusionRoiButton_);
   labelsLayout->addWidget(classList_);
@@ -605,6 +661,8 @@ void MainWindow::connectSignals() {
   });
   connect(contourCheck_, &QCheckBox::toggled, this, [this](bool) { updateViewer(); });
   connect(addTraceButton_, &QPushButton::clicked, this, &MainWindow::onAddTraceToSelectedClass);
+  connect(addInferenceRoiButton_, &QPushButton::clicked, this, &MainWindow::onAddInferenceRoi);
+  connect(clearInferenceRoiButton_, &QPushButton::clicked, this, &MainWindow::onClearInferenceRois);
   connect(addExclusionRoiButton_, &QPushButton::clicked, this, &MainWindow::onAddExclusionRoi);
   connect(clearExclusionRoiButton_, &QPushButton::clicked, this, &MainWindow::onClearExclusionRois);
   connect(removeTraceButton_, &QPushButton::clicked, this, &MainWindow::onRemoveSelectedTrace);
@@ -678,6 +736,8 @@ void MainWindow::updateUiState() {
   probabilityCombo_->setEnabled(hasProbability && !trainingInProgress_);
   classifierCombo_->setEnabled(!trainingInProgress_);
   addTraceButton_->setEnabled(hasImage && hasClassSelection && !trainingInProgress_);
+  addInferenceRoiButton_->setEnabled(hasImage && !trainingInProgress_);
+  clearInferenceRoiButton_->setEnabled(hasImage && !trainingInProgress_ && !inferenceRegions_.empty());
   addExclusionRoiButton_->setEnabled(hasImage && !trainingInProgress_);
   clearExclusionRoiButton_->setEnabled(hasImage && !trainingInProgress_ && !exclusionRegions_.empty());
   traceList_->setEnabled(hasImage && hasClassSelection && !trainingInProgress_);
@@ -726,6 +786,7 @@ void MainWindow::saveCurrentSliceState() {
   }
   sliceAnnotationStates_[currentSliceIndex_].classBrushMasks = cloneMaskVector(classBrushMasks_);
   sliceAnnotationStates_[currentSliceIndex_].classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  sliceAnnotationStates_[currentSliceIndex_].inferenceRegions = inferenceRegions_;
   sliceAnnotationStates_[currentSliceIndex_].exclusionRegions = exclusionRegions_;
   sliceLabelResults_[currentSliceIndex_] = labelResult_.clone();
   sliceProbabilityResults_[currentSliceIndex_] = probabilityImage_.clone();
@@ -738,6 +799,7 @@ void MainWindow::restoreSliceState(int sliceIndex) {
   }
   classBrushMasks_ = cloneMaskVector(sliceAnnotationStates_[sliceIndex].classBrushMasks);
   classTraceRegions_ = cloneTraceRegions(sliceAnnotationStates_[sliceIndex].classTraceRegions);
+  inferenceRegions_ = sliceAnnotationStates_[sliceIndex].inferenceRegions;
   exclusionRegions_ = sliceAnnotationStates_[sliceIndex].exclusionRegions;
   labelResult_ = sliceLabelResults_[sliceIndex].clone();
   probabilityImage_ = sliceProbabilityResults_[sliceIndex].clone();
@@ -761,6 +823,7 @@ void MainWindow::pushUndoSnapshot() {
   AnnotationSnapshot snapshot;
   snapshot.classBrushMasks = cloneMaskVector(classBrushMasks_);
   snapshot.classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  snapshot.inferenceRegions = inferenceRegions_;
   snapshot.exclusionRegions = exclusionRegions_;
   undoStack_.push_back(std::move(snapshot));
   trimUndoHistory();
@@ -777,6 +840,7 @@ void MainWindow::trimUndoHistory() {
 void MainWindow::restoreSnapshot(const AnnotationSnapshot& snapshot) {
   classBrushMasks_ = cloneMaskVector(snapshot.classBrushMasks);
   classTraceRegions_ = cloneTraceRegions(snapshot.classTraceRegions);
+  inferenceRegions_ = snapshot.inferenceRegions;
   exclusionRegions_ = snapshot.exclusionRegions;
   rebuildMasksFromAnnotations();
 }
@@ -875,6 +939,14 @@ bool MainWindow::computeProbabilityOutputs(const QString& title,
         out[col] = probabilities.at<float>(row * originalImage_.cols + col, classIndex);
       }
     }
+    if (!inferenceMask_.empty()) {
+      cv::Mat outsideMask;
+      cv::bitwise_not(inferenceMask_, outsideMask);
+      channel.setTo(cv::Scalar(0), outsideMask);
+    }
+    if (!exclusionMask_.empty()) {
+      channel.setTo(cv::Scalar(0), exclusionMask_);
+    }
     *probabilityImage = channel;
   }
   progress.setValue(featureStack_.rows);
@@ -894,7 +966,7 @@ bool MainWindow::updateProbabilityView(bool showProgress, const QString& title) 
                             : cv::Mat();
   } else {
     probabilityImage_ = model_.supportsProbability()
-                            ? applyModelProbabilitiesWithExclusion(model_, featureStack_, originalImage_.rows, originalImage_.cols, cls, exclusionMask_)
+                            ? applyModelProbabilitiesWithExclusion(model_, featureStack_, originalImage_.rows, originalImage_.cols, cls, inferenceMask_, exclusionMask_)
                             : cv::Mat();
   }
   if (!sliceProbabilityResults_.empty() && currentSliceIndex_ < static_cast<int>(sliceProbabilityResults_.size())) {
@@ -951,6 +1023,19 @@ void MainWindow::repaintAnnotationPreview() {
         painter.drawPolygon(polygon);
       }
     }
+  }
+  if (!inferenceMask_.empty()) {
+    QImage inMask(inferenceMask_.data, inferenceMask_.cols, inferenceMask_.rows, static_cast<int>(inferenceMask_.step), QImage::Format_Grayscale8);
+    QImage colored(inMask.size(), QImage::Format_ARGB32_Premultiplied);
+    colored.fill(Qt::transparent);
+    for (int y = 0; y < inMask.height(); ++y) {
+      const uchar* src = inMask.constScanLine(y);
+      QRgb* dst = reinterpret_cast<QRgb*>(colored.scanLine(y));
+      for (int x = 0; x < inMask.width(); ++x) {
+        if (src[x] > 0) dst[x] = qRgba(60, 200, 90, 25);
+      }
+    }
+    painter.drawImage(0, 0, colored);
   }
   if (!exclusionMask_.empty()) {
     QImage exMask(exclusionMask_.data, exclusionMask_.cols, exclusionMask_.rows, static_cast<int>(exclusionMask_.step), QImage::Format_Grayscale8);
@@ -1062,12 +1147,16 @@ void MainWindow::clearAnnotationsForCurrentImage() {
   for (auto& state : sliceAnnotationStates_) {
     state.classBrushMasks.clear();
     state.classTraceRegions.clear();
+    state.inferenceRegions.clear();
+    state.exclusionRegions.clear();
   }
   for (auto& result : sliceLabelResults_) result.release();
   for (auto& result : sliceProbabilityResults_) result.release();
   classMasks_.assign(classes_.size(), cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)));
   classBrushMasks_.assign(classes_.size(), cv::Mat(originalImage_.rows, originalImage_.cols, CV_8U, cv::Scalar(0)));
   classTraceRegions_.assign(classes_.size(), {});
+  inferenceRegions_.clear();
+  inferenceMask_.release();
   exclusionRegions_.clear();
   exclusionMask_.release();
   undoStack_.clear();
@@ -1119,7 +1208,18 @@ void MainWindow::rebuildMasksFromAnnotations() {
     }
   }
 
+  inferenceMask_ = buildInferenceMask(originalImage_.size(), inferenceRegions_);
   exclusionMask_ = buildExclusionMask(originalImage_.size(), exclusionRegions_);
+  if (!inferenceMask_.empty()) {
+    cv::Mat outsideMask;
+    cv::bitwise_not(inferenceMask_, outsideMask);
+    for (auto& mask : classMasks_) {
+      if (!mask.empty()) mask.setTo(cv::Scalar(0), outsideMask);
+    }
+    for (auto& mask : classBrushMasks_) {
+      if (!mask.empty()) mask.setTo(cv::Scalar(0), outsideMask);
+    }
+  }
   if (!exclusionMask_.empty()) {
     for (auto& mask : classMasks_) {
       if (!mask.empty()) mask.setTo(cv::Scalar(0), exclusionMask_);
@@ -1162,7 +1262,7 @@ void MainWindow::setPendingTrace(const QPolygon& trace) {
   const QColor color = (cls >= 0 && cls < static_cast<int>(classes_.size())) ? classes_[cls].color : QColor(255, 210, 90);
   view_->setPendingTrace(pendingTrace_, color);
   const QString className = (cls >= 0 && cls < static_cast<int>(classes_.size())) ? classes_[cls].name : tr("the selected class");
-  infoLabel_->setText(tr("ROI trace captured. Click Add ROI to selected class to commit it to %1.").arg(className));
+  infoLabel_->setText(tr("ROI trace captured. Click Add ROI/Add recognition ROI/Add exclusion ROI to use it."));
   logMessage(tr("Captured a pending ROI trace with %1 points for %2.").arg(pendingTrace_.size()).arg(className));
 }
 
@@ -1264,7 +1364,7 @@ bool MainWindow::applyClassifierToImage(const cv::Mat& image, const QString& pat
     rebuildMasksFromAnnotations();
   }
   rebuildFeatureStack();
-  labelResult_ = applyModelLabelsWithExclusion(model_, featureStack_, originalImage_.rows, originalImage_.cols, exclusionMask_);
+  labelResult_ = applyModelLabelsWithExclusion(model_, featureStack_, originalImage_.rows, originalImage_.cols, inferenceMask_, exclusionMask_);
   sliceLabelResults_[0] = labelResult_.clone();
   updateProbabilityView();
   updateViewer();
@@ -1348,7 +1448,25 @@ bool MainWindow::saveTrainingDataJson(const QString& path) {
       cls["traces"] = traces;
       sliceClasses.append(cls);
     }
+    QJsonArray inferenceRegions;
+    for (const QPolygon& polygon : state.inferenceRegions) {
+      QJsonArray points;
+      for (const QPoint& point : polygon) {
+        points.append(QJsonObject{{"x", point.x()}, {"y", point.y()}});
+      }
+      inferenceRegions.append(points);
+    }
+    QJsonArray exclusionRegions;
+    for (const QPolygon& polygon : state.exclusionRegions) {
+      QJsonArray points;
+      for (const QPoint& point : polygon) {
+        points.append(QJsonObject{{"x", point.x()}, {"y", point.y()}});
+      }
+      exclusionRegions.append(points);
+    }
     sliceObject["classes"] = sliceClasses;
+    sliceObject["inferenceRegions"] = inferenceRegions;
+    sliceObject["exclusionRegions"] = exclusionRegions;
     slicesArray.append(sliceObject);
   }
   root["slices"] = slicesArray;
@@ -1414,6 +1532,8 @@ bool MainWindow::loadTrainingDataJson(const QString& path) {
   for (auto& state : sliceAnnotationStates_) {
     state.classBrushMasks.clear();
     state.classTraceRegions.clear();
+    state.inferenceRegions.clear();
+    state.exclusionRegions.clear();
   }
   const QJsonArray slicesArray = root["slices"].toArray();
   for (const auto& sliceValue : slicesArray) {
@@ -1440,6 +1560,22 @@ bool MainWindow::loadTrainingDataJson(const QString& path) {
         }
         snapshot.classTraceRegions[classIndex].push_back({traceObject["name"].toString(), polygon});
       }
+    }
+    for (const auto& regionValue : sliceObject["inferenceRegions"].toArray()) {
+      QPolygon polygon;
+      for (const auto& pointValue : regionValue.toArray()) {
+        const QJsonObject pointObject = pointValue.toObject();
+        polygon << QPoint(pointObject["x"].toInt(), pointObject["y"].toInt());
+      }
+      if (polygon.size() >= 3) snapshot.inferenceRegions.push_back(polygon);
+    }
+    for (const auto& regionValue : sliceObject["exclusionRegions"].toArray()) {
+      QPolygon polygon;
+      for (const auto& pointValue : regionValue.toArray()) {
+        const QJsonObject pointObject = pointValue.toObject();
+        polygon << QPoint(pointObject["x"].toInt(), pointObject["y"].toInt());
+      }
+      if (polygon.size() >= 3) snapshot.exclusionRegions.push_back(polygon);
     }
     sliceAnnotationStates_[sliceIndex] = snapshot;
   }
@@ -1902,7 +2038,7 @@ void MainWindow::onTrainClassifier() {
   }
   model_ = result.model;
   trainingStats_ = result.stats;
-  labelResult_ = applyModelLabelsWithExclusion(model_, featureStack_, originalImage_.rows, originalImage_.cols, exclusionMask_);
+  labelResult_ = applyModelLabelsWithExclusion(model_, featureStack_, originalImage_.rows, originalImage_.cols, inferenceMask_, exclusionMask_);
   if (!sliceLabelResults_.empty()) {
     sliceLabelResults_[currentSliceIndex_] = labelResult_.clone();
   }
@@ -1962,10 +2098,10 @@ void MainWindow::onApplyClassifier() {
   for (int sliceIndex = 0; sliceIndex < static_cast<int>(imageVolume_.size()); ++sliceIndex) {
     const cv::Mat features = SegmentationEngine::computeFeatureStack(imageVolume_[sliceIndex], featureSettings_);
     featureVolume_[sliceIndex] = features;
-    sliceLabelResults_[sliceIndex] = applyModelLabelsWithExclusion(model_, features, imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols, exclusionMask_);
+    sliceLabelResults_[sliceIndex] = applyModelLabelsWithExclusion(model_, features, imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols, inferenceMask_, exclusionMask_);
     if (model_.supportsProbability()) {
       sliceProbabilityResults_[sliceIndex] = applyModelProbabilitiesWithExclusion(model_, features, imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols,
-                                                                                  probabilityCombo_->currentData().toInt(), exclusionMask_);
+                                                                                  probabilityCombo_->currentData().toInt(), inferenceMask_, exclusionMask_);
     }
   }
   currentSliceIndex_ = std::clamp(currentSliceIndex_, 0, std::max(0, static_cast<int>(imageVolume_.size()) - 1));
@@ -2023,6 +2159,7 @@ void MainWindow::onGetProbability() {
   probabilityTaskRunning_ = true;
   const int cls = probabilityCombo_->currentData().toInt();
   const cv::Mat features = featureStack_.clone();
+  const cv::Mat inferenceMask = inferenceMask_.clone();
   const cv::Mat exclusionMask = exclusionMask_.clone();
   const int rows = originalImage_.rows;
   const int cols = originalImage_.cols;
@@ -2036,15 +2173,18 @@ void MainWindow::onGetProbability() {
   progress.show();
   QApplication::processEvents();
 
-  QFuture<cv::Mat> future = QtConcurrent::run([modelCopy, features, exclusionMask, rows, cols, cls, &cancelRequested]() {
+  QFuture<cv::Mat> future = QtConcurrent::run([modelCopy, features, inferenceMask, exclusionMask, rows, cols, cls, &cancelRequested]() {
     if (cancelRequested.load()) return cv::Mat();
     std::vector<int> active;
-    if (!exclusionMask.empty()) {
+    if (!inferenceMask.empty() || !exclusionMask.empty()) {
       active.reserve(rows * cols);
       for (int row = 0; row < rows; ++row) {
-        const uchar* maskPtr = exclusionMask.ptr<uchar>(row);
+        const uchar* includePtr = inferenceMask.empty() ? nullptr : inferenceMask.ptr<uchar>(row);
+        const uchar* excludePtr = exclusionMask.empty() ? nullptr : exclusionMask.ptr<uchar>(row);
         for (int col = 0; col < cols; ++col) {
-          if (maskPtr[col] == 0) active.push_back(row * cols + col);
+          const bool included = !includePtr || includePtr[col] > 0;
+          const bool excluded = excludePtr && excludePtr[col] > 0;
+          if (included && !excluded) active.push_back(row * cols + col);
         }
       }
       if (active.empty()) return cv::Mat(rows, cols, CV_32F, cv::Scalar(0));
@@ -2306,6 +2446,9 @@ void MainWindow::onSuggestLabels() {
   candidates.reserve(probs.rows);
   for (int row = 0; row < originalImage_.rows; ++row) {
     for (int col = 0; col < originalImage_.cols; ++col) {
+      if (!inferenceMask_.empty() && inferenceMask_.at<uchar>(row, col) == 0) {
+        continue;
+      }
       if (!exclusionMask_.empty() && exclusionMask_.at<uchar>(row, col) > 0) {
         continue;
       }
@@ -2709,6 +2852,27 @@ void MainWindow::onPanTool() { view_->setToolMode(SegmentationView::PanTool); }
 void MainWindow::onTraceTool() { view_->setToolMode(SegmentationView::TraceTool); }
 void MainWindow::onResetZoom() { view_->resetView(); }
 void MainWindow::onAddTraceToSelectedClass() { addPendingTraceToSelectedClass(); }
+void MainWindow::onAddInferenceRoi() {
+  if (pendingTrace_.size() < 3) {
+    QMessageBox::information(this, tr("No ROI"), tr("Draw a ROI trace first, then add it as a recognition region."));
+    return;
+  }
+  pushUndoSnapshot();
+  inferenceRegions_.push_back(pendingTrace_);
+  pendingTrace_.clear();
+  view_->clearPendingTrace();
+  infoLabel_->setText(tr("Added recognition ROI (%1 total).").arg(inferenceRegions_.size()));
+  logMessage(tr("Added recognition ROI: only this ROI area will be used for inference."));
+  rebuildMasksFromAnnotations();
+}
+void MainWindow::onClearInferenceRois() {
+  if (inferenceRegions_.empty()) return;
+  pushUndoSnapshot();
+  inferenceRegions_.clear();
+  inferenceMask_.release();
+  logMessage(tr("Cleared recognition ROIs. Inference now runs on full image (except exclusion ROIs)."));
+  rebuildMasksFromAnnotations();
+}
 void MainWindow::onAddExclusionRoi() {
   if (pendingTrace_.size() < 3) {
     QMessageBox::information(this, tr("No ROI"), tr("Draw a ROI trace first, then add it as an exclusion region."));
@@ -2762,6 +2926,7 @@ void MainWindow::onUndo() {
   AnnotationSnapshot current;
   current.classBrushMasks = cloneMaskVector(classBrushMasks_);
   current.classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  current.inferenceRegions = inferenceRegions_;
   current.exclusionRegions = exclusionRegions_;
   redoStack_.push_back(std::move(current));
   const AnnotationSnapshot snapshot = undoStack_.back();
@@ -2774,6 +2939,7 @@ void MainWindow::onRedo() {
   AnnotationSnapshot current;
   current.classBrushMasks = cloneMaskVector(classBrushMasks_);
   current.classTraceRegions = cloneTraceRegions(classTraceRegions_);
+  current.inferenceRegions = inferenceRegions_;
   current.exclusionRegions = exclusionRegions_;
   undoStack_.push_back(std::move(current));
   const AnnotationSnapshot snapshot = redoStack_.back();
