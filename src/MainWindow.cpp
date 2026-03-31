@@ -2698,6 +2698,9 @@ void MainWindow::onLoadClassifier() {
                              .arg(path, path + ".model.yml"));
     return;
   }
+  const std::vector<SegmentationClassInfo> previousClasses = classes_;
+  const std::vector<cv::Mat> previousBrushMasks = cloneMaskVector(classBrushMasks_);
+  const std::vector<std::vector<TraceRegion>> previousTraceRegions = cloneTraceRegions(classTraceRegions_);
   model_ = loadedModel;
   classes_ = loadedClasses;
   featureSettings_ = settings;
@@ -2709,14 +2712,49 @@ void MainWindow::onLoadClassifier() {
   const int comboIndex = classifierCombo_->findData(classifierSettings_.kind);
   if (comboIndex >= 0) classifierCombo_->setCurrentIndex(comboIndex);
   if (!originalImage_.empty()) {
+    ensureAnnotationStorage();
+    for (int newIndex = 0; newIndex < static_cast<int>(classes_.size()); ++newIndex) {
+      int matchedOldIndex = -1;
+      for (int oldIndex = 0; oldIndex < static_cast<int>(previousClasses.size()); ++oldIndex) {
+        if (previousClasses[oldIndex].name == classes_[newIndex].name) {
+          matchedOldIndex = oldIndex;
+          break;
+        }
+      }
+      if (matchedOldIndex >= 0) {
+        if (matchedOldIndex < static_cast<int>(previousBrushMasks.size())) {
+          classBrushMasks_[newIndex] = previousBrushMasks[matchedOldIndex].clone();
+        }
+        if (matchedOldIndex < static_cast<int>(previousTraceRegions.size())) {
+          classTraceRegions_[newIndex] = previousTraceRegions[matchedOldIndex];
+        }
+      }
+    }
     ensureSliceStorage();
-    int loadedSliceIndex = currentSliceIndex_;
-    if (loadClassifierRoiConfig(path, static_cast<int>(classes_.size()), &sliceAnnotationStates_, &loadedSliceIndex)) {
-      currentSliceIndex_ = std::clamp(loadedSliceIndex, 0, std::max(0, static_cast<int>(imageVolume_.size()) - 1));
-      originalImage_ = imageVolume_[currentSliceIndex_].clone();
-      restoreSliceState(currentSliceIndex_);
-      logMessage(tr("Loaded ROI settings from %1.").arg(classifierRoiPath(path)));
+    const QString roiPath = classifierRoiPath(path);
+    if (QFile::exists(roiPath)) {
+      const auto choice = QMessageBox::question(this,
+                                                tr("Load ROI settings"),
+                                                tr("Found ROI settings sidecar:\n%1\n\nLoad these ROIs?").arg(roiPath),
+                                                QMessageBox::Yes | QMessageBox::No,
+                                                QMessageBox::No);
+      if (choice == QMessageBox::Yes) {
+        int loadedSliceIndex = currentSliceIndex_;
+        if (loadClassifierRoiConfig(path, static_cast<int>(classes_.size()), &sliceAnnotationStates_, &loadedSliceIndex)) {
+          currentSliceIndex_ = std::clamp(loadedSliceIndex, 0, std::max(0, static_cast<int>(imageVolume_.size()) - 1));
+          originalImage_ = imageVolume_[currentSliceIndex_].clone();
+          restoreSliceState(currentSliceIndex_);
+          logMessage(tr("Loaded ROI settings from %1.").arg(roiPath));
+        } else {
+          rebuildMasksFromAnnotations();
+          logMessage(tr("ROI sidecar exists but failed to load: %1").arg(roiPath));
+        }
+      } else {
+        rebuildMasksFromAnnotations();
+        logMessage(tr("Skipped ROI sidecar loading. Kept current annotations for continued training."));
+      }
     } else {
+      rebuildMasksFromAnnotations();
       logMessage(tr("No ROI settings sidecar found for this classifier."));
     }
   }
