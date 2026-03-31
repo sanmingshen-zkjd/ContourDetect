@@ -976,7 +976,6 @@ cv::Mat SegmentationEngine::gatherSamples(const cv::Mat& featureStack,
     return cv::Mat();
   }
 
-  std::vector<cv::Mat> rows;
   std::vector<int> outputLabels;
   std::mt19937 rng(12345);
   std::vector<std::vector<int>> sampledIndices(classMasks.size());
@@ -1013,20 +1012,26 @@ cv::Mat SegmentationEngine::gatherSamples(const cv::Mat& featureStack,
     }
   }
 
-  for (int cls = 0; cls < static_cast<int>(sampledIndices.size()); ++cls) {
-    for (int idx : sampledIndices[cls]) {
-      rows.push_back(featureStack.row(idx));
-      outputLabels.push_back(cls);
-    }
+  int totalSamples = 0;
+  for (const auto& indices : sampledIndices) {
+    totalSamples += static_cast<int>(indices.size());
   }
-
-  if (rows.empty()) {
+  if (totalSamples <= 0) {
     labels->release();
     return cv::Mat();
   }
 
-  cv::Mat samples;
-  cv::vconcat(rows, samples);
+  cv::Mat samples(totalSamples, featureStack.cols, featureStack.type());
+  outputLabels.reserve(totalSamples);
+  int dstRow = 0;
+  for (int cls = 0; cls < static_cast<int>(sampledIndices.size()); ++cls) {
+    for (int idx : sampledIndices[cls]) {
+      featureStack.row(idx).copyTo(samples.row(dstRow));
+      outputLabels.push_back(cls);
+      ++dstRow;
+    }
+  }
+
   *labels = cv::Mat(static_cast<int>(outputLabels.size()), 1, CV_32S);
   for (int i = 0; i < static_cast<int>(outputLabels.size()); ++i) {
     labels->at<int>(i, 0) = outputLabels[i];
@@ -1051,18 +1056,13 @@ cv::Mat SegmentationEngine::applyModelProbabilities(const SegmentationClassifier
                                                     int rows,
                                                     int cols,
                                                     int classIndex) {
+  (void)cols;
   cv::Mat probs = model.predictProbabilities(featureStack);
   if (probs.empty() || classIndex < 0 || classIndex >= probs.cols) {
     return cv::Mat();
   }
-  cv::Mat channel(rows, cols, CV_32F);
-  for (int row = 0; row < rows; ++row) {
-    float* out = channel.ptr<float>(row);
-    for (int col = 0; col < cols; ++col) {
-      out[col] = probs.at<float>(row * cols + col, classIndex);
-    }
-  }
-  return channel;
+  cv::Mat oneClass = probs.col(classIndex).clone();
+  return oneClass.reshape(1, rows).clone();
 }
 
 cv::Mat SegmentationEngine::makeOverlay(const cv::Mat& image,
