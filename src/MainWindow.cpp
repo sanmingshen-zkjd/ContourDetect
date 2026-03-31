@@ -213,6 +213,108 @@ struct ProjectTrainingBundle {
 cv::Mat buildExclusionMask(const cv::Size& size, const std::vector<QPolygon>& regions);
 cv::Mat buildInferenceMask(const cv::Size& size, const std::vector<QPolygon>& regions);
 
+QString classifierRoiPath(const QString& classifierPath) {
+  return classifierPath + QStringLiteral(".roi.json");
+}
+
+QJsonArray polygonToJson(const QPolygon& polygon) {
+  QJsonArray points;
+  for (const QPoint& point : polygon) {
+    points.append(QJsonObject{{"x", point.x()}, {"y", point.y()}});
+  }
+  return points;
+}
+
+QPolygon polygonFromJson(const QJsonArray& points) {
+  QPolygon polygon;
+  for (const auto& value : points) {
+    const QJsonObject pointObject = value.toObject();
+    polygon << QPoint(pointObject["x"].toInt(), pointObject["y"].toInt());
+  }
+  return polygon;
+}
+
+bool saveClassifierRoiConfig(const QString& classifierPath,
+                             const std::vector<AnnotationSnapshot>& sliceStates,
+                             int currentSliceIndex) {
+  QJsonObject root;
+  root["version"] = 1;
+  root["currentSliceIndex"] = currentSliceIndex;
+  QJsonArray slices;
+  for (int sliceIndex = 0; sliceIndex < static_cast<int>(sliceStates.size()); ++sliceIndex) {
+    const AnnotationSnapshot& state = sliceStates[sliceIndex];
+    QJsonObject sliceObject;
+    sliceObject["index"] = sliceIndex;
+    QJsonArray classTraces;
+    for (const auto& traceList : state.classTraceRegions) {
+      QJsonArray traces;
+      for (const TraceRegion& region : traceList) {
+        traces.append(QJsonObject{{"name", region.name}, {"points", polygonToJson(region.polygon)}});
+      }
+      classTraces.append(traces);
+    }
+    QJsonArray inferenceRegions;
+    for (const QPolygon& polygon : state.inferenceRegions) inferenceRegions.append(polygonToJson(polygon));
+    QJsonArray exclusionRegions;
+    for (const QPolygon& polygon : state.exclusionRegions) exclusionRegions.append(polygonToJson(polygon));
+    sliceObject["classTraces"] = classTraces;
+    sliceObject["inferenceRegions"] = inferenceRegions;
+    sliceObject["exclusionRegions"] = exclusionRegions;
+    slices.append(sliceObject);
+  }
+  root["slices"] = slices;
+  QFile file(classifierRoiPath(classifierPath));
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    return false;
+  }
+  file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+  return true;
+}
+
+bool loadClassifierRoiConfig(const QString& classifierPath,
+                             int classCount,
+                             std::vector<AnnotationSnapshot>* sliceStates,
+                             int* currentSliceIndex) {
+  if (!sliceStates) return false;
+  QFile file(classifierRoiPath(classifierPath));
+  if (!file.exists()) return false;
+  if (!file.open(QIODevice::ReadOnly)) return false;
+  const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+  if (!doc.isObject()) return false;
+  const QJsonObject root = doc.object();
+  const QJsonArray slices = root["slices"].toArray();
+  for (const auto& sliceValue : slices) {
+    const QJsonObject sliceObject = sliceValue.toObject();
+    const int sliceIndex = sliceObject["index"].toInt(-1);
+    if (sliceIndex < 0 || sliceIndex >= static_cast<int>(sliceStates->size())) continue;
+    AnnotationSnapshot& state = (*sliceStates)[sliceIndex];
+    state.classTraceRegions.assign(classCount, {});
+    const QJsonArray classTraces = sliceObject["classTraces"].toArray();
+    for (int classIndex = 0; classIndex < classTraces.size() && classIndex < classCount; ++classIndex) {
+      for (const auto& traceValue : classTraces[classIndex].toArray()) {
+        const QJsonObject traceObject = traceValue.toObject();
+        const QPolygon polygon = polygonFromJson(traceObject["points"].toArray());
+        if (polygon.size() < 3) continue;
+        state.classTraceRegions[classIndex].push_back({traceObject["name"].toString(), polygon});
+      }
+    }
+    state.inferenceRegions.clear();
+    for (const auto& value : sliceObject["inferenceRegions"].toArray()) {
+      const QPolygon polygon = polygonFromJson(value.toArray());
+      if (polygon.size() >= 3) state.inferenceRegions.push_back(polygon);
+    }
+    state.exclusionRegions.clear();
+    for (const auto& value : sliceObject["exclusionRegions"].toArray()) {
+      const QPolygon polygon = polygonFromJson(value.toArray());
+      if (polygon.size() >= 3) state.exclusionRegions.push_back(polygon);
+    }
+  }
+  if (currentSliceIndex) {
+    *currentSliceIndex = root["currentSliceIndex"].toInt(*currentSliceIndex);
+  }
+  return true;
+}
+
 bool loadProjectTrainingBundle(const QString& path,
                                const std::vector<SegmentationClassInfo>& expectedClasses,
                                ProjectTrainingBundle* bundle) {
@@ -2105,6 +2207,13 @@ void MainWindow::onApplyClassifier() {
   }
   sliceLabelResults_.assign(imageVolume_.size(), cv::Mat());
   sliceProbabilityResults_.assign(imageVolume_.size(), cv::Mat());
+  QProgressDialog progress(tr("Applying classifier..."), QString(), 0, static_cast<int>(imageVolume_.size()), this);
+  progress.setWindowModality(Qt::ApplicationModal);
+  progress.setCancelButton(nullptr);
+  progress.setMinimumDuration(0);
+  progress.setValue(0);
+  progress.show();
+  QApplication::processEvents();
   for (int sliceIndex = 0; sliceIndex < static_cast<int>(imageVolume_.size()); ++sliceIndex) {
     const cv::Mat features = SegmentationEngine::computeFeatureStack(imageVolume_[sliceIndex], featureSettings_);
     featureVolume_[sliceIndex] = features;
@@ -2113,6 +2222,8 @@ void MainWindow::onApplyClassifier() {
       sliceProbabilityResults_[sliceIndex] = applyModelProbabilitiesWithExclusion(model_, features, imageVolume_[sliceIndex].rows, imageVolume_[sliceIndex].cols,
                                                                                   probabilityCombo_->currentData().toInt(), inferenceMask_, exclusionMask_);
     }
+    progress.setValue(sliceIndex + 1);
+    QApplication::processEvents();
   }
   currentSliceIndex_ = std::clamp(currentSliceIndex_, 0, std::max(0, static_cast<int>(imageVolume_.size()) - 1));
   originalImage_ = imageVolume_[currentSliceIndex_].clone();
@@ -2496,11 +2607,18 @@ void MainWindow::onSaveClassifier() {
   if (!ensureModelReady(tr("saving the classifier"))) return;
   const QString path = QFileDialog::getSaveFileName(this, tr("Save classifier"), QString(), tr("Classifier (*.yml *.yaml)"));
   if (path.isEmpty()) return;
+  saveCurrentSliceState();
   if (!model_.save(path, classes_, featureSettings_, classifierSettings_, trainingStats_)) {
     QMessageBox::warning(this, tr("Save failed"),
                          tr("Failed to save classifier to:\n%1\n\nPlease check path permissions and whether the path contains unsupported characters.")
                              .arg(path));
     return;
+  }
+  ensureSliceStorage();
+  if (saveClassifierRoiConfig(path, sliceAnnotationStates_, currentSliceIndex_)) {
+    logMessage(tr("Saved ROI settings to %1.").arg(classifierRoiPath(path)));
+  } else {
+    logMessage(tr("Warning: classifier saved, but ROI settings could not be written."));
   }
   logMessage(tr("Saved classifier to %1.").arg(path));
 }
@@ -2517,7 +2635,14 @@ void MainWindow::onLoadClassifier() {
   SegmentationClassifierSettings classifierSettings;
   SegmentationTrainingStats stats;
   SegmentationClassifier loadedModel;
+  QProgressDialog progress(tr("Loading classifier..."), QString(), 0, 0, this);
+  progress.setWindowModality(Qt::ApplicationModal);
+  progress.setCancelButton(nullptr);
+  progress.setMinimumDuration(0);
+  progress.show();
+  QApplication::processEvents();
   if (!loadedModel.load(path, &loadedClasses, &settings, &classifierSettings, &stats)) {
+    progress.close();
     QMessageBox::warning(this, tr("Load failed"),
                          tr("Failed to load classifier:\n%1\n\nIf this model uses a sidecar file, ensure \"%2\" exists beside the metadata file.")
                              .arg(path, path + ".model.yml"));
@@ -2532,6 +2657,19 @@ void MainWindow::onLoadClassifier() {
   refreshClassList();
   const int comboIndex = classifierCombo_->findData(classifierSettings_.kind);
   if (comboIndex >= 0) classifierCombo_->setCurrentIndex(comboIndex);
+  if (!originalImage_.empty()) {
+    ensureSliceStorage();
+    int loadedSliceIndex = currentSliceIndex_;
+    if (loadClassifierRoiConfig(path, static_cast<int>(classes_.size()), &sliceAnnotationStates_, &loadedSliceIndex)) {
+      currentSliceIndex_ = std::clamp(loadedSliceIndex, 0, std::max(0, static_cast<int>(imageVolume_.size()) - 1));
+      originalImage_ = imageVolume_[currentSliceIndex_].clone();
+      restoreSliceState(currentSliceIndex_);
+      logMessage(tr("Loaded ROI settings from %1.").arg(classifierRoiPath(path)));
+    } else {
+      logMessage(tr("No ROI settings sidecar found for this classifier."));
+    }
+  }
+  progress.close();
   updateUiState();
   updateViewer();
   logMessage(tr("Loaded classifier from %1.").arg(path));
