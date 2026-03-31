@@ -55,6 +55,7 @@ private slots:
   void onApplyClassifier();
   void onToggleOverlay();
   void onCreateResult();
+  void onShowBinaryResult();
   void onGetProbability();
   void onPlotResult();
   void onEvaluateModel();
@@ -168,6 +169,7 @@ private:
   QPushButton* stopTrainingButton_ = nullptr;
   QPushButton* applyButton_ = nullptr;
   QPushButton* createResultButton_ = nullptr;
+  QPushButton* binaryResultButton_ = nullptr;
   QPushButton* probabilityButton_ = nullptr;
   QPushButton* addTraceButton_ = nullptr;
   QPushButton* addInferenceRoiButton_ = nullptr;

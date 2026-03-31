@@ -590,6 +590,7 @@ void MainWindow::buildUi() {
   stopTrainingButton_ = new QPushButton(tr("Stop training"), trainingGroup);
   QPushButton* overlayButton = new QPushButton(tr("Toggle overlay"), trainingGroup);
   createResultButton_ = new QPushButton(tr("Create result"), trainingGroup);
+  binaryResultButton_ = new QPushButton(tr("Show binary result"), trainingGroup);
   probabilityButton_ = new QPushButton(tr("Get probability"), trainingGroup);
   QPushButton* plotButton = new QPushButton(tr("Plot result"), trainingGroup);
   evaluateButton_ = new QPushButton(tr("Evaluate"), trainingGroup);
@@ -598,6 +599,7 @@ void MainWindow::buildUi() {
   trainingLayout->addWidget(stopTrainingButton_);
   trainingLayout->addWidget(overlayButton);
   trainingLayout->addWidget(createResultButton_);
+  trainingLayout->addWidget(binaryResultButton_);
   trainingLayout->addWidget(probabilityButton_);
   trainingLayout->addWidget(plotButton);
   trainingLayout->addWidget(evaluateButton_);
@@ -748,6 +750,7 @@ void MainWindow::connectSignals() {
   connect(stopTrainingButton_, &QPushButton::clicked, this, &MainWindow::onStopTraining);
   connect(applyButton_, &QPushButton::clicked, this, &MainWindow::onApplyClassifier);
   connect(createResultButton_, &QPushButton::clicked, this, &MainWindow::onCreateResult);
+  connect(binaryResultButton_, &QPushButton::clicked, this, &MainWindow::onShowBinaryResult);
   connect(probabilityButton_, &QPushButton::clicked, this, &MainWindow::onGetProbability);
   connect(evaluateButton_, &QPushButton::clicked, this, &MainWindow::onEvaluateModel);
   connect(suggestButton_, &QPushButton::clicked, this, &MainWindow::onSuggestLabels);
@@ -834,6 +837,7 @@ void MainWindow::updateUiState() {
   redoButton_->setEnabled(!redoStack_.empty());
   applyButton_->setEnabled(hasModel && !trainingInProgress_);
   createResultButton_->setEnabled(hasImage && hasModel && !trainingInProgress_);
+  binaryResultButton_->setEnabled(hasImage && hasModel && !trainingInProgress_);
   probabilityButton_->setEnabled(hasImage && hasProbability && !trainingInProgress_);
   evaluateButton_->setEnabled(hasImage && hasModel && !trainingInProgress_);
   suggestButton_->setEnabled(hasImage && hasProbability && !trainingInProgress_);
@@ -2266,6 +2270,52 @@ void MainWindow::onCreateResult() {
   dialog.exec();
 }
 
+void MainWindow::onShowBinaryResult() {
+  if (!ensureImageLoaded(tr("showing binary result")) || !ensureModelReady(tr("showing binary result"))) {
+    return;
+  }
+  if (labelResult_.empty()) {
+    onApplyClassifier();
+    if (labelResult_.empty()) return;
+  }
+  if (classes_.empty()) {
+    QMessageBox::information(this, tr("No classes"), tr("No classes are available for binary export."));
+    return;
+  }
+
+  QStringList classNames;
+  classNames.reserve(static_cast<int>(classes_.size()));
+  for (int i = 0; i < static_cast<int>(classes_.size()); ++i) {
+    classNames << QString("%1 (Class %2)").arg(classes_[i].name).arg(i + 1);
+  }
+  const int defaultClass = std::clamp(probabilityCombo_->currentData().toInt(), 0, std::max(0, static_cast<int>(classes_.size()) - 1));
+  bool ok = false;
+  const QString selected = QInputDialog::getItem(this,
+                                                 tr("Binary result class"),
+                                                 tr("Choose target class"),
+                                                 classNames,
+                                                 defaultClass,
+                                                 false,
+                                                 &ok);
+  if (!ok || selected.isEmpty()) return;
+  const int targetClass = classNames.indexOf(selected);
+  if (targetClass < 0) return;
+
+  cv::Mat binaryMask = (labelResult_ == targetClass);
+  cv::Mat binaryU8;
+  binaryMask.convertTo(binaryU8, CV_8U, 255.0);
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Binary result - %1").arg(classes_[targetClass].name));
+  dialog.resize(1200, 760);
+  auto* layout = new QHBoxLayout(&dialog);
+  auto* resultView = new SegmentationView(&dialog);
+  resultView->setPaintEnabled(false);
+  resultView->setToolMode(SegmentationView::PanTool);
+  resultView->setBaseImage(cvMatToQImage(binaryU8));
+  layout->addWidget(resultView);
+  dialog.exec();
+}
+
 void MainWindow::onGetProbability() {
   if (!ensureImageLoaded(tr("getting probability")) || !ensureModelReady(tr("getting probability"))) {
     return;
@@ -2654,6 +2704,7 @@ void MainWindow::onLoadClassifier() {
   classifierSettings_ = classifierSettings;
   trainingStats_ = stats;
   clearImportedTrainingData();
+  clearInferenceOutputs();
   refreshClassList();
   const int comboIndex = classifierCombo_->findData(classifierSettings_.kind);
   if (comboIndex >= 0) classifierCombo_->setCurrentIndex(comboIndex);
