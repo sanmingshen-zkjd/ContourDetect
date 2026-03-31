@@ -7,9 +7,9 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(QT NAMES Qt6 Qt5 COMPONENTS Widgets PrintSupport REQUIRED)
-find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Widgets PrintSupport REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs ml)
+find_package(QT NAMES Qt6 Qt5 COMPONENTS Widgets PrintSupport Network Concurrent REQUIRED)
+find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Widgets PrintSupport Network Concurrent REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs ml dnn)
 
 add_executable(QtTrainableSegmentation
   src/main.cpp
@@ -19,6 +19,14 @@ add_executable(QtTrainableSegmentation
   src/SegmentationEngine.h
   src/SegmentationView.cpp
   src/SegmentationView.h
+  src/ImageIOUtils.cpp
+  src/ImageIOUtils.h
+  src/DeepModelRunner.cpp
+  src/DeepModelRunner.h
+  src/InferencePipeline.cpp
+  src/InferencePipeline.h
+  src/ServiceServer.cpp
+  src/ServiceServer.h
   src/QCustomPlot.cpp
   src/QCustomPlot.h
   assets/resourcefile.qrc
@@ -113,7 +121,7 @@ if(MSVC)
     set(_opencv_version_suffix "${_opencv_ver_major}${_opencv_ver_minor}${_opencv_ver_patch}")
   endif()
 
-  foreach(module IN ITEMS core imgproc imgcodecs ml)
+  foreach(module IN ITEMS core imgproc imgcodecs ml dnn)
     _append_opencv_ms_target(${module} "${_opencv_version_suffix}")
   endforeach()
 endif()
@@ -125,7 +133,7 @@ if(NOT OPENCV_LINK_LIBS)
   if(TARGET opencv_world)
     list(APPEND OPENCV_LINK_LIBS opencv_world)
   elseif(TARGET opencv_core)
-    foreach(module IN ITEMS opencv_core opencv_imgproc opencv_imgcodecs opencv_ml)
+    foreach(module IN ITEMS opencv_core opencv_imgproc opencv_imgcodecs opencv_ml opencv_dnn)
       if(TARGET ${module})
         list(APPEND OPENCV_LINK_LIBS ${module})
       endif()
@@ -146,7 +154,7 @@ endif()
 # Final MSVC fallback: try plain module names in case a toolchain file already
 # added the corresponding library directories globally.
 if(MSVC AND NOT OPENCV_LINK_LIBS)
-  list(APPEND OPENCV_LINK_LIBS opencv_core opencv_imgproc opencv_imgcodecs opencv_ml)
+  list(APPEND OPENCV_LINK_LIBS opencv_core opencv_imgproc opencv_imgcodecs opencv_ml opencv_dnn)
 endif()
 
 list(REMOVE_DUPLICATES OPENCV_LINK_LIBS)
@@ -162,5 +170,15 @@ message(STATUS "OpenCV link libs: ${OPENCV_LINK_LIBS}")
 target_link_libraries(QtTrainableSegmentation PRIVATE
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::PrintSupport
+  Qt${QT_VERSION_MAJOR}::Network
+  Qt${QT_VERSION_MAJOR}::Concurrent
   ${OPENCV_LINK_LIBS}
 )
+
+install(TARGETS QtTrainableSegmentation RUNTIME DESTINATION bin)
+install(FILES README.md DESTINATION .)
+set(CPACK_PACKAGE_NAME "QtTrainableSegmentation")
+set(CPACK_PACKAGE_VENDOR "OpenAI")
+set(CPACK_PACKAGE_VERSION "0.2.0")
+set(CPACK_GENERATOR "ZIP;TGZ")
+include(CPack)

@@ -1,5 +1,9 @@
 #include "SegmentationEngine.h"
 
+#include <QFile>
+#include <QFileInfo>
+#include <QDir>
+
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/core/persistence.hpp>
@@ -91,19 +95,27 @@ cv::Mat computeMembraneResponse(const cv::Mat& gray) {
   return response;
 }
 
+std::string cvPath(const QString& path) {
+  return QFile::encodeName(path).toStdString();
+}
+
 QString classifierKindToString(SegmentationClassifierSettings::Kind kind) {
   switch (kind) {
     case SegmentationClassifierSettings::GaussianNaiveBayes: return QStringLiteral("gaussian_naive_bayes");
     case SegmentationClassifierSettings::RandomForest: return QStringLiteral("random_forest");
     case SegmentationClassifierSettings::SupportVectorMachine: return QStringLiteral("svm");
+    case SegmentationClassifierSettings::KNearestNeighbors: return QStringLiteral("knn");
+    case SegmentationClassifierSettings::LogisticRegression: return QStringLiteral("logistic_regression");
   }
-  return QStringLiteral("gaussian_naive_bayes");
+  return QStringLiteral("random_forest");
 }
 
 SegmentationClassifierSettings::Kind classifierKindFromString(const QString& name) {
   if (name == QStringLiteral("random_forest")) return SegmentationClassifierSettings::RandomForest;
   if (name == QStringLiteral("svm")) return SegmentationClassifierSettings::SupportVectorMachine;
-  return SegmentationClassifierSettings::GaussianNaiveBayes;
+  if (name == QStringLiteral("knn")) return SegmentationClassifierSettings::KNearestNeighbors;
+  if (name == QStringLiteral("logistic_regression")) return SegmentationClassifierSettings::LogisticRegression;
+  return SegmentationClassifierSettings::RandomForest;
 }
 }
 
@@ -286,6 +298,10 @@ bool SegmentationClassifier::isValid() const {
       return randomForest_ && !randomForest_->empty();
     case SegmentationClassifierSettings::SupportVectorMachine:
       return svm_ && !svm_->empty();
+    case SegmentationClassifierSettings::KNearestNeighbors:
+      return knn_ && !knn_->empty();
+    case SegmentationClassifierSettings::LogisticRegression:
+      return logisticRegression_ && !logisticRegression_->empty();
   }
   return false;
 }
@@ -295,6 +311,8 @@ void SegmentationClassifier::clear() {
   gnbModel_.clear();
   randomForest_.release();
   svm_.release();
+  knn_.release();
+  logisticRegression_.release();
 }
 
 bool SegmentationClassifier::computeAccuracy(const cv::Mat& labels,
@@ -371,6 +389,32 @@ bool SegmentationClassifier::train(const cv::Mat& features,
     return computeAccuracy(labels, predicted, stats, classCount);
   }
 
+  if (kind_ == SegmentationClassifierSettings::KNearestNeighbors) {
+    knn_ = cv::ml::KNearest::create();
+    knn_->setDefaultK(std::max(1, settings.knnNeighbors));
+    if (!knn_->train(trainData)) {
+      knn_.release();
+      return false;
+    }
+    const cv::Mat predicted = predictLabels(features);
+    return computeAccuracy(labels, predicted, stats, classCount);
+  }
+
+  if (kind_ == SegmentationClassifierSettings::LogisticRegression) {
+    logisticRegression_ = cv::ml::LogisticRegression::create();
+    logisticRegression_->setLearningRate(settings.logisticLearningRate);
+    logisticRegression_->setIterations(std::max(10, settings.logisticIterations));
+    logisticRegression_->setRegularization(cv::ml::LogisticRegression::REG_L2);
+    logisticRegression_->setTrainMethod(cv::ml::LogisticRegression::BATCH);
+    logisticRegression_->setMiniBatchSize(1);
+    if (!logisticRegression_->train(trainData)) {
+      logisticRegression_.release();
+      return false;
+    }
+    const cv::Mat predicted = predictLabels(features);
+    return computeAccuracy(labels, predicted, stats, classCount);
+  }
+
   return false;
 }
 
@@ -384,15 +428,25 @@ cv::Mat SegmentationClassifier::predictLabels(const cv::Mat& features) const {
     return gnbModel_.predictLabels(features);
   }
 
-  labels = cv::Mat::zeros(features.rows, 1, CV_32S);
-  for (int row = 0; row < features.rows; ++row) {
-    float predicted = 0.0f;
-    if (kind_ == SegmentationClassifierSettings::RandomForest) {
-      predicted = randomForest_->predict(features.row(row));
-    } else if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
-      predicted = svm_->predict(features.row(row));
-    }
-    labels.at<int>(row, 0) = static_cast<int>(std::lround(predicted));
+  cv::Mat raw;
+  if (kind_ == SegmentationClassifierSettings::RandomForest && randomForest_) {
+    randomForest_->predict(features, raw);
+  } else if (kind_ == SegmentationClassifierSettings::SupportVectorMachine && svm_) {
+    svm_->predict(features, raw);
+  } else if (kind_ == SegmentationClassifierSettings::KNearestNeighbors && knn_) {
+    knn_->findNearest(features, std::max(1, knn_->getDefaultK()), raw);
+  } else if (kind_ == SegmentationClassifierSettings::LogisticRegression && logisticRegression_) {
+    logisticRegression_->predict(features, raw);
+  }
+  if (raw.empty()) {
+    return cv::Mat();
+  }
+  if (raw.type() != CV_32F) {
+    raw.convertTo(raw, CV_32F);
+  }
+  labels = cv::Mat::zeros(raw.rows, 1, CV_32S);
+  for (int row = 0; row < raw.rows; ++row) {
+    labels.at<int>(row, 0) = static_cast<int>(std::lround(raw.at<float>(row, 0)));
   }
   return labels;
 }
@@ -403,6 +457,21 @@ cv::Mat SegmentationClassifier::predictProbabilities(const cv::Mat& features) co
   }
   if (kind_ == SegmentationClassifierSettings::GaussianNaiveBayes) {
     return gnbModel_.predictProbabilities(features);
+  }
+  if (kind_ == SegmentationClassifierSettings::LogisticRegression && logisticRegression_) {
+    cv::Mat raw;
+    logisticRegression_->predict(features, raw, cv::ml::StatModel::RAW_OUTPUT);
+    if (raw.empty()) {
+      return cv::Mat();
+    }
+    cv::Mat probs(features.rows, 2, CV_32F, cv::Scalar(0));
+    for (int row = 0; row < raw.rows; ++row) {
+      const float z = raw.at<float>(row, 0);
+      const float p1 = 1.0f / (1.0f + std::exp(-z));
+      probs.at<float>(row, 1) = p1;
+      probs.at<float>(row, 0) = 1.0f - p1;
+    }
+    return probs;
   }
   if (kind_ != SegmentationClassifierSettings::RandomForest || !randomForest_) {
     return cv::Mat();
@@ -445,7 +514,8 @@ cv::Mat SegmentationClassifier::predictProbabilities(const cv::Mat& features) co
 
 bool SegmentationClassifier::supportsProbability() const {
   return (kind_ == SegmentationClassifierSettings::GaussianNaiveBayes && gnbModel_.isValid())
-      || (kind_ == SegmentationClassifierSettings::RandomForest && randomForest_ && !randomForest_->empty());
+      || (kind_ == SegmentationClassifierSettings::RandomForest && randomForest_ && !randomForest_->empty())
+      || (kind_ == SegmentationClassifierSettings::LogisticRegression && logisticRegression_ && !logisticRegression_->empty());
 }
 
 QString SegmentationClassifier::sidecarModelPath(const QString& metadataPath) {
@@ -461,7 +531,7 @@ bool SegmentationClassifier::save(const QString& path,
     return false;
   }
 
-  cv::FileStorage fs(path.toStdString(), cv::FileStorage::WRITE | cv::FileStorage::FORMAT_YAML);
+  cv::FileStorage fs(cvPath(path), cv::FileStorage::WRITE | cv::FileStorage::FORMAT_YAML);
   if (!fs.isOpened()) {
     return false;
   }
@@ -475,16 +545,27 @@ bool SegmentationClassifier::save(const QString& path,
   fs << "intensity" << static_cast<int>(featureSettings.intensity);
   fs << "gaussian3" << static_cast<int>(featureSettings.gaussian3);
   fs << "gaussian7" << static_cast<int>(featureSettings.gaussian7);
+  fs << "gaussian15" << static_cast<int>(featureSettings.gaussian15);
   fs << "differenceOfGaussians" << static_cast<int>(featureSettings.differenceOfGaussians);
+  fs << "minimum" << static_cast<int>(featureSettings.minimum);
+  fs << "maximum" << static_cast<int>(featureSettings.maximum);
+  fs << "median" << static_cast<int>(featureSettings.median);
+  fs << "bilateral" << static_cast<int>(featureSettings.bilateral);
   fs << "gradient" << static_cast<int>(featureSettings.gradient);
   fs << "laplacian" << static_cast<int>(featureSettings.laplacian);
+  fs << "laplacianOfGaussian" << static_cast<int>(featureSettings.laplacianOfGaussian);
   fs << "hessian" << static_cast<int>(featureSettings.hessian);
   fs << "localMean" << static_cast<int>(featureSettings.localMean);
   fs << "localStd" << static_cast<int>(featureSettings.localStd);
+  fs << "localVariance" << static_cast<int>(featureSettings.localVariance);
   fs << "entropy" << static_cast<int>(featureSettings.entropy);
   fs << "texture" << static_cast<int>(featureSettings.texture);
+  fs << "clahe" << static_cast<int>(featureSettings.clahe);
+  fs << "canny" << static_cast<int>(featureSettings.canny);
+  fs << "structureTensor" << static_cast<int>(featureSettings.structureTensor);
   fs << "gabor" << static_cast<int>(featureSettings.gabor);
   fs << "membrane" << static_cast<int>(featureSettings.membrane);
+  fs << "channelRatios" << static_cast<int>(featureSettings.channelRatios);
   fs << "xPosition" << static_cast<int>(featureSettings.xPosition);
   fs << "yPosition" << static_cast<int>(featureSettings.yPosition);
   fs << "}";
@@ -495,6 +576,9 @@ bool SegmentationClassifier::save(const QString& path,
   fs << "randomForestMaxDepth" << classifierSettings.randomForestMaxDepth;
   fs << "svmC" << classifierSettings.svmC;
   fs << "svmGamma" << classifierSettings.svmGamma;
+  fs << "knnNeighbors" << classifierSettings.knnNeighbors;
+  fs << "logisticLearningRate" << classifierSettings.logisticLearningRate;
+  fs << "logisticIterations" << classifierSettings.logisticIterations;
   fs << "balanceClasses" << static_cast<int>(classifierSettings.balanceClasses);
   fs << "}";
 
@@ -518,9 +602,13 @@ bool SegmentationClassifier::save(const QString& path,
     const QString sidecar = sidecarModelPath(path);
     fs << "opencv_sidecar_model" << sidecar.toStdString();
     if (kind_ == SegmentationClassifierSettings::RandomForest) {
-      randomForest_->save(sidecar.toStdString());
+      randomForest_->save(cvPath(sidecar));
     } else if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
-      svm_->save(sidecar.toStdString());
+      svm_->save(cvPath(sidecar));
+    } else if (kind_ == SegmentationClassifierSettings::KNearestNeighbors) {
+      knn_->save(cvPath(sidecar));
+    } else if (kind_ == SegmentationClassifierSettings::LogisticRegression) {
+      logisticRegression_->save(cvPath(sidecar));
     }
   }
   return true;
@@ -532,7 +620,7 @@ bool SegmentationClassifier::load(const QString& path,
                                   SegmentationClassifierSettings* classifierSettings,
                                   SegmentationTrainingStats* stats) {
   clear();
-  cv::FileStorage fs(path.toStdString(), cv::FileStorage::READ);
+  cv::FileStorage fs(cvPath(path), cv::FileStorage::READ);
   if (!fs.isOpened()) {
     return false;
   }
@@ -543,7 +631,7 @@ bool SegmentationClassifier::load(const QString& path,
                                ? QString::fromStdString(static_cast<std::string>(kindNode))
                                : QString();
   kind_ = hasExplicitKind ? classifierKindFromString(kindName)
-                          : SegmentationClassifierSettings::GaussianNaiveBayes;
+                          : SegmentationClassifierSettings::RandomForest;
 
   if (stats) {
     fs["training_accuracy"] >> stats->trainingAccuracy;
@@ -561,16 +649,27 @@ bool SegmentationClassifier::load(const QString& path,
       featureSettings->intensity = static_cast<int>(node["intensity"]) != 0;
       featureSettings->gaussian3 = static_cast<int>(node["gaussian3"]) != 0;
       featureSettings->gaussian7 = static_cast<int>(node["gaussian7"]) != 0;
+      featureSettings->gaussian15 = static_cast<int>(node["gaussian15"]) != 0;
       featureSettings->differenceOfGaussians = static_cast<int>(node["differenceOfGaussians"]) != 0;
+      featureSettings->minimum = static_cast<int>(node["minimum"]) != 0;
+      featureSettings->maximum = static_cast<int>(node["maximum"]) != 0;
+      featureSettings->median = static_cast<int>(node["median"]) != 0;
+      featureSettings->bilateral = static_cast<int>(node["bilateral"]) != 0;
       featureSettings->gradient = static_cast<int>(node["gradient"]) != 0;
       featureSettings->laplacian = static_cast<int>(node["laplacian"]) != 0;
+      featureSettings->laplacianOfGaussian = static_cast<int>(node["laplacianOfGaussian"]) != 0;
       featureSettings->hessian = static_cast<int>(node["hessian"]) != 0;
       featureSettings->localMean = static_cast<int>(node["localMean"]) != 0;
       featureSettings->localStd = static_cast<int>(node["localStd"]) != 0;
+      featureSettings->localVariance = static_cast<int>(node["localVariance"]) != 0;
       featureSettings->entropy = static_cast<int>(node["entropy"]) != 0;
       featureSettings->texture = static_cast<int>(node["texture"]) != 0;
+      featureSettings->clahe = static_cast<int>(node["clahe"]) != 0;
+      featureSettings->canny = static_cast<int>(node["canny"]) != 0;
+      featureSettings->structureTensor = static_cast<int>(node["structureTensor"]) != 0;
       featureSettings->gabor = static_cast<int>(node["gabor"]) != 0;
       featureSettings->membrane = static_cast<int>(node["membrane"]) != 0;
+      featureSettings->channelRatios = static_cast<int>(node["channelRatios"]) != 0;
       featureSettings->xPosition = static_cast<int>(node["xPosition"]) != 0;
       featureSettings->yPosition = static_cast<int>(node["yPosition"]) != 0;
     }
@@ -585,6 +684,9 @@ bool SegmentationClassifier::load(const QString& path,
       classifierSettings->randomForestMaxDepth = static_cast<int>(node["randomForestMaxDepth"]);
       classifierSettings->svmC = static_cast<double>(node["svmC"]);
       classifierSettings->svmGamma = static_cast<double>(node["svmGamma"]);
+      classifierSettings->knnNeighbors = static_cast<int>(node["knnNeighbors"]);
+      classifierSettings->logisticLearningRate = static_cast<double>(node["logisticLearningRate"]);
+      classifierSettings->logisticIterations = static_cast<int>(node["logisticIterations"]);
       classifierSettings->balanceClasses = static_cast<int>(node["balanceClasses"]) != 0;
     } else {
       classifierSettings->kind = kind_;
@@ -607,17 +709,28 @@ bool SegmentationClassifier::load(const QString& path,
     return gnbModel_.read(legacyOrNestedNode);
   }
 
-  const QString sidecar = QString::fromStdString(static_cast<std::string>(fs["opencv_sidecar_model"]));
+  QString sidecar = QString::fromStdString(static_cast<std::string>(fs["opencv_sidecar_model"]));
   if (sidecar.isEmpty()) {
     return false;
   }
+  if (QFileInfo(sidecar).isRelative()) {
+    sidecar = QFileInfo(path).dir().filePath(sidecar);
+  }
   if (kind_ == SegmentationClassifierSettings::RandomForest) {
-    randomForest_ = cv::Algorithm::load<cv::ml::RTrees>(sidecar.toStdString());
+    randomForest_ = cv::Algorithm::load<cv::ml::RTrees>(cvPath(sidecar));
     return randomForest_ && !randomForest_->empty();
   }
   if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
-    svm_ = cv::Algorithm::load<cv::ml::SVM>(sidecar.toStdString());
+    svm_ = cv::Algorithm::load<cv::ml::SVM>(cvPath(sidecar));
     return svm_ && !svm_->empty();
+  }
+  if (kind_ == SegmentationClassifierSettings::KNearestNeighbors) {
+    knn_ = cv::Algorithm::load<cv::ml::KNearest>(cvPath(sidecar));
+    return knn_ && !knn_->empty();
+  }
+  if (kind_ == SegmentationClassifierSettings::LogisticRegression) {
+    logisticRegression_ = cv::Algorithm::load<cv::ml::LogisticRegression>(cvPath(sidecar));
+    return logisticRegression_ && !logisticRegression_->empty();
   }
   return false;
 }
@@ -627,8 +740,20 @@ QString SegmentationClassifier::classifierName() const {
     case SegmentationClassifierSettings::GaussianNaiveBayes: return QStringLiteral("Gaussian Naive Bayes");
     case SegmentationClassifierSettings::RandomForest: return QStringLiteral("Random Forest");
     case SegmentationClassifierSettings::SupportVectorMachine: return QStringLiteral("SVM (RBF)");
+    case SegmentationClassifierSettings::KNearestNeighbors: return QStringLiteral("K-Nearest Neighbors");
+    case SegmentationClassifierSettings::LogisticRegression: return QStringLiteral("Logistic Regression");
   }
   return QStringLiteral("Unknown");
+}
+
+QVector<SegmentationClassifierDescriptor> SegmentationClassifier::availableClassifiers() {
+  return {
+      {SegmentationClassifierSettings::GaussianNaiveBayes, QStringLiteral("gaussian_naive_bayes"), QStringLiteral("Gaussian Naive Bayes"), true, true},
+      {SegmentationClassifierSettings::RandomForest, QStringLiteral("random_forest"), QStringLiteral("Random Forest"), true, true},
+      {SegmentationClassifierSettings::SupportVectorMachine, QStringLiteral("svm"), QStringLiteral("SVM (RBF)"), false, true},
+      {SegmentationClassifierSettings::KNearestNeighbors, QStringLiteral("knn"), QStringLiteral("K-Nearest Neighbors"), false, true},
+      {SegmentationClassifierSettings::LogisticRegression, QStringLiteral("logistic_regression"), QStringLiteral("Logistic Regression"), true, true},
+  };
 }
 
 cv::Mat SegmentationEngine::ensureGrayFloat(const cv::Mat& image) {
@@ -653,87 +778,184 @@ cv::Mat SegmentationEngine::computeFeatureStack(const cv::Mat& image,
     return cv::Mat();
   }
 
-  std::vector<cv::Mat> channels;
-  if (settings.intensity) appendFeature(gray, channels);
+  std::vector<cv::Mat> sourceChannels;
+  if (image.channels() > 1) {
+    cv::Mat floatImage;
+    image.convertTo(floatImage, CV_32F, 1.0 / 255.0);
+    cv::split(floatImage, sourceChannels);
+    sourceChannels.insert(sourceChannels.begin(), gray);
+  } else {
+    sourceChannels.push_back(gray);
+  }
 
-  if (settings.gaussian3) {
-    cv::Mat blur;
-    cv::GaussianBlur(gray, blur, cv::Size(3, 3), 0.8);
-    appendFeature(blur, channels);
-  }
-  if (settings.gaussian7) {
-    cv::Mat blur;
-    cv::GaussianBlur(gray, blur, cv::Size(7, 7), 1.8);
-    appendFeature(blur, channels);
-  }
-  if (settings.differenceOfGaussians) {
-    cv::Mat blurSmall, blurLarge, dog;
-    cv::GaussianBlur(gray, blurSmall, cv::Size(5, 5), 1.0);
-    cv::GaussianBlur(gray, blurLarge, cv::Size(11, 11), 2.5);
-    cv::absdiff(blurSmall, blurLarge, dog);
-    appendFeature(dog, channels);
-  }
-  if (settings.gradient) {
-    cv::Mat gx, gy, mag;
-    cv::Sobel(gray, gx, CV_32F, 1, 0, 3);
-    cv::Sobel(gray, gy, CV_32F, 0, 1, 3);
-    cv::magnitude(gx, gy, mag);
-    appendFeature(mag, channels);
-  }
-  if (settings.laplacian) {
-    cv::Mat lap;
-    cv::Laplacian(gray, lap, CV_32F, 3);
-    appendFeature(cv::abs(lap), channels);
-  }
-  if (settings.hessian) {
-    cv::Mat dxx, dxy, dyy, hessianNorm;
-    cv::Sobel(gray, dxx, CV_32F, 2, 0, 3);
-    cv::Sobel(gray, dxy, CV_32F, 1, 1, 3);
-    cv::Sobel(gray, dyy, CV_32F, 0, 2, 3);
-    hessianNorm = dxx.mul(dxx) + dyy.mul(dyy) + dxy.mul(dxy) * 2.0f;
-    cv::sqrt(hessianNorm, hessianNorm);
-    appendFeature(hessianNorm, channels);
-  }
-  if (settings.localMean || settings.localStd) {
-    cv::Mat mean, sqMean, variance;
-    cv::blur(gray, mean, cv::Size(9, 9));
-    cv::blur(gray.mul(gray), sqMean, cv::Size(9, 9));
-    variance = sqMean - mean.mul(mean);
-    cv::max(variance, 0.0, variance);
-    cv::sqrt(variance, variance);
-    if (settings.localMean) appendFeature(mean, channels);
-    if (settings.localStd) appendFeature(variance, channels);
-  }
-  if (settings.entropy) {
-    appendFeature(computeLocalEntropy(gray), channels);
-  }
-  if (settings.texture) {
-    cv::Mat gx, gy, mag, textureEnergy;
-    cv::Sobel(gray, gx, CV_32F, 1, 0, 3);
-    cv::Sobel(gray, gy, CV_32F, 0, 1, 3);
-    cv::magnitude(gx, gy, mag);
-    cv::blur(mag.mul(mag), textureEnergy, cv::Size(9, 9));
-    appendFeature(textureEnergy, channels);
-  }
-  if (settings.gabor) {
-    appendFeature(computeGaborResponse(gray), channels);
-  }
-  if (settings.membrane) {
-    appendFeature(computeMembraneResponse(gray), channels);
-  }
-  if (settings.xPosition || settings.yPosition) {
-    cv::Mat x(gray.size(), CV_32F), y(gray.size(), CV_32F);
-    for (int row = 0; row < gray.rows; ++row) {
-      float* xp = x.ptr<float>(row);
-      float* yp = y.ptr<float>(row);
-      const float yn = gray.rows > 1 ? static_cast<float>(row) / static_cast<float>(gray.rows - 1) : 0.0f;
-      for (int col = 0; col < gray.cols; ++col) {
-        xp[col] = gray.cols > 1 ? static_cast<float>(col) / static_cast<float>(gray.cols - 1) : 0.0f;
-        yp[col] = yn;
+  std::vector<cv::Mat> channels;
+  auto appendDerivedFeatures = [&](const cv::Mat& source, bool includeSpatial) {
+    if (settings.intensity) appendFeature(source, channels);
+
+    if (settings.gaussian3) {
+      cv::Mat blur;
+      cv::GaussianBlur(source, blur, cv::Size(3, 3), 0.8);
+      appendFeature(blur, channels);
+    }
+    if (settings.gaussian7) {
+      cv::Mat blur;
+      cv::GaussianBlur(source, blur, cv::Size(7, 7), 1.8);
+      appendFeature(blur, channels);
+    }
+    if (settings.gaussian15) {
+      cv::Mat blur;
+      cv::GaussianBlur(source, blur, cv::Size(15, 15), 3.0);
+      appendFeature(blur, channels);
+    }
+    if (settings.differenceOfGaussians) {
+      cv::Mat blurSmall, blurLarge, dog;
+      cv::GaussianBlur(source, blurSmall, cv::Size(5, 5), 1.0);
+      cv::GaussianBlur(source, blurLarge, cv::Size(11, 11), 2.5);
+      cv::absdiff(blurSmall, blurLarge, dog);
+      appendFeature(dog, channels);
+    }
+    if (settings.minimum || settings.maximum) {
+      cv::Mat source8u;
+      source.convertTo(source8u, CV_8U, 255.0);
+      const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7));
+      if (settings.minimum) {
+        cv::Mat eroded;
+        cv::erode(source8u, eroded, kernel);
+        appendFeature(eroded, channels);
+      }
+      if (settings.maximum) {
+        cv::Mat dilated;
+        cv::dilate(source8u, dilated, kernel);
+        appendFeature(dilated, channels);
       }
     }
-    if (settings.xPosition) appendFeature(x, channels);
-    if (settings.yPosition) appendFeature(y, channels);
+    if (settings.median) {
+      cv::Mat source8u;
+      source.convertTo(source8u, CV_8U, 255.0);
+      cv::Mat median;
+      cv::medianBlur(source8u, median, 5);
+      appendFeature(median, channels);
+    }
+    if (settings.bilateral) {
+      cv::Mat source8u;
+      source.convertTo(source8u, CV_8U, 255.0);
+      cv::Mat bilateral;
+      cv::bilateralFilter(source8u, bilateral, 7, 50.0, 50.0);
+      appendFeature(bilateral, channels);
+    }
+    if (settings.gradient) {
+      cv::Mat gx, gy, mag;
+      cv::Sobel(source, gx, CV_32F, 1, 0, 3);
+      cv::Sobel(source, gy, CV_32F, 0, 1, 3);
+      cv::magnitude(gx, gy, mag);
+      appendFeature(mag, channels);
+    }
+    if (settings.laplacian) {
+      cv::Mat lap;
+      cv::Laplacian(source, lap, CV_32F, 3);
+      appendFeature(cv::abs(lap), channels);
+    }
+    if (settings.laplacianOfGaussian) {
+      cv::Mat logSource, logFeature;
+      cv::GaussianBlur(source, logSource, cv::Size(0, 0), 1.5);
+      cv::Laplacian(logSource, logFeature, CV_32F, 3);
+      appendFeature(cv::abs(logFeature), channels);
+    }
+    if (settings.hessian) {
+      cv::Mat dxx, dxy, dyy, hessianNorm;
+      cv::Sobel(source, dxx, CV_32F, 2, 0, 3);
+      cv::Sobel(source, dxy, CV_32F, 1, 1, 3);
+      cv::Sobel(source, dyy, CV_32F, 0, 2, 3);
+      hessianNorm = dxx.mul(dxx) + dyy.mul(dyy) + dxy.mul(dxy) * 2.0f;
+      cv::sqrt(hessianNorm, hessianNorm);
+      appendFeature(hessianNorm, channels);
+    }
+    if (settings.localMean || settings.localStd || settings.localVariance) {
+      cv::Mat mean, sqMean, variance;
+      cv::blur(source, mean, cv::Size(9, 9));
+      cv::blur(source.mul(source), sqMean, cv::Size(9, 9));
+      variance = sqMean - mean.mul(mean);
+      cv::max(variance, 0.0, variance);
+      cv::Mat stddev;
+      cv::sqrt(variance, stddev);
+      if (settings.localMean) appendFeature(mean, channels);
+      if (settings.localStd) appendFeature(stddev, channels);
+      if (settings.localVariance) appendFeature(variance, channels);
+    }
+    if (settings.entropy) {
+      appendFeature(computeLocalEntropy(source), channels);
+    }
+    if (settings.texture) {
+      cv::Mat gx, gy, mag, textureEnergy;
+      cv::Sobel(source, gx, CV_32F, 1, 0, 3);
+      cv::Sobel(source, gy, CV_32F, 0, 1, 3);
+      cv::magnitude(gx, gy, mag);
+      cv::blur(mag.mul(mag), textureEnergy, cv::Size(9, 9));
+      appendFeature(textureEnergy, channels);
+    }
+    if (settings.clahe) {
+      cv::Mat source8u;
+      source.convertTo(source8u, CV_8U, 255.0);
+      cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+      cv::Mat claheOut;
+      clahe->apply(source8u, claheOut);
+      appendFeature(claheOut, channels);
+    }
+    if (settings.canny) {
+      cv::Mat source8u, edges;
+      source.convertTo(source8u, CV_8U, 255.0);
+      cv::Canny(source8u, edges, 60.0, 120.0);
+      appendFeature(edges, channels);
+    }
+    if (settings.structureTensor) {
+      cv::Mat gx, gy, jxx, jyy, jxy;
+      cv::Sobel(source, gx, CV_32F, 1, 0, 3);
+      cv::Sobel(source, gy, CV_32F, 0, 1, 3);
+      cv::GaussianBlur(gx.mul(gx), jxx, cv::Size(7, 7), 1.2);
+      cv::GaussianBlur(gy.mul(gy), jyy, cv::Size(7, 7), 1.2);
+      cv::GaussianBlur(gx.mul(gy), jxy, cv::Size(7, 7), 1.2);
+      appendFeature(jxx, channels);
+      appendFeature(jyy, channels);
+      appendFeature(jxy, channels);
+    }
+    if (settings.gabor) {
+      appendFeature(computeGaborResponse(source), channels);
+    }
+    if (settings.membrane) {
+      appendFeature(computeMembraneResponse(source), channels);
+    }
+    if (includeSpatial && (settings.xPosition || settings.yPosition)) {
+      cv::Mat x(source.size(), CV_32F), y(source.size(), CV_32F);
+      for (int row = 0; row < source.rows; ++row) {
+        float* xp = x.ptr<float>(row);
+        float* yp = y.ptr<float>(row);
+        const float yn = source.rows > 1 ? static_cast<float>(row) / static_cast<float>(source.rows - 1) : 0.0f;
+        for (int col = 0; col < source.cols; ++col) {
+          xp[col] = source.cols > 1 ? static_cast<float>(col) / static_cast<float>(source.cols - 1) : 0.0f;
+          yp[col] = yn;
+        }
+      }
+      if (settings.xPosition) appendFeature(x, channels);
+      if (settings.yPosition) appendFeature(y, channels);
+    }
+  };
+
+  for (int channelIndex = 0; channelIndex < static_cast<int>(sourceChannels.size()); ++channelIndex) {
+    appendDerivedFeatures(sourceChannels[channelIndex], channelIndex == 0);
+  }
+
+  if (settings.channelRatios && image.channels() >= 3) {
+    cv::Mat floatImage;
+    image.convertTo(floatImage, CV_32F, 1.0 / 255.0);
+    std::vector<cv::Mat> bgr;
+    cv::split(floatImage, bgr);
+    const float eps = 1e-4f;
+    cv::Mat rb = bgr[2] / (bgr[0] + eps);
+    cv::Mat rg = bgr[2] / (bgr[1] + eps);
+    cv::Mat gb = bgr[1] / (bgr[0] + eps);
+    appendFeature(rb, channels);
+    appendFeature(rg, channels);
+    appendFeature(gb, channels);
   }
 
   if (channels.empty()) {
@@ -754,7 +976,6 @@ cv::Mat SegmentationEngine::gatherSamples(const cv::Mat& featureStack,
     return cv::Mat();
   }
 
-  std::vector<cv::Mat> rows;
   std::vector<int> outputLabels;
   std::mt19937 rng(12345);
   std::vector<std::vector<int>> sampledIndices(classMasks.size());
@@ -791,20 +1012,26 @@ cv::Mat SegmentationEngine::gatherSamples(const cv::Mat& featureStack,
     }
   }
 
-  for (int cls = 0; cls < static_cast<int>(sampledIndices.size()); ++cls) {
-    for (int idx : sampledIndices[cls]) {
-      rows.push_back(featureStack.row(idx));
-      outputLabels.push_back(cls);
-    }
+  int totalSamples = 0;
+  for (const auto& indices : sampledIndices) {
+    totalSamples += static_cast<int>(indices.size());
   }
-
-  if (rows.empty()) {
+  if (totalSamples <= 0) {
     labels->release();
     return cv::Mat();
   }
 
-  cv::Mat samples;
-  cv::vconcat(rows, samples);
+  cv::Mat samples(totalSamples, featureStack.cols, featureStack.type());
+  outputLabels.reserve(totalSamples);
+  int dstRow = 0;
+  for (int cls = 0; cls < static_cast<int>(sampledIndices.size()); ++cls) {
+    for (int idx : sampledIndices[cls]) {
+      featureStack.row(idx).copyTo(samples.row(dstRow));
+      outputLabels.push_back(cls);
+      ++dstRow;
+    }
+  }
+
   *labels = cv::Mat(static_cast<int>(outputLabels.size()), 1, CV_32S);
   for (int i = 0; i < static_cast<int>(outputLabels.size()); ++i) {
     labels->at<int>(i, 0) = outputLabels[i];
@@ -829,18 +1056,13 @@ cv::Mat SegmentationEngine::applyModelProbabilities(const SegmentationClassifier
                                                     int rows,
                                                     int cols,
                                                     int classIndex) {
+  (void)cols;
   cv::Mat probs = model.predictProbabilities(featureStack);
   if (probs.empty() || classIndex < 0 || classIndex >= probs.cols) {
     return cv::Mat();
   }
-  cv::Mat channel(rows, cols, CV_32F);
-  for (int row = 0; row < rows; ++row) {
-    float* out = channel.ptr<float>(row);
-    for (int col = 0; col < cols; ++col) {
-      out[col] = probs.at<float>(row * cols + col, classIndex);
-    }
-  }
-  return channel;
+  cv::Mat oneClass = probs.col(classIndex).clone();
+  return oneClass.reshape(1, rows).clone();
 }
 
 cv::Mat SegmentationEngine::makeOverlay(const cv::Mat& image,
