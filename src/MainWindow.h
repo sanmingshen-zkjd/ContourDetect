@@ -13,6 +13,7 @@
 #include <QComboBox>
 #include <QPolygon>
 #include <QGroupBox>
+#include <QFutureWatcher>
 
 #include <opencv2/core.hpp>
 
@@ -62,6 +63,7 @@ private slots:
   void onLoadData();
   void onCreateNewClass();
   void onSettings();
+  void onExportRoiMacro();
   void onExportMask();
   void onBrushRadiusChanged(int value);
   void onClassSelectionChanged();
@@ -169,6 +171,7 @@ private:
   QPushButton* redoButton_ = nullptr;
   QPushButton* evaluateButton_ = nullptr;
   QPushButton* suggestButton_ = nullptr;
+  QPushButton* exportRoiMacroButton_ = nullptr;
   QListWidget* traceList_ = nullptr;
   QListWidget* projectList_ = nullptr;
   QGroupBox* traceGroup_ = nullptr;
@@ -209,4 +212,6 @@ private:
   cv::Mat importedTrainingSamples_;
   cv::Mat importedTrainingLabels_;
   QString importedTrainingSource_;
+  bool probabilityTaskRunning_ = false;
+  bool trainingTaskRunning_ = false;
 };

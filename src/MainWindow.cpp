@@ -15,6 +15,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QEventLoop>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -33,11 +34,13 @@
 #include <QLineEdit>
 #include <QDoubleSpinBox>
 #include <QDirIterator>
+#include <QtConcurrent>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <numeric>
 
@@ -373,6 +376,7 @@ void MainWindow::buildUi() {
   QPushButton* saveDataButton = new QPushButton(tr("Save data"), optionsGroup);
   QPushButton* createClassButton = new QPushButton(tr("Create new class"), optionsGroup);
   QPushButton* settingsButton = new QPushButton(tr("Settings"), optionsGroup);
+  exportRoiMacroButton_ = new QPushButton(tr("Export ROI macro"), optionsGroup);
   optionsLayout->addWidget(applyButton_);
   optionsLayout->addWidget(loadClassifierButton);
   optionsLayout->addWidget(saveClassifierButton);
@@ -380,6 +384,7 @@ void MainWindow::buildUi() {
   optionsLayout->addWidget(saveDataButton);
   optionsLayout->addWidget(createClassButton);
   optionsLayout->addWidget(settingsButton);
+  optionsLayout->addWidget(exportRoiMacroButton_);
   leftLayout->addWidget(optionsGroup);
 
   auto* brushGroup = new QGroupBox(tr("Brush / Slice"), leftPanel);
@@ -433,6 +438,7 @@ void MainWindow::buildUi() {
   connect(saveDataButton, &QPushButton::clicked, this, &MainWindow::onSaveData);
   connect(createClassButton, &QPushButton::clicked, this, &MainWindow::onCreateNewClass);
   connect(settingsButton, &QPushButton::clicked, this, &MainWindow::onSettings);
+  connect(exportRoiMacroButton_, &QPushButton::clicked, this, &MainWindow::onExportRoiMacro);
 
   auto* centerPanel = new QWidget(splitter);
   auto* centerLayout = new QVBoxLayout(centerPanel);
@@ -1690,10 +1696,14 @@ void MainWindow::onTrainClassifier() {
   if (!ensureImageLoaded(tr("training the classifier"))) {
     return;
   }
+  if (trainingTaskRunning_) {
+    return;
+  }
   trainingInProgress_ = true;
+  trainingTaskRunning_ = true;
   stopTrainingRequested_ = false;
   updateUiState();
-  QProgressDialog progress(tr("Training classifier..."), tr("Cancel"), 0, 6, this);
+  QProgressDialog progress(tr("Training classifier in background..."), tr("Cancel"), 0, 0, this);
   progress.setWindowModality(Qt::ApplicationModal);
   progress.setMinimumDuration(0);
   progress.setAutoClose(false);
@@ -1701,81 +1711,86 @@ void MainWindow::onTrainClassifier() {
   progress.show();
   QApplication::processEvents();
 
-  auto finishTrainingUi = [&]() {
-    progress.setValue(progress.maximum());
-    trainingInProgress_ = false;
-    updateUiState();
-  };
-
-  auto checkCanceled = [&]() {
-    stopTrainingRequested_ = stopTrainingRequested_ || progress.wasCanceled();
-    if (stopTrainingRequested_) {
-      finishTrainingUi();
-      logMessage(tr("Training cancelled."));
-      return true;
-    }
-    return false;
-  };
-
-  progress.setLabelText(tr("Computing image features..."));
   rebuildFeatureStack();
-  progress.setValue(1);
-  QApplication::processEvents();
-  if (checkCanceled()) {
-    return;
-  }
+  const cv::Mat features = featureStack_.clone();
+  const auto masks = cloneMaskVector(classMasks_);
+  const cv::Mat importedSamples = importedTrainingSamples_.clone();
+  const cv::Mat importedLabels = importedTrainingLabels_.clone();
+  const auto classesCount = static_cast<int>(classes_.size());
+  const SegmentationClassifierSettings settings = classifierSettings_;
+  std::atomic_bool cancelRequested{false};
 
-  cv::Mat allSamples;
-  cv::Mat allLabels;
-  auto appendTrainingSet = [&](const cv::Mat& samples, const cv::Mat& labels) {
-    if (samples.empty() || labels.empty()) return;
-    if (allSamples.empty()) allSamples = samples.clone();
-    else cv::vconcat(allSamples, samples, allSamples);
-    if (allLabels.empty()) allLabels = labels.clone();
-    else cv::vconcat(allLabels, labels, allLabels);
+  struct TrainingTaskResult {
+    bool canceled = false;
+    bool success = false;
+    SegmentationClassifier model;
+    SegmentationTrainingStats stats;
+    QString error;
   };
 
-  progress.setLabelText(tr("Gathering annotated training samples..."));
-  cv::Mat currentLabels;
-  cv::Mat currentSamples = SegmentationEngine::gatherSamples(featureStack_, classMasks_, &currentLabels, 12000, classifierSettings_.balanceClasses);
-  appendTrainingSet(currentSamples, currentLabels);
-  appendTrainingSet(importedTrainingSamples_, importedTrainingLabels_);
-  progress.setValue(2);
-  QApplication::processEvents();
-  if (checkCanceled()) {
-    return;
-  }
+  QFuture<TrainingTaskResult> future = QtConcurrent::run([features, masks, importedSamples, importedLabels, classesCount, settings, &cancelRequested]() {
+    TrainingTaskResult result;
+    if (cancelRequested.load()) {
+      result.canceled = true;
+      return result;
+    }
+    cv::Mat labels;
+    cv::Mat samples = SegmentationEngine::gatherSamples(features, masks, &labels, 12000, settings.balanceClasses);
+    if (!importedSamples.empty() && !importedLabels.empty()) {
+      if (samples.empty()) samples = importedSamples.clone();
+      else cv::vconcat(samples, importedSamples, samples);
+      if (labels.empty()) labels = importedLabels.clone();
+      else cv::vconcat(labels, importedLabels, labels);
+    }
+    if (samples.empty() || labels.empty()) {
+      result.error = QStringLiteral("no_samples");
+      return result;
+    }
+    if (cancelRequested.load()) {
+      result.canceled = true;
+      return result;
+    }
+    if (!result.model.train(samples, labels, classesCount, settings, &result.stats)) {
+      result.error = QStringLiteral("train_failed");
+      return result;
+    }
+    result.success = true;
+    return result;
+  });
 
-  if (allSamples.empty()) {
-    finishTrainingUi();
-    QMessageBox::information(this, tr("No annotations"), tr("Please paint at least one pixel for each class before training."));
-    return;
+  while (!future.isFinished()) {
+    QApplication::processEvents(QEventLoop::AllEvents, 30);
+    if (progress.wasCanceled()) {
+      cancelRequested.store(true);
+      stopTrainingRequested_ = true;
+    }
   }
-  progress.setLabelText(tr("Fitting classifier model..."));
-  progress.setValue(3);
-  QApplication::processEvents();
-  if (!model_.train(allSamples, allLabels, static_cast<int>(classes_.size()), classifierSettings_, &trainingStats_)) {
-    finishTrainingUi();
-    QMessageBox::warning(this, tr("Training failed"), tr("Training failed. Ensure every class has annotations."));
-    return;
-  }
-  if (checkCanceled()) {
-    return;
-  }
+  const TrainingTaskResult result = future.result();
+  progress.setValue(progress.maximum());
+  trainingInProgress_ = false;
+  trainingTaskRunning_ = false;
+  updateUiState();
 
-  progress.setLabelText(tr("Applying classifier to current slice..."));
-  progress.setValue(4);
-  QApplication::processEvents();
+  if (result.canceled || stopTrainingRequested_) {
+    logMessage(tr("Training cancelled."));
+    return;
+  }
+  if (!result.success) {
+    if (result.error == QStringLiteral("no_samples")) {
+      QMessageBox::information(this, tr("No annotations"), tr("Please paint at least one pixel for each class before training."));
+    } else {
+      QMessageBox::warning(this, tr("Training failed"), tr("Training failed. Ensure every class has annotations."));
+    }
+    return;
+  }
+  model_ = result.model;
+  trainingStats_ = result.stats;
   labelResult_ = SegmentationEngine::applyModelLabels(model_, featureStack_, originalImage_.rows, originalImage_.cols);
   if (!sliceLabelResults_.empty()) {
     sliceLabelResults_[currentSliceIndex_] = labelResult_.clone();
   }
-  progress.setLabelText(tr("Updating probability preview..."));
-  progress.setValue(5);
-  QApplication::processEvents();
   updateProbabilityView(false);
   updateViewer();
-  finishTrainingUi();
   logMessage(tr("Trained classifier with %1 samples across %2 classes.").arg(trainingStats_.sampleCount).arg(trainingStats_.classCount));
 }
 
@@ -1880,13 +1895,66 @@ void MainWindow::onGetProbability() {
   if (!ensureImageLoaded(tr("getting probability")) || !ensureModelReady(tr("getting probability"))) {
     return;
   }
+  if (probabilityTaskRunning_) {
+    return;
+  }
   if (!model_.supportsProbability()) {
     QMessageBox::information(this, tr("Probability unavailable"), tr("The current classifier does not expose probabilities for this view."));
     return;
   }
-  if (!updateProbabilityView(true, tr("Computing probability map..."))) {
+  probabilityTaskRunning_ = true;
+  const int cls = probabilityCombo_->currentData().toInt();
+  const cv::Mat features = featureStack_.clone();
+  const int rows = originalImage_.rows;
+  const int cols = originalImage_.cols;
+  const SegmentationClassifier modelCopy = model_;
+  std::atomic_bool cancelRequested{false};
+
+  QProgressDialog progress(tr("Computing probability map in background..."), tr("Cancel"), 0, 0, this);
+  progress.setWindowModality(Qt::ApplicationModal);
+  progress.setMinimumDuration(0);
+  progress.setAutoClose(false);
+  progress.show();
+  QApplication::processEvents();
+
+  QFuture<cv::Mat> future = QtConcurrent::run([modelCopy, features, rows, cols, cls, &cancelRequested]() {
+    if (cancelRequested.load()) return cv::Mat();
+    constexpr int kBatchSize = 4096;
+    cv::Mat probabilities;
+    for (int start = 0; start < features.rows; start += kBatchSize) {
+      if (cancelRequested.load()) return cv::Mat();
+      const int end = std::min(features.rows, start + kBatchSize);
+      const cv::Mat batch = modelCopy.predictProbabilities(features.rowRange(start, end));
+      if (batch.empty()) return cv::Mat();
+      if (probabilities.empty()) probabilities = cv::Mat::zeros(features.rows, batch.cols, CV_32F);
+      batch.copyTo(probabilities.rowRange(start, end));
+    }
+    if (probabilities.empty() || cls < 0 || cls >= probabilities.cols) return cv::Mat();
+    cv::Mat channel(rows, cols, CV_32F);
+    for (int row = 0; row < rows; ++row) {
+      float* out = channel.ptr<float>(row);
+      for (int col = 0; col < cols; ++col) {
+        out[col] = probabilities.at<float>(row * cols + col, cls);
+      }
+    }
+    return channel;
+  });
+
+  while (!future.isFinished()) {
+    QApplication::processEvents(QEventLoop::AllEvents, 30);
+    if (progress.wasCanceled()) {
+      cancelRequested.store(true);
+    }
+  }
+  probabilityTaskRunning_ = false;
+  progress.setValue(progress.maximum());
+  probabilityImage_ = future.result();
+  if (probabilityImage_.empty()) {
     QMessageBox::information(this, tr("Probability unavailable"), tr("Probability output is not available for the current image/classifier combination."));
     return;
+  }
+  if (!sliceProbabilityResults_.empty() && currentSliceIndex_ < static_cast<int>(sliceProbabilityResults_.size())) {
+    sliceProbabilityResults_[currentSliceIndex_] = probabilityImage_.clone();
   }
   QDialog dialog(this);
   dialog.setWindowTitle(tr("Probability map"));
@@ -1971,6 +2039,9 @@ void MainWindow::onEvaluateModel() {
     }
   }
   summary += "\nMetrics:\n";
+  QVector<double> classTicks;
+  QVector<double> classF1;
+  QVector<QString> classNames;
   for (int cls = 0; cls < static_cast<int>(classes_.size()); ++cls) {
     double tp = confusion[cls][cls];
     double fp = 0.0;
@@ -1984,6 +2055,9 @@ void MainWindow::onEvaluateModel() {
     const double precision = (tp + fp) > 0.0 ? tp / (tp + fp) : 0.0;
     const double recall = (tp + fn) > 0.0 ? tp / (tp + fn) : 0.0;
     const double f1 = (precision + recall) > 0.0 ? (2.0 * precision * recall) / (precision + recall) : 0.0;
+    classTicks.push_back(cls + 1);
+    classF1.push_back(f1);
+    classNames.push_back(classes_[cls].name);
     summary += tr("- %1: Precision=%2  Recall=%3  F1=%4\n")
                    .arg(classes_[cls].name)
                    .arg(QString::number(precision, 'f', 3))
@@ -2019,6 +2093,22 @@ void MainWindow::onEvaluateModel() {
   text->setReadOnly(true);
   text->setPlainText(summary);
   layout->addWidget(text, 1);
+  if (!classF1.isEmpty()) {
+    auto* f1Plot = new QCustomPlot(&dialog);
+    f1Plot->addGraph();
+    f1Plot->graph(0)->setLineStyle(QCPGraph::lsNone);
+    f1Plot->graph(0)->setScatterStyle(QCPScatterStyle(QCPScatterStyle::ssCircle, 7));
+    f1Plot->graph(0)->setData(classTicks, classF1);
+    f1Plot->xAxis->setAutoTicks(false);
+    f1Plot->xAxis->setAutoTickLabels(false);
+    f1Plot->xAxis->setTickVector(classTicks);
+    f1Plot->xAxis->setTickVectorLabels(classNames);
+    f1Plot->xAxis->setLabel(tr("Class"));
+    f1Plot->yAxis->setLabel(tr("F1 score"));
+    f1Plot->yAxis->setRange(0, 1);
+    f1Plot->replot();
+    layout->addWidget(f1Plot, 1);
+  }
   if (!metrics.roc.isEmpty()) {
     auto* plot = new QCustomPlot(&dialog);
     plot->legend->setVisible(true);
@@ -2178,6 +2268,19 @@ void MainWindow::onSettings() {
   QDialog dialog(this);
   dialog.setWindowTitle(tr("Feature and classifier settings"));
   auto* layout = new QVBoxLayout(&dialog);
+  auto* presetRow = new QHBoxLayout();
+  auto* presetLabel = new QLabel(tr("Feature preset"), &dialog);
+  auto* presetCombo = new QComboBox(&dialog);
+  presetCombo->addItem(tr("Custom"));
+  presetCombo->addItem(tr("TWS-like 2D basic"));
+  presetCombo->addItem(tr("TWS-like edges"));
+  presetCombo->addItem(tr("TWS-like texture"));
+  presetCombo->addItem(tr("TWS-like dense"));
+  auto* presetApply = new QPushButton(tr("Apply preset"), &dialog);
+  presetRow->addWidget(presetLabel);
+  presetRow->addWidget(presetCombo, 1);
+  presetRow->addWidget(presetApply);
+  layout->addLayout(presetRow);
   auto* featureGroup = new QGroupBox(tr("Feature extraction"), &dialog);
   auto* featureLayout = new QVBoxLayout(featureGroup);
   auto* intensity = new QCheckBox(tr("Intensity"), &dialog);
@@ -2237,6 +2340,46 @@ void MainWindow::onSettings() {
                               membrane, channelRatios, xpos, ypos}) {
     featureLayout->addWidget(checkbox);
   }
+  connect(presetApply, &QPushButton::clicked, &dialog, [=]() {
+    const int preset = presetCombo->currentIndex();
+    if (preset <= 0) return;
+    for (QCheckBox* checkbox : {intensity, gaussian3, gaussian7, gaussian15, differenceOfGaussians, minimum, maximum, median, bilateral, gradient, laplacian,
+                                laplacianOfGaussian, hessian, localMean, localStd, localVariance, entropy, texture, clahe, canny, structureTensor, gabor,
+                                membrane, channelRatios, xpos, ypos}) {
+      checkbox->setChecked(false);
+    }
+    if (preset == 1) {
+      intensity->setChecked(true);
+      gaussian3->setChecked(true);
+      gaussian7->setChecked(true);
+      localMean->setChecked(true);
+      localStd->setChecked(true);
+      xpos->setChecked(true);
+      ypos->setChecked(true);
+    } else if (preset == 2) {
+      intensity->setChecked(true);
+      gaussian3->setChecked(true);
+      gradient->setChecked(true);
+      laplacian->setChecked(true);
+      laplacianOfGaussian->setChecked(true);
+      canny->setChecked(true);
+      structureTensor->setChecked(true);
+    } else if (preset == 3) {
+      intensity->setChecked(true);
+      median->setChecked(true);
+      bilateral->setChecked(true);
+      entropy->setChecked(true);
+      texture->setChecked(true);
+      gabor->setChecked(true);
+      membrane->setChecked(true);
+    } else if (preset == 4) {
+      for (QCheckBox* checkbox : {intensity, gaussian3, gaussian7, gaussian15, differenceOfGaussians, minimum, maximum, median, bilateral, gradient, laplacian,
+                                  laplacianOfGaussian, hessian, localMean, localStd, localVariance, entropy, texture, clahe, canny, structureTensor, gabor,
+                                  membrane, channelRatios, xpos, ypos}) {
+        checkbox->setChecked(true);
+      }
+    }
+  });
 
   auto* classifierGroup = new QGroupBox(tr("Classifier parameters"), &dialog);
   auto* classifierLayout = new QFormLayout(classifierGroup);
@@ -2343,6 +2486,42 @@ void MainWindow::onExportMask() {
     return;
   }
   logMessage(tr("Exported label mask to %1.").arg(path));
+}
+
+void MainWindow::onExportRoiMacro() {
+  if (classTraceRegions_.empty()) {
+    QMessageBox::information(this, tr("No ROIs"), tr("No ROI traces are available to export."));
+    return;
+  }
+  const QString path = QFileDialog::getSaveFileName(this, tr("Export ROI macro"), QString(), tr("ImageJ Macro (*.ijm)"));
+  if (path.isEmpty()) return;
+  QFile file(path);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+    QMessageBox::warning(this, tr("Export failed"), tr("Failed to write macro file."));
+    return;
+  }
+  QTextStream out(&file);
+  out << "// Auto-generated ROI macro from QtTrainableSegmentation\n";
+  out << "roiManager(\"reset\");\n";
+  for (int cls = 0; cls < static_cast<int>(classTraceRegions_.size()) && cls < static_cast<int>(classes_.size()); ++cls) {
+    for (int roiIndex = 0; roiIndex < static_cast<int>(classTraceRegions_[cls].size()); ++roiIndex) {
+      const TraceRegion& region = classTraceRegions_[cls][roiIndex];
+      if (region.polygon.size() < 3) continue;
+      QStringList xs;
+      QStringList ys;
+      xs.reserve(region.polygon.size());
+      ys.reserve(region.polygon.size());
+      for (const QPoint& point : region.polygon) {
+        xs << QString::number(point.x());
+        ys << QString::number(point.y());
+      }
+      out << "makeSelection(\"polygon\", newArray(" << xs.join(",") << "), newArray(" << ys.join(",") << "));\n";
+      out << "roiManager(\"Add\");\n";
+      out << "roiManager(\"Select\", roiManager(\"count\")-1);\n";
+      out << "roiManager(\"Rename\", \"" << classes_[cls].name << "_ROI_" << (roiIndex + 1) << "\");\n";
+    }
+  }
+  logMessage(tr("Exported ROI macro to %1.").arg(path));
 }
 
 void MainWindow::onBrushRadiusChanged(int value) {

@@ -7,8 +7,8 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(QT NAMES Qt6 Qt5 COMPONENTS Widgets PrintSupport Network REQUIRED)
-find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Widgets PrintSupport Network REQUIRED)
+find_package(QT NAMES Qt6 Qt5 COMPONENTS Widgets PrintSupport Network Concurrent REQUIRED)
+find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Widgets PrintSupport Network Concurrent REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs ml dnn)
 
 add_executable(QtTrainableSegmentation
@@ -171,6 +171,7 @@ target_link_libraries(QtTrainableSegmentation PRIVATE
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::PrintSupport
   Qt${QT_VERSION_MAJOR}::Network
+  Qt${QT_VERSION_MAJOR}::Concurrent
   ${OPENCV_LINK_LIBS}
 )
 
