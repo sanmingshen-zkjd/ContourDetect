@@ -2195,7 +2195,9 @@ void MainWindow::onSaveClassifier() {
   const QString path = QFileDialog::getSaveFileName(this, tr("Save classifier"), QString(), tr("Classifier (*.yml *.yaml)"));
   if (path.isEmpty()) return;
   if (!model_.save(path, classes_, featureSettings_, classifierSettings_, trainingStats_)) {
-    QMessageBox::warning(this, tr("Save failed"), tr("Failed to save classifier."));
+    QMessageBox::warning(this, tr("Save failed"),
+                         tr("Failed to save classifier to:\n%1\n\nPlease check path permissions and whether the path contains unsupported characters.")
+                             .arg(path));
     return;
   }
   logMessage(tr("Saved classifier to %1.").arg(path));
@@ -2204,13 +2206,19 @@ void MainWindow::onSaveClassifier() {
 void MainWindow::onLoadClassifier() {
   const QString path = QFileDialog::getOpenFileName(this, tr("Load classifier"), QString(), tr("Classifier (*.yml *.yaml)"));
   if (path.isEmpty()) return;
+  if (!QFile::exists(path)) {
+    QMessageBox::warning(this, tr("Load failed"), tr("Classifier file does not exist:\n%1").arg(path));
+    return;
+  }
   std::vector<SegmentationClassInfo> loadedClasses;
   SegmentationFeatureSettings settings;
   SegmentationClassifierSettings classifierSettings;
   SegmentationTrainingStats stats;
   SegmentationClassifier loadedModel;
   if (!loadedModel.load(path, &loadedClasses, &settings, &classifierSettings, &stats)) {
-    QMessageBox::warning(this, tr("Load failed"), tr("Failed to load classifier."));
+    QMessageBox::warning(this, tr("Load failed"),
+                         tr("Failed to load classifier:\n%1\n\nIf this model uses a sidecar file, ensure \"%2\" exists beside the metadata file.")
+                             .arg(path, path + ".model.yml"));
     return;
   }
   model_ = loadedModel;

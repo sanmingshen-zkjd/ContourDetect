@@ -1,5 +1,9 @@
 #include "SegmentationEngine.h"
 
+#include <QFile>
+#include <QFileInfo>
+#include <QDir>
+
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/core/persistence.hpp>
@@ -89,6 +93,10 @@ cv::Mat computeMembraneResponse(const cv::Mat& gray) {
     cv::max(response, magnitude, response);
   }
   return response;
+}
+
+std::string cvPath(const QString& path) {
+  return QFile::encodeName(path).toStdString();
 }
 
 QString classifierKindToString(SegmentationClassifierSettings::Kind kind) {
@@ -517,7 +525,7 @@ bool SegmentationClassifier::save(const QString& path,
     return false;
   }
 
-  cv::FileStorage fs(path.toStdString(), cv::FileStorage::WRITE | cv::FileStorage::FORMAT_YAML);
+  cv::FileStorage fs(cvPath(path), cv::FileStorage::WRITE | cv::FileStorage::FORMAT_YAML);
   if (!fs.isOpened()) {
     return false;
   }
@@ -588,13 +596,13 @@ bool SegmentationClassifier::save(const QString& path,
     const QString sidecar = sidecarModelPath(path);
     fs << "opencv_sidecar_model" << sidecar.toStdString();
     if (kind_ == SegmentationClassifierSettings::RandomForest) {
-      randomForest_->save(sidecar.toStdString());
+      randomForest_->save(cvPath(sidecar));
     } else if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
-      svm_->save(sidecar.toStdString());
+      svm_->save(cvPath(sidecar));
     } else if (kind_ == SegmentationClassifierSettings::KNearestNeighbors) {
-      knn_->save(sidecar.toStdString());
+      knn_->save(cvPath(sidecar));
     } else if (kind_ == SegmentationClassifierSettings::LogisticRegression) {
-      logisticRegression_->save(sidecar.toStdString());
+      logisticRegression_->save(cvPath(sidecar));
     }
   }
   return true;
@@ -606,7 +614,7 @@ bool SegmentationClassifier::load(const QString& path,
                                   SegmentationClassifierSettings* classifierSettings,
                                   SegmentationTrainingStats* stats) {
   clear();
-  cv::FileStorage fs(path.toStdString(), cv::FileStorage::READ);
+  cv::FileStorage fs(cvPath(path), cv::FileStorage::READ);
   if (!fs.isOpened()) {
     return false;
   }
@@ -695,24 +703,27 @@ bool SegmentationClassifier::load(const QString& path,
     return gnbModel_.read(legacyOrNestedNode);
   }
 
-  const QString sidecar = QString::fromStdString(static_cast<std::string>(fs["opencv_sidecar_model"]));
+  QString sidecar = QString::fromStdString(static_cast<std::string>(fs["opencv_sidecar_model"]));
   if (sidecar.isEmpty()) {
     return false;
   }
+  if (QFileInfo(sidecar).isRelative()) {
+    sidecar = QFileInfo(path).dir().filePath(sidecar);
+  }
   if (kind_ == SegmentationClassifierSettings::RandomForest) {
-    randomForest_ = cv::Algorithm::load<cv::ml::RTrees>(sidecar.toStdString());
+    randomForest_ = cv::Algorithm::load<cv::ml::RTrees>(cvPath(sidecar));
     return randomForest_ && !randomForest_->empty();
   }
   if (kind_ == SegmentationClassifierSettings::SupportVectorMachine) {
-    svm_ = cv::Algorithm::load<cv::ml::SVM>(sidecar.toStdString());
+    svm_ = cv::Algorithm::load<cv::ml::SVM>(cvPath(sidecar));
     return svm_ && !svm_->empty();
   }
   if (kind_ == SegmentationClassifierSettings::KNearestNeighbors) {
-    knn_ = cv::Algorithm::load<cv::ml::KNearest>(sidecar.toStdString());
+    knn_ = cv::Algorithm::load<cv::ml::KNearest>(cvPath(sidecar));
     return knn_ && !knn_->empty();
   }
   if (kind_ == SegmentationClassifierSettings::LogisticRegression) {
-    logisticRegression_ = cv::Algorithm::load<cv::ml::LogisticRegression>(sidecar.toStdString());
+    logisticRegression_ = cv::Algorithm::load<cv::ml::LogisticRegression>(cvPath(sidecar));
     return logisticRegression_ && !logisticRegression_->empty();
   }
   return false;
