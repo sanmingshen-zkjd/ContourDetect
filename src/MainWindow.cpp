@@ -820,20 +820,39 @@ void MainWindow::repaintAnnotationPreview() {
   painter.setRenderHint(QPainter::Antialiasing, false);
   for (int cls = 0; cls < static_cast<int>(classMasks_.size()) && cls < static_cast<int>(classes_.size()); ++cls) {
     if (classMasks_[cls].empty()) continue;
+    const bool outlineOnly = (classes_[cls].name == tr("Background object"));
     QImage maskImg(classMasks_[cls].data, classMasks_[cls].cols, classMasks_[cls].rows, static_cast<int>(classMasks_[cls].step), QImage::Format_Grayscale8);
     QImage colored(maskImg.size(), QImage::Format_ARGB32_Premultiplied);
     colored.fill(Qt::transparent);
-    for (int y = 0; y < maskImg.height(); ++y) {
-      const uchar* src = maskImg.constScanLine(y);
-      QRgb* dst = reinterpret_cast<QRgb*>(colored.scanLine(y));
-      for (int x = 0; x < maskImg.width(); ++x) {
-        if (src[x] > 0) {
-          const QColor c = classes_[cls].color;
-          dst[x] = qRgba(c.red(), c.green(), c.blue(), 140);
+    if (!outlineOnly) {
+      for (int y = 0; y < maskImg.height(); ++y) {
+        const uchar* src = maskImg.constScanLine(y);
+        QRgb* dst = reinterpret_cast<QRgb*>(colored.scanLine(y));
+        for (int x = 0; x < maskImg.width(); ++x) {
+          if (src[x] > 0) {
+            const QColor c = classes_[cls].color;
+            dst[x] = qRgba(c.red(), c.green(), c.blue(), 140);
+          }
         }
       }
     }
     painter.drawImage(0, 0, colored);
+    if (outlineOnly) {
+      std::vector<std::vector<cv::Point>> contours;
+      cv::findContours(classMasks_[cls].clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+      QPen pen(classes_[cls].color);
+      pen.setWidth(2);
+      painter.setPen(pen);
+      for (const auto& contour : contours) {
+        if (contour.empty()) continue;
+        QPolygon polygon;
+        polygon.reserve(static_cast<int>(contour.size()));
+        for (const auto& pt : contour) {
+          polygon << QPoint(pt.x, pt.y);
+        }
+        painter.drawPolygon(polygon);
+      }
+    }
   }
   painter.end();
   view_->setAnnotationPreview(annotation);
